@@ -17,6 +17,33 @@ from .settings import SettingsStore
 
 SLASH_COMMANDS: list[str] = ["/quit", "/exit", "/help", "/status", "/clear", "/model", "/reasoning"]
 
+
+def _make_left_markdown():
+    """Create a Markdown subclass that left-aligns headings instead of centering."""
+    from rich import box as _box
+    from rich.markdown import Markdown as _RichMarkdown, Heading as _RichHeading
+    from rich.panel import Panel as _Panel
+    from rich.text import Text as _Text
+
+    class _LeftHeading(_RichHeading):
+        def __rich_console__(self, console, options):
+            text = self.text
+            text.justify = "left"
+            if self.tag == "h1":
+                yield _Panel(text, box=_box.HEAVY, style="markdown.h1.border")
+            else:
+                if self.tag == "h2":
+                    yield _Text("")
+                yield text
+
+    class _LeftMarkdown(_RichMarkdown):
+        elements = {**_RichMarkdown.elements, "heading_open": _LeftHeading}
+
+    return _LeftMarkdown
+
+
+_LeftMarkdown = _make_left_markdown()
+
 _PLANT_LEFT = [
     " .oOo.  ",
     "oO.|.Oo ",
@@ -758,7 +785,7 @@ class RichREPL:
             self._flush_step()
 
             self.console.print()
-            self.console.print(Markdown(answer), justify="left")
+            self.console.print(_LeftMarkdown(answer), justify="left")
 
             # Token usage
             token_str = _format_session_tokens(self.ctx.runtime.engine.session_tokens)
