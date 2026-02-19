@@ -139,6 +139,7 @@ class RLMEngine:
             self.system_prompt = build_system_prompt(
                 self.config.recursive,
                 acceptance_criteria=self.config.acceptance_criteria,
+                demo=self.config.demo,
             )
         ac = self.config.acceptance_criteria
         tool_defs = get_tool_definitions(include_subtask=self.config.recursive, include_acceptance_criteria=ac)

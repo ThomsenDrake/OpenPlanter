@@ -44,90 +44,6 @@ class DemoCensorPathTests(unittest.TestCase):
         self.assertEqual(len(text), len(result))
 
 
-class DemoCensorEntityTests(unittest.TestCase):
-    """Entity name censoring via regex."""
-
-    def test_multi_word_proper_nouns_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        text = "Contact John Smith about this."
-        result = c.censor_text(text)
-        self.assertNotIn("John Smith", result)
-        self.assertIn("\u2588" * len("John Smith"), result)
-
-    def test_titled_name_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        text = "See Dr. Smith for details."
-        result = c.censor_text(text)
-        self.assertNotIn("Dr. Smith", result)
-
-    def test_three_word_entity_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        text = "Visit Boston Medical Center today."
-        result = c.censor_text(text)
-        self.assertNotIn("Boston Medical Center", result)
-
-    def test_same_length_entity_replacement(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        entity = "John Smith"
-        text = f"Hi {entity}!"
-        result = c.censor_text(text)
-        self.assertEqual(len(text), len(result))
-
-
-class DemoCensorNewlineTests(unittest.TestCase):
-    """Regex must not match across newlines."""
-
-    def test_capitalized_words_across_newline_not_merged(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        # "Oo" alone on each line shouldn't form a single cross-line match
-        text = "end Oo\nOo start"
-        result = c.censor_text(text)
-        # The newline must survive — lines must not be merged
-        self.assertIn("\n", result)
-        self.assertEqual(result.count("\n"), text.count("\n"))
-
-    def test_splash_art_preserved(self) -> None:
-        from agent.tui import SPLASH_ART
-        ws = Path("/Users/testuser/Documents/TestProject")
-        c = DemoCensor(ws)
-        result = c.censor_text(SPLASH_ART)
-        # Only "testuser" should be censored; structure (newlines) must be intact
-        self.assertEqual(SPLASH_ART.count("\n"), result.count("\n"))
-
-
-class DemoCensorWhitelistTests(unittest.TestCase):
-    """Whitelisted tech terms should NOT be censored."""
-
-    def test_python_not_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        # "Machine Learning" matches multi-cap but is whitelisted
-        text = "Use Machine Learning techniques."
-        result = c.censor_text(text)
-        self.assertIn("Machine Learning", result)
-
-    def test_month_not_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        # Months are 1 word so they wouldn't match multi-cap anyway,
-        # but let's verify no false positive with "January February"
-        text = "Stack Overflow has answers."
-        result = c.censor_text(text)
-        self.assertIn("Stack Overflow", result)
-
-    def test_visual_studio_not_censored(self) -> None:
-        ws = Path("/tmp/Proj")
-        c = DemoCensor(ws)
-        text = "Open Visual Studio for editing."
-        result = c.censor_text(text)
-        self.assertIn("Visual Studio", result)
-
-
 class DemoCensorEdgeCases(unittest.TestCase):
     """Empty and plain text edge cases."""
 
@@ -136,11 +52,29 @@ class DemoCensorEdgeCases(unittest.TestCase):
         c = DemoCensor(ws)
         self.assertEqual(c.censor_text(""), "")
 
-    def test_no_entities_passes_through(self) -> None:
+    def test_no_match_passes_through(self) -> None:
         ws = Path("/tmp/Proj")
         c = DemoCensor(ws)
-        text = "this is all lowercase and has no names"
+        text = "this is all lowercase and has no path segments"
         self.assertEqual(c.censor_text(text), text)
+
+    def test_entity_names_not_censored_by_censor_text(self) -> None:
+        """Entity censoring is handled by the prompt, not DemoCensor."""
+        ws = Path("/tmp/Proj")
+        c = DemoCensor(ws)
+        text = "Contact John Smith at Boston Medical Center."
+        result = c.censor_text(text)
+        # Entity names pass through — the model is instructed to censor them
+        self.assertIn("John Smith", result)
+        self.assertIn("Boston Medical Center", result)
+
+    def test_splash_art_preserved(self) -> None:
+        from agent.tui import SPLASH_ART
+        ws = Path("/Users/testuser/Documents/TestProject")
+        c = DemoCensor(ws)
+        result = c.censor_text(SPLASH_ART)
+        # Structure (newlines) must be intact
+        self.assertEqual(SPLASH_ART.count("\n"), result.count("\n"))
 
 
 class DemoCensorRichTextTests(unittest.TestCase):
@@ -215,6 +149,21 @@ class DemoRenderHookTests(unittest.TestCase):
         obj = {"arbitrary": "object"}
         results = hook.process_renderables([obj])
         self.assertEqual(results, [obj])
+
+
+class DemoPromptTests(unittest.TestCase):
+    """Demo mode adds entity-censoring instruction to the system prompt."""
+
+    def test_demo_section_included_when_enabled(self) -> None:
+        from agent.prompts import build_system_prompt
+        prompt = build_system_prompt(recursive=False, demo=True)
+        self.assertIn("Demo Mode", prompt)
+        self.assertIn("censor", prompt.lower())
+
+    def test_demo_section_absent_when_disabled(self) -> None:
+        from agent.prompts import build_system_prompt
+        prompt = build_system_prompt(recursive=False, demo=False)
+        self.assertNotIn("Demo Mode", prompt)
 
 
 if __name__ == "__main__":

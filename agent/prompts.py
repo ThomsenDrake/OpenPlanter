@@ -322,9 +322,22 @@ BAD criteria (not independently checkable):
 """
 
 
+DEMO_SECTION = """
+
+## Demo Mode (ACTIVE)
+
+You are running in demo mode. You MUST censor all real entity names (people,
+organizations, locations) in your final answers and tool outputs by replacing
+them with same-length blocks of █ characters.  For example "John Smith" becomes
+"██████████".  Do NOT censor generic technical terms, months, days, or
+programming language names.
+"""
+
+
 def build_system_prompt(
     recursive: bool,
     acceptance_criteria: bool = False,
+    demo: bool = False,
 ) -> str:
     """Assemble the system prompt, including recursion sections only when enabled."""
     prompt = SYSTEM_PROMPT_BASE
@@ -332,4 +345,6 @@ def build_system_prompt(
         prompt += RECURSIVE_SECTION
     if acceptance_criteria:
         prompt += ACCEPTANCE_CRITERIA_SECTION
+    if demo:
+        prompt += DEMO_SECTION
     return prompt

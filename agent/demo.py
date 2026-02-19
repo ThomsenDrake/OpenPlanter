@@ -1,47 +1,17 @@
-"""Demo mode: censor entity names and workspace path segments in TUI output.
+"""Demo mode: censor workspace path segments in TUI output.
 
 Censoring is UI-only -- the agent's internal state is unaffected.  Block
 characters (``\u2588``) replace sensitive text at the same length so Rich
 ``Text`` style spans are preserved.
+
+Entity-name censoring is handled by a prompt instruction (see prompts.py)
+rather than regex post-processing.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Any, Callable, Sequence
-
-# ---------------------------------------------------------------------------
-# Entity detection regexes
-# ---------------------------------------------------------------------------
-
-# 2+ consecutive capitalised words: "John Smith", "Boston Medical Center"
-# Use [ \t]+ (not \s+) to avoid matching across newlines.
-_RE_MULTI_CAP = re.compile(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)+)\b")
-
-# Title + capitalised name: "Dr. Smith", "Mayor Walsh", "Sen. Warren"
-_RE_TITLED = re.compile(
-    r"\b((?:Dr|Mr|Mrs|Ms|Prof|Rev|Sen|Rep|Gov|Mayor|Judge|Chief|Officer|Det|Sgt|Lt|Cpt|Cmdr|Supt)"
-    r"\.?[ \t]+[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)*)\b"
-)
-
-# Terms that look like entities but are actually tech/UI labels.
-_ENTITY_WHITELIST: frozenset[str] = frozenset({
-    # Months / days
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-    # Common tech terms
-    "Python", "Java", "JavaScript", "TypeScript", "Visual Studio",
-    "Open Source", "Machine Learning", "Deep Learning",
-    "Natural Language", "Large Language", "Artificial Intelligence",
-    "Stack Overflow", "Pull Request", "Code Review",
-    "Unit Test", "Test Case", "Test Suite",
-    # TUI / OpenPlanter labels
-    "Step", "Provider", "Model", "Reasoning", "Workspace", "Session",
-    "Token", "Tokens", "Type", "Commands",
-    "Open Planter", "Rich Text",
-})
+from typing import Any, Sequence
 
 # Generic path components that should NOT be censored.
 _GENERIC_PATH_PARTS: frozenset[str] = frozenset({
@@ -85,17 +55,9 @@ class DemoCensor:
     # -- public API ----------------------------------------------------------
 
     def censor_text(self, text: str) -> str:
-        """Apply workspace-path replacements and entity-name censoring."""
-        # 1. Literal path-segment replacements
+        """Apply workspace-path segment replacements."""
         for original, replacement in self._replacements:
             text = text.replace(original, replacement)
-
-        # 2. Titled names (Dr. Smith) — run before multi-cap so titles win
-        text = _RE_TITLED.sub(self._replace_entity, text)
-
-        # 3. Multi-word capitalised names
-        text = _RE_MULTI_CAP.sub(self._replace_entity, text)
-
         return text
 
     def censor_rich_text(self, rich_text: Any) -> Any:
@@ -104,24 +66,8 @@ class DemoCensor:
         original = rich_text.plain
         censored = self.censor_text(original)
         if censored != original:
-            # Assign through the documented .plain setter which preserves spans
-            # when the new string is the same length.
             rich_text.plain = censored
         return rich_text
-
-    # -- internal ------------------------------------------------------------
-
-    @staticmethod
-    def _replace_entity(m: re.Match[str]) -> str:
-        matched = m.group(0)
-        # Exact whitelist hit
-        if matched in _ENTITY_WHITELIST:
-            return matched
-        # If a whitelisted term appears as a sub-phrase, pass through
-        for term in _ENTITY_WHITELIST:
-            if term in matched:
-                return matched
-        return "\u2588" * len(matched)
 
 
 # ---------------------------------------------------------------------------
