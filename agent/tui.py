@@ -4,11 +4,12 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import AgentConfig
-from .engine import RLMEngine
+from .engine import RLMEngine, _MODEL_CONTEXT_WINDOWS, _DEFAULT_CONTEXT_WINDOW
 from .model import EchoFallbackModel, ModelError
 from .runtime import SessionRuntime
 from .settings import SettingsStore
@@ -657,8 +658,16 @@ class RichREPL:
 
         from rich.text import Text
 
+        # Timestamp
+        ts = datetime.now().strftime("%H:%M:%S")
+
+        # Context usage: input_tokens is how many tokens were in context this turn
+        model_name = getattr(self.ctx.runtime.engine.model, "model", "(unknown)")
+        context_window = _MODEL_CONTEXT_WINDOWS.get(model_name, _DEFAULT_CONTEXT_WINDOW)
+        ctx_str = f"{_format_token_count(step.input_tokens)}/{_format_token_count(context_window)}"
+
         # Step header rule
-        left = f" Step {step.step} "
+        left = f" {ts}  Step {step.step} "
         right_parts = []
         if step.depth > 0:
             right_parts.append(f"depth {step.depth}")
@@ -668,6 +677,7 @@ class RichREPL:
             right_parts.append(
                 f"{_format_token_count(step.input_tokens)}in/{_format_token_count(step.output_tokens)}out"
             )
+        right_parts.append(f"[{ctx_str}]")
         right = " | ".join(right_parts) if right_parts else ""
         self.console.rule(f"[bold]{left}[/bold][dim]{right}[/dim]", style="cyan")
 
