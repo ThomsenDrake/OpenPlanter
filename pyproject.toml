@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openplanter-agent"
+version = "0.1.0"
+description = "A recursive-language-model coding agent with a terminal UI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.scripts]
+openplanter-agent = "agent.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
