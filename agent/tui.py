@@ -755,6 +755,7 @@ class RichREPL:
         from rich.markdown import Markdown
         from rich.text import Text
 
+        self.console.clear()
         self.console.print(Text(SPLASH_ART, style="bold cyan"))
 
         # Install demo render hook AFTER splash art so the header is uncensored.
