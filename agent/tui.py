@@ -15,21 +15,21 @@ from .settings import SettingsStore
 SLASH_COMMANDS: list[str] = ["/quit", "/exit", "/help", "/status", "/clear", "/model", "/reasoning"]
 
 _PLANT_LEFT = [
-    "     **  ",
-    " *  / \\  ",
-    "/|\\ / |  ",
-    "/***\\::  ",
-    " |----| ",
-    "  \\__/  ",
+    " .oOo.  ",
+    "oO.|.Oo ",
+    "Oo.|.oO ",
+    "  .|.   ",
+    "[=====] ",
+    " \\___/  ",
 ]
 
 _PLANT_RIGHT = [
-    "  **     ",
-    "  / \\  * ",
-    "  | \\ /|\\",
-    "  ::/***\\",
-    "  |----| ",
-    "   \\__/  ",
+    "  .oOo. ",
+    " oO.|.Oo",
+    " Oo.|.oO",
+    "   .|.  ",
+    " [=====]",
+    "  \\___/ ",
 ]
 
 
