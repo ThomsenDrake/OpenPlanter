@@ -474,8 +474,9 @@ def _extract_key_arg(name: str, arguments: dict[str, Any]) -> str:
 class _ThinkingDisplay:
     """Manages a Rich Live display showing a spinner + streaming thinking text."""
 
-    def __init__(self, console: Any) -> None:
+    def __init__(self, console: Any, censor_fn: Callable[[str], str] | None = None) -> None:
         self._console = console
+        self._censor_fn = censor_fn
         self._lock = threading.Lock()
         self._thinking_buf: str = ""
         self._start_time: float = 0.0
@@ -531,6 +532,9 @@ class _ThinkingDisplay:
         with self._lock:
             buf = self._thinking_buf
 
+        if self._censor_fn:
+            buf = self._censor_fn(buf)
+
         if not buf:
             return Text.from_markup(f"\u2800 {header}")
 
@@ -561,8 +565,17 @@ class RichREPL:
         self.ctx = ctx
         self.console = Console()
         self._startup_info = startup_info or {}
-        self._thinking = _ThinkingDisplay(self.console)
         self._current_step: _StepState | None = None
+
+        # Demo mode: install render hook for censoring console output.
+        censor_fn = None
+        if ctx.cfg.demo:
+            from .demo import DemoCensor, DemoRenderHook
+            censor = DemoCensor(ctx.cfg.workspace)
+            censor_fn = censor.censor_text
+            self.console.push_render_hook(DemoRenderHook(censor))
+
+        self._thinking = _ThinkingDisplay(self.console, censor_fn=censor_fn)
 
         history_dir = Path.home() / ".openplanter"
         history_dir.mkdir(parents=True, exist_ok=True)
