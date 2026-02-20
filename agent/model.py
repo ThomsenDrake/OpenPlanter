@@ -633,6 +633,7 @@ class OpenAICompatibleModel:
     first_byte_timeout: float = 10
     strict_tools: bool = True
     tool_defs: list[dict[str, Any]] | None = None
+    thinking_type: str | None = None
     on_content_delta: Callable[[str, str], None] | None = None
 
     def _is_reasoning_model(self) -> bool:
@@ -680,6 +681,9 @@ class OpenAICompatibleModel:
         effort = (self.reasoning_effort or "").strip().lower()
         if effort:
             payload["reasoning_effort"] = effort
+        thinking_type = (self.thinking_type or "").strip().lower()
+        if thinking_type in {"enabled", "disabled"}:
+            payload["thinking"] = {"type": thinking_type}
 
         url = self.base_url.rstrip("/") + "/chat/completions"
         headers = {

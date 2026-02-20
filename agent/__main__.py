@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         default=None,
-        choices=["auto", "openai", "anthropic", "openrouter", "cerebras", "ollama", "all"],
+        choices=["auto", "openai", "anthropic", "openrouter", "cerebras", "ollama", "zai", "all"],
         help="Model provider. Use 'all' only with --list-models.",
     )
     parser.add_argument("--model", help="Model name (use 'newest' to auto-select latest from API).")
@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Persist workspace default model for Ollama provider.",
     )
     parser.add_argument(
+        "--default-model-zai",
+        help="Persist workspace default model for Z.AI provider.",
+    )
+    parser.add_argument(
         "--show-settings",
         action="store_true",
         help="Show persistent workspace defaults and exit (unless task/list action is also provided).",
@@ -82,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anthropic-api-key", help="Anthropic API key override.")
     parser.add_argument("--openrouter-api-key", help="OpenRouter API key override.")
     parser.add_argument("--cerebras-api-key", help="Cerebras API key override.")
+    parser.add_argument("--zai-api-key", help="Z.AI API key override.")
     parser.add_argument("--exa-api-key", help="Exa API key override.")
     parser.add_argument("--voyage-api-key", help="Voyage API key override.")
     parser.add_argument(
@@ -153,7 +158,7 @@ def _format_ts(ts: int) -> str:
 
 def _resolve_provider(requested: str, creds: CredentialBundle) -> str:
     requested = requested.strip().lower()
-    if requested in {"openai", "anthropic", "openrouter", "cerebras", "ollama"}:
+    if requested in {"openai", "anthropic", "openrouter", "cerebras", "ollama", "zai"}:
         return requested
     if requested == "all":
         return "all"
@@ -165,15 +170,17 @@ def _resolve_provider(requested: str, creds: CredentialBundle) -> str:
         return "openrouter"
     if creds.cerebras_api_key:
         return "cerebras"
+    if creds.zai_api_key:
+        return "zai"
     return "openai"
 
 
 def _print_models(cfg: AgentConfig, requested_provider: str) -> int:
     providers: list[str]
     if requested_provider == "all":
-        providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama"]
+        providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama", "zai"]
     elif requested_provider == "auto":
-        providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama"]
+        providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama", "zai"]
     else:
         providers = [requested_provider]
 
@@ -209,6 +216,7 @@ def _load_credentials(
         anthropic_api_key=user_creds.anthropic_api_key,
         openrouter_api_key=user_creds.openrouter_api_key,
         cerebras_api_key=user_creds.cerebras_api_key,
+        zai_api_key=user_creds.zai_api_key,
         exa_api_key=user_creds.exa_api_key,
         voyage_api_key=user_creds.voyage_api_key,
     )
@@ -223,6 +231,8 @@ def _load_credentials(
         creds.openrouter_api_key = stored.openrouter_api_key
     if stored.cerebras_api_key:
         creds.cerebras_api_key = stored.cerebras_api_key
+    if stored.zai_api_key:
+        creds.zai_api_key = stored.zai_api_key
     if stored.exa_api_key:
         creds.exa_api_key = stored.exa_api_key
     if stored.voyage_api_key:
@@ -237,6 +247,8 @@ def _load_credentials(
         creds.openrouter_api_key = env_creds.openrouter_api_key
     if env_creds.cerebras_api_key:
         creds.cerebras_api_key = env_creds.cerebras_api_key
+    if env_creds.zai_api_key:
+        creds.zai_api_key = env_creds.zai_api_key
     if env_creds.exa_api_key:
         creds.exa_api_key = env_creds.exa_api_key
     if env_creds.voyage_api_key:
@@ -256,6 +268,8 @@ def _load_credentials(
         creds.openrouter_api_key = args.openrouter_api_key.strip() or creds.openrouter_api_key
     if args.cerebras_api_key:
         creds.cerebras_api_key = args.cerebras_api_key.strip() or creds.cerebras_api_key
+    if args.zai_api_key:
+        creds.zai_api_key = args.zai_api_key.strip() or creds.zai_api_key
     if args.exa_api_key:
         creds.exa_api_key = args.exa_api_key.strip() or creds.exa_api_key
     if args.voyage_api_key:
@@ -300,6 +314,7 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
     cfg.anthropic_api_key = creds.anthropic_api_key
     cfg.openrouter_api_key = creds.openrouter_api_key
     cfg.cerebras_api_key = creds.cerebras_api_key
+    cfg.zai_api_key = creds.zai_api_key
     cfg.exa_api_key = creds.exa_api_key
     cfg.voyage_api_key = creds.voyage_api_key
     cfg.api_key = cfg.openai_api_key
@@ -315,6 +330,8 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
             cfg.cerebras_base_url = args.base_url
         elif cfg.provider == "ollama":
             cfg.ollama_base_url = args.base_url
+        elif cfg.provider == "zai":
+            cfg.zai_base_url = args.base_url
         cfg.base_url = args.base_url
 
     if args.model:
@@ -393,6 +410,9 @@ def _apply_persistent_settings(
     if args.default_model_ollama is not None:
         settings.default_model_ollama = args.default_model_ollama.strip() or None
         changed = True
+    if args.default_model_zai is not None:
+        settings.default_model_zai = args.default_model_zai.strip() or None
+        changed = True
 
     if changed:
         store.save(settings)
@@ -424,6 +444,7 @@ def _print_settings(settings: PersistentSettings) -> None:
     print(f"  default_model_openrouter: {settings.default_model_openrouter or '(unset)'}")
     print(f"  default_model_cerebras: {settings.default_model_cerebras or '(unset)'}")
     print(f"  default_model_ollama: {settings.default_model_ollama or '(unset)'}")
+    print(f"  default_model_zai: {settings.default_model_zai or '(unset)'}")
 
 
 def _has_non_interactive_command(args: argparse.Namespace) -> bool:
@@ -450,6 +471,8 @@ def _has_non_interactive_command(args: argparse.Namespace) -> bool:
     if args.default_model_cerebras is not None:
         return True
     if args.default_model_ollama is not None:
+        return True
+    if args.default_model_zai is not None:
         return True
     return False
 
@@ -527,6 +550,7 @@ def main() -> None:
                 "openrouter": cfg.openrouter_api_key,
                 "cerebras": cfg.cerebras_api_key,
                 "ollama": "ollama",
+                "zai": cfg.zai_api_key,
             }.get(inferred)
             if key:
                 cfg.provider = inferred

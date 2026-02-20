@@ -36,6 +36,34 @@ class ModelPayloadTests(unittest.TestCase):
             self.assertEqual(turn.text, "ok")
             self.assertEqual(captured["payload"]["reasoning_effort"], "high")
 
+    def test_openai_payload_includes_thinking_type(self) -> None:
+        captured: dict = {}
+
+        def fake_http_json(url, method, headers, payload=None, timeout_sec=90):  # type: ignore[no-untyped-def]
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "tool_calls": None,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        with patch("agent.model._http_stream_sse", mock_openai_stream(fake_http_json)):
+            model = OpenAICompatibleModel(
+                model="glm-5",
+                api_key="k",
+                thinking_type="enabled",
+            )
+            conv = model.create_conversation("system", "user msg")
+            turn = model.complete(conv)
+            self.assertEqual(turn.text, "ok")
+            self.assertEqual(captured["payload"]["thinking"], {"type": "enabled"})
+
     def test_anthropic_payload_includes_thinking_budget(self) -> None:
         """Non-Opus-4.6 models use manual thinking with budget_tokens."""
         captured: dict = {}
