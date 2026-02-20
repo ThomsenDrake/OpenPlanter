@@ -69,11 +69,12 @@ class StripQuotesTests(unittest.TestCase):
 class MergeMissingTests(unittest.TestCase):
     def test_fills_missing_keys(self) -> None:
         a = CredentialBundle(openai_api_key="oa")
-        b = CredentialBundle(anthropic_api_key="an", exa_api_key="exa")
+        b = CredentialBundle(anthropic_api_key="an", exa_api_key="exa", firecrawl_api_key="fc")
         a.merge_missing(b)
         self.assertEqual(a.openai_api_key, "oa")
         self.assertEqual(a.anthropic_api_key, "an")
         self.assertEqual(a.exa_api_key, "exa")
+        self.assertEqual(a.firecrawl_api_key, "fc")
 
     def test_does_not_overwrite_existing(self) -> None:
         a = CredentialBundle(openai_api_key="mine")
@@ -96,6 +97,7 @@ class MergeMissingTests(unittest.TestCase):
             cerebras_api_key="cb",
             zai_api_key="zai",
             exa_api_key="exa",
+            firecrawl_api_key="fc",
         )
         a.merge_missing(b)
         self.assertEqual(a.openai_api_key, "oa")
@@ -104,6 +106,7 @@ class MergeMissingTests(unittest.TestCase):
         self.assertEqual(a.cerebras_api_key, "cb")
         self.assertEqual(a.zai_api_key, "zai")
         self.assertEqual(a.exa_api_key, "exa")
+        self.assertEqual(a.firecrawl_api_key, "fc")
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +122,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
             "OPENROUTER_API_KEY": "or-key",
             "ZAI_API_KEY": "zai-key",
             "EXA_API_KEY": "exa-key",
+            "FIRECRAWL_API_KEY": "fc-key",
         }
         with patch.dict(os.environ, env, clear=True):
             creds = credentials_from_env()
@@ -127,6 +131,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
         self.assertEqual(creds.openrouter_api_key, "or-key")
         self.assertEqual(creds.zai_api_key, "zai-key")
         self.assertEqual(creds.exa_api_key, "exa-key")
+        self.assertEqual(creds.firecrawl_api_key, "fc-key")
 
     def test_rlm_prefix_takes_priority(self) -> None:
         env = {
@@ -171,6 +176,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.max_depth, 4)
         self.assertEqual(cfg.max_steps_per_call, 100)
         self.assertEqual(cfg.shell, "/bin/sh")
+        self.assertEqual(cfg.web_search_provider, "exa")
 
     def test_custom_env_overrides(self) -> None:
         env = {
@@ -180,6 +186,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
             "OPENPLANTER_MAX_DEPTH": "5",
             "OPENPLANTER_MAX_STEPS": "20",
             "OPENPLANTER_SHELL": "/bin/bash",
+            "OPENPLANTER_WEB_SEARCH_PROVIDER": "firecrawl",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = AgentConfig.from_env("/tmp/test-ws")
@@ -189,6 +196,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.max_depth, 5)
         self.assertEqual(cfg.max_steps_per_call, 20)
         self.assertEqual(cfg.shell, "/bin/bash")
+        self.assertEqual(cfg.web_search_provider, "firecrawl")
 
     def test_api_keys_from_env(self) -> None:
         env = {
@@ -197,6 +205,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
             "OPENROUTER_API_KEY": "or",
             "ZAI_API_KEY": "zai",
             "EXA_API_KEY": "exa",
+            "FIRECRAWL_API_KEY": "fc",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = AgentConfig.from_env("/tmp/test-ws")
@@ -205,6 +214,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.openrouter_api_key, "or")
         self.assertEqual(cfg.zai_api_key, "zai")
         self.assertEqual(cfg.exa_api_key, "exa")
+        self.assertEqual(cfg.firecrawl_api_key, "fc")
 
     def test_workspace_resolved(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -456,6 +466,10 @@ class CredentialBundleEdgeCasesTests(unittest.TestCase):
         bundle = CredentialBundle(exa_api_key="real")
         self.assertTrue(bundle.has_any())
 
+    def test_has_any_with_firecrawl_key(self) -> None:
+        bundle = CredentialBundle(firecrawl_api_key="fc-test")
+        self.assertTrue(bundle.has_any())
+
     def test_has_any_with_cerebras_key(self) -> None:
         bundle = CredentialBundle(cerebras_api_key="csk-test")
         self.assertTrue(bundle.has_any())
@@ -479,6 +493,12 @@ class CredentialBundleEdgeCasesTests(unittest.TestCase):
         self.assertIn("zai_api_key", j)
         self.assertEqual(j["zai_api_key"], "zai-test")
 
+    def test_to_json_includes_firecrawl(self) -> None:
+        bundle = CredentialBundle(firecrawl_api_key="fc-test")
+        j = bundle.to_json()
+        self.assertIn("firecrawl_api_key", j)
+        self.assertEqual(j["firecrawl_api_key"], "fc-test")
+
     def test_from_json_cerebras(self) -> None:
         bundle = CredentialBundle.from_json({"cerebras_api_key": "csk-test"})
         self.assertEqual(bundle.cerebras_api_key, "csk-test")
@@ -486,6 +506,10 @@ class CredentialBundleEdgeCasesTests(unittest.TestCase):
     def test_from_json_zai(self) -> None:
         bundle = CredentialBundle.from_json({"zai_api_key": "zai-test"})
         self.assertEqual(bundle.zai_api_key, "zai-test")
+
+    def test_from_json_firecrawl(self) -> None:
+        bundle = CredentialBundle.from_json({"firecrawl_api_key": "fc-test"})
+        self.assertEqual(bundle.firecrawl_api_key, "fc-test")
 
     def test_from_json_none_payload(self) -> None:
         bundle = CredentialBundle.from_json(None)
