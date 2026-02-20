@@ -5,20 +5,20 @@ A recursive-language-model investigation agent with a terminal UI. OpenPlanter i
 ## Quickstart
 
 ```bash
-# Install
-pip install -e .
+# Install project dependencies into .venv
+uv sync
 
 # Configure API keys (interactive prompt)
-openplanter-agent --configure-keys
+uv run openplanter-agent --configure-keys
 
 # Launch the TUI
-openplanter-agent --workspace /path/to/your/project
+uv run openplanter-agent --workspace /path/to/your/project
 ```
 
 Or run a single task headlessly:
 
 ```bash
-openplanter-agent --task "Cross-reference vendor payments against lobbying disclosures and flag overlaps" --workspace ./data
+uv run openplanter-agent --task "Cross-reference vendor payments against lobbying disclosures and flag overlaps" --workspace ./data
 ```
 
 ### Docker
@@ -38,10 +38,20 @@ The container mounts `./workspace` as the agent's working directory.
 | Anthropic | `claude-opus-4-6` | `ANTHROPIC_API_KEY` |
 | OpenRouter | `anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` |
 | Cerebras | `qwen-3-235b-a22b-instruct-2507` | `CEREBRAS_API_KEY` |
+| Z.AI | `glm-5` | `ZAI_API_KEY` |
 
 Additional service keys: `EXA_API_KEY` (web search), `VOYAGE_API_KEY` (embeddings).
 
 All keys can also be set with an `OPENPLANTER_` prefix (e.g. `OPENPLANTER_OPENAI_API_KEY`), via `.env` files in the workspace, or via CLI flags.
+
+For Z.AI, set:
+
+```bash
+export OPENPLANTER_PROVIDER=zai
+export OPENPLANTER_MODEL=glm-5
+export OPENPLANTER_ZAI_BASE_URL=https://api.z.ai/api/paas/v4
+export ZAI_API_KEY=your-api-key
+```
 
 ## Agent Tools
 
@@ -76,7 +86,7 @@ openplanter-agent [options]
 
 | Flag | Description |
 |------|-------------|
-| `--provider NAME` | `auto`, `openai`, `anthropic`, `openrouter`, `cerebras` |
+| `--provider NAME` | `auto`, `openai`, `anthropic`, `openrouter`, `cerebras`, `zai` |
 | `--model NAME` | Model name or `newest` to auto-select |
 | `--reasoning-effort LEVEL` | `low`, `medium`, `high`, or `none` |
 | `--list-models` | Fetch available models from the provider API |
@@ -155,14 +165,14 @@ tests/           Unit and integration tests
 ## Development
 
 ```bash
-# Install in editable mode
-pip install -e .
+# Install runtime + dev dependencies
+uv sync --group dev
 
 # Run tests
-python -m pytest tests/
+uv run pytest tests/
 
 # Skip live API tests
-python -m pytest tests/ --ignore=tests/test_live_models.py --ignore=tests/test_integration_live.py
+uv run pytest tests/ --ignore=tests/test_live_models.py --ignore=tests/test_integration_live.py
 ```
 
 Requires Python 3.10+. Dependencies: `rich`, `prompt_toolkit`, `pyfiglet`.

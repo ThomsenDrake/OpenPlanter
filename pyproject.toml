@@ -19,3 +19,8 @@ openplanter-agent = "agent.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["agent*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
