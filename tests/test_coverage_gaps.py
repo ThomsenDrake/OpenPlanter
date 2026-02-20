@@ -94,6 +94,7 @@ class MergeMissingTests(unittest.TestCase):
             anthropic_api_key="an",
             openrouter_api_key="or",
             cerebras_api_key="cb",
+            zai_api_key="zai",
             exa_api_key="exa",
         )
         a.merge_missing(b)
@@ -101,6 +102,7 @@ class MergeMissingTests(unittest.TestCase):
         self.assertEqual(a.anthropic_api_key, "an")
         self.assertEqual(a.openrouter_api_key, "or")
         self.assertEqual(a.cerebras_api_key, "cb")
+        self.assertEqual(a.zai_api_key, "zai")
         self.assertEqual(a.exa_api_key, "exa")
 
 
@@ -115,6 +117,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
             "OPENAI_API_KEY": "oa-key",
             "ANTHROPIC_API_KEY": "an-key",
             "OPENROUTER_API_KEY": "or-key",
+            "ZAI_API_KEY": "zai-key",
             "EXA_API_KEY": "exa-key",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -122,6 +125,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
         self.assertEqual(creds.openai_api_key, "oa-key")
         self.assertEqual(creds.anthropic_api_key, "an-key")
         self.assertEqual(creds.openrouter_api_key, "or-key")
+        self.assertEqual(creds.zai_api_key, "zai-key")
         self.assertEqual(creds.exa_api_key, "exa-key")
 
     def test_rlm_prefix_takes_priority(self) -> None:
@@ -191,6 +195,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
             "OPENAI_API_KEY": "oa",
             "ANTHROPIC_API_KEY": "an",
             "OPENROUTER_API_KEY": "or",
+            "ZAI_API_KEY": "zai",
             "EXA_API_KEY": "exa",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -198,6 +203,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.openai_api_key, "oa")
         self.assertEqual(cfg.anthropic_api_key, "an")
         self.assertEqual(cfg.openrouter_api_key, "or")
+        self.assertEqual(cfg.zai_api_key, "zai")
         self.assertEqual(cfg.exa_api_key, "exa")
 
     def test_workspace_resolved(self) -> None:
@@ -340,6 +346,17 @@ class BuildEngineTests(unittest.TestCase):
             engine = build_engine(cfg)
             self.assertIsInstance(engine.model, OpenAICompatibleModel)
 
+    def test_zai_provider_with_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = AgentConfig(
+                workspace=Path(tmpdir),
+                provider="zai",
+                model="glm-5",
+                zai_api_key="test-key",
+            )
+            engine = build_engine(cfg)
+            self.assertIsInstance(engine.model, OpenAICompatibleModel)
+
     def test_model_provider_mismatch_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = AgentConfig(
@@ -456,9 +473,19 @@ class CredentialBundleEdgeCasesTests(unittest.TestCase):
         self.assertIn("cerebras_api_key", j)
         self.assertEqual(j["cerebras_api_key"], "csk-test")
 
+    def test_to_json_includes_zai(self) -> None:
+        bundle = CredentialBundle(zai_api_key="zai-test")
+        j = bundle.to_json()
+        self.assertIn("zai_api_key", j)
+        self.assertEqual(j["zai_api_key"], "zai-test")
+
     def test_from_json_cerebras(self) -> None:
         bundle = CredentialBundle.from_json({"cerebras_api_key": "csk-test"})
         self.assertEqual(bundle.cerebras_api_key, "csk-test")
+
+    def test_from_json_zai(self) -> None:
+        bundle = CredentialBundle.from_json({"zai_api_key": "zai-test"})
+        self.assertEqual(bundle.zai_api_key, "zai-test")
 
     def test_from_json_none_payload(self) -> None:
         bundle = CredentialBundle.from_json(None)
