@@ -1,6 +1,6 @@
 # OpenPlanter
 
-A recursive-language-model coding agent with a terminal UI. OpenPlanter gives an LLM a workspace full of tools — file I/O, shell execution, web search, and recursive sub-agent delegation — then lets it solve open-ended objectives autonomously.
+A recursive-language-model investigation agent with a terminal UI. OpenPlanter ingests heterogeneous datasets — corporate registries, campaign finance records, lobbying disclosures, government contracts, and more — resolves entities across them, and surfaces non-obvious connections through evidence-backed analysis. It operates autonomously with file I/O, shell execution, web search, and recursive sub-agent delegation.
 
 ## Quickstart
 
@@ -18,7 +18,7 @@ openplanter-agent --workspace /path/to/your/project
 Or run a single task headlessly:
 
 ```bash
-openplanter-agent --task "Find and fix the failing test in tests/" --workspace .
+openplanter-agent --task "Cross-reference vendor payments against lobbying disclosures and flag overlaps" --workspace ./data
 ```
 
 ### Docker
@@ -45,17 +45,17 @@ All keys can also be set with an `OPENPLANTER_` prefix (e.g. `OPENPLANTER_OPENAI
 
 ## Agent Tools
 
-The agent has access to 19 tools:
+The agent has access to 19 tools, organized around its investigation workflow:
 
-**File operations** — `list_files`, `search_files`, `repo_map`, `read_file`, `write_file`, `edit_file`, `hashline_edit`, `apply_patch`
+**Dataset ingestion & workspace** — `list_files`, `search_files`, `repo_map`, `read_file`, `write_file`, `edit_file`, `hashline_edit`, `apply_patch` — load, inspect, and transform source datasets; write structured findings.
 
-**Shell execution** — `run_shell`, `run_shell_bg`, `check_shell_bg`, `kill_shell_bg`
+**Shell execution** — `run_shell`, `run_shell_bg`, `check_shell_bg`, `kill_shell_bg` — run analysis scripts, data pipelines, and validation checks.
 
-**Web** — `web_search` (Exa), `fetch_url`
+**Web** — `web_search` (Exa), `fetch_url` — pull public records, verify entities, and retrieve supplementary data.
 
-**Planning & delegation** — `think`, `subtask`, `execute`, `list_artifacts`, `read_artifact`
+**Planning & delegation** — `think`, `subtask`, `execute`, `list_artifacts`, `read_artifact` — decompose investigations into focused sub-tasks, each with acceptance criteria and independent verification.
 
-In **recursive mode** (the default), the agent can spawn sub-agents via `subtask` and `execute` to decompose complex problems hierarchically.
+In **recursive mode** (the default), the agent spawns sub-agents via `subtask` and `execute` to parallelize entity resolution, cross-dataset linking, and evidence-chain construction across large investigations.
 
 ## CLI Reference
 
