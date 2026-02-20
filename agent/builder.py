@@ -26,7 +26,8 @@ from .tools import WorkspaceTools
 # Patterns that unambiguously identify a provider.
 _ANTHROPIC_RE = re.compile(r"^claude", re.IGNORECASE)
 _OPENAI_RE = re.compile(r"^(gpt|o[1-4]-|o[1-4]$|chatgpt|dall-e|tts-|whisper)", re.IGNORECASE)
-_CEREBRAS_RE = re.compile(r"^(llama.*cerebras|qwen-3|gpt-oss|zai-glm)", re.IGNORECASE)
+_CEREBRAS_RE = re.compile(r"^(llama.*cerebras|qwen-3|gpt-oss)", re.IGNORECASE)
+_ZAI_RE = re.compile(r"^(glm|zai-glm)", re.IGNORECASE)
 
 
 def infer_provider_for_model(model: str) -> str | None:
@@ -37,6 +38,8 @@ def infer_provider_for_model(model: str) -> str | None:
         return "anthropic"
     if _CEREBRAS_RE.search(model):
         return "cerebras"
+    if _ZAI_RE.search(model):
+        return "zai"
     if _OPENAI_RE.search(model):
         return "openai"
     return None
@@ -73,6 +76,10 @@ def _fetch_models_for_provider(cfg: AgentConfig, provider: str) -> list[dict]:
         if not cfg.cerebras_api_key:
             raise ModelError("Cerebras key not configured.")
         return list_openai_models(api_key=cfg.cerebras_api_key, base_url=cfg.cerebras_base_url)
+    if provider == "zai":
+        if not cfg.zai_api_key:
+            raise ModelError("Z.AI key not configured.")
+        return list_openai_models(api_key=cfg.zai_api_key, base_url=cfg.zai_base_url)
     raise ModelError(f"Unknown provider: {provider}")
 
 
@@ -128,9 +135,19 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 base_url=cfg.cerebras_base_url,
                 reasoning_effort=effort,
             )
+        if provider == "zai" and cfg.zai_api_key:
+            thinking_type = "disabled" if effort in (None, "", "none") else "enabled"
+            return OpenAICompatibleModel(
+                model=model_name,
+                api_key=cfg.zai_api_key,
+                base_url=cfg.zai_base_url,
+                reasoning_effort=effort,
+                thinking_type=thinking_type,
+                extra_headers={"Accept-Language": "en-US,en"},
+            )
         raise ModelError(f"No API key available for model '{model_name}' (provider={provider})")
 
-    if cfg.anthropic_api_key or cfg.openai_api_key or cfg.openrouter_api_key or cfg.cerebras_api_key:
+    if cfg.anthropic_api_key or cfg.openai_api_key or cfg.openrouter_api_key or cfg.cerebras_api_key or cfg.zai_api_key:
         return _factory
     return None
 
@@ -180,6 +197,16 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
             api_key=cfg.cerebras_api_key,
             base_url=cfg.cerebras_base_url,
             reasoning_effort=cfg.reasoning_effort,
+        )
+    elif cfg.provider == "zai" and cfg.zai_api_key:
+        thinking_type = "disabled" if cfg.reasoning_effort in (None, "", "none") else "enabled"
+        model = OpenAICompatibleModel(
+            model=model_name,
+            api_key=cfg.zai_api_key,
+            base_url=cfg.zai_base_url,
+            reasoning_effort=cfg.reasoning_effort,
+            thinking_type=thinking_type,
+            extra_headers={"Accept-Language": "en-US,en"},
         )
     elif cfg.provider == "anthropic" and cfg.anthropic_api_key:
         model = AnthropicModel(
