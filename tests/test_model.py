@@ -143,5 +143,71 @@ class ModelPayloadTests(unittest.TestCase):
             self.assertNotIn("thinking", calls[1])
 
 
+class OllamaPayloadTests(unittest.TestCase):
+    def test_ollama_uses_openai_compatible_format(self) -> None:
+        captured: dict = {}
+
+        def fake_http_json(url, method, headers, payload=None, timeout_sec=90):  # type: ignore[no-untyped-def]
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "hello from ollama",
+                            "tool_calls": None,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        with patch("agent.model._http_stream_sse", mock_openai_stream(fake_http_json)):
+            model = OpenAICompatibleModel(
+                model="llama3.2",
+                api_key="ollama",
+                base_url="http://localhost:11434/v1",
+                strict_tools=False,
+            )
+            conv = model.create_conversation("system", "user msg")
+            turn = model.complete(conv)
+            self.assertEqual(turn.text, "hello from ollama")
+            self.assertEqual(captured["payload"]["model"], "llama3.2")
+            self.assertIn("localhost:11434", captured["url"])
+            self.assertEqual(captured["headers"]["Authorization"], "Bearer ollama")
+
+    def test_ollama_no_strict_tools(self) -> None:
+        captured: dict = {}
+
+        def fake_http_json(url, method, headers, payload=None, timeout_sec=90):  # type: ignore[no-untyped-def]
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "tool_calls": None,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        with patch("agent.model._http_stream_sse", mock_openai_stream(fake_http_json)):
+            model = OpenAICompatibleModel(
+                model="llama3.2",
+                api_key="ollama",
+                base_url="http://localhost:11434/v1",
+                strict_tools=False,
+            )
+            conv = model.create_conversation("system", "user msg")
+            model.complete(conv)
+            tools = captured["payload"]["tools"]
+            for tool in tools:
+                func = tool.get("function", {})
+                self.assertNotIn("strict", func)
+
+
 if __name__ == "__main__":
     unittest.main()

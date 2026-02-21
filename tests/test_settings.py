@@ -67,6 +67,24 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.default_model_for_provider("openrouter"))
         self.assertIsNone(settings.default_model_for_provider("cerebras"))
 
+    def test_per_provider_model_ollama(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SettingsStore(workspace=root, session_root_dir=".openplanter")
+            settings = PersistentSettings(
+                default_model_ollama="mistral",
+            )
+            store.save(settings)
+            loaded = store.load()
+            self.assertEqual(loaded.default_model_ollama, "mistral")
+
+    def test_default_model_for_provider_ollama(self) -> None:
+        settings = PersistentSettings(
+            default_model="global-model",
+            default_model_ollama="llama3.2",
+        )
+        self.assertEqual(settings.default_model_for_provider("ollama"), "llama3.2")
+
     def test_backward_compat_old_settings(self) -> None:
         """Old settings.json without per-provider keys still loads fine."""
         import json
@@ -157,6 +175,20 @@ class InferProviderTests(unittest.TestCase):
         self.assertEqual(infer_provider_for_model("qwen-3-235b-a22b-instruct-2507"), "cerebras")
         self.assertEqual(infer_provider_for_model("gpt-oss-120b"), "cerebras")
         self.assertEqual(infer_provider_for_model("llama-4-scout-cerebras"), "cerebras")
+
+    def test_ollama_models(self) -> None:
+        self.assertEqual(infer_provider_for_model("llama3.2"), "ollama")
+        self.assertEqual(infer_provider_for_model("llama-3.1"), "ollama")
+        self.assertEqual(infer_provider_for_model("mistral"), "ollama")
+        self.assertEqual(infer_provider_for_model("gemma2"), "ollama")
+        self.assertEqual(infer_provider_for_model("phi3"), "ollama")
+        self.assertEqual(infer_provider_for_model("codellama"), "ollama")
+        self.assertEqual(infer_provider_for_model("deepseek-v2"), "ollama")
+        self.assertEqual(infer_provider_for_model("qwen2.5"), "ollama")
+
+    def test_cerebras_qwen3_not_ollama(self) -> None:
+        """qwen-3 models go to Cerebras, not Ollama."""
+        self.assertEqual(infer_provider_for_model("qwen-3-235b-a22b-instruct-2507"), "cerebras")
 
     def test_unknown_returns_none(self) -> None:
         self.assertIsNone(infer_provider_for_model("my-custom-model"))

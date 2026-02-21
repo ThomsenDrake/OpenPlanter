@@ -17,7 +17,7 @@ from pathlib import Path
 from agent.config import AgentConfig
 from agent.credentials import CredentialStore
 from agent.engine import SYSTEM_PROMPT, RLMEngine
-from agent.model import AnthropicModel, OpenAICompatibleModel
+from agent.model import AnthropicModel, OpenAICompatibleModel, list_ollama_models, ModelError
 from agent.tools import WorkspaceTools
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,49 @@ class EndToEndLiveTests(unittest.TestCase):
             self.assertTrue(test_path.exists(), "Model did not create test.txt")
             self.assertIn("anthropic works", test_path.read_text())
             self.assertNotIn("Model error", result)
+
+
+def _ollama_available() -> bool:
+    """Probe the Ollama API to see if it's running locally."""
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3):
+            return True
+    except Exception:
+        return False
+
+
+_OLLAMA_UP = _ollama_available()
+
+
+class OllamaLiveTests(unittest.TestCase):
+    @unittest.skipUnless(_OLLAMA_UP, "Ollama not running on localhost:11434")
+    def test_ollama_returns_valid_model_turn(self) -> None:
+        models = list_ollama_models()
+        if not models:
+            self.skipTest("No Ollama models pulled locally")
+        first_model = models[0]["id"]
+        model = OpenAICompatibleModel(
+            model=first_model,
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+            timeout_sec=60,
+            strict_tools=False,
+        )
+        conv = model.create_conversation(
+            SYSTEM_PROMPT,
+            json.dumps({
+                "objective": "Return immediately with a final answer saying 'hello'.",
+                "depth": 0,
+                "max_depth": 1,
+                "max_steps_per_call": 1,
+                "workspace": "/tmp/test",
+                "external_context_summary": "(empty)",
+            }),
+        )
+        turn = model.complete(conv)
+        self.assertTrue(turn.tool_calls or turn.text)
 
 
 if __name__ == "__main__":
