@@ -144,6 +144,7 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 api_key="ollama",
                 base_url=cfg.ollama_base_url,
                 reasoning_effort=effort,
+                first_byte_timeout=120,
                 strict_tools=False,
             )
         raise ModelError(f"No API key available for model '{model_name}' (provider={provider})")
@@ -205,6 +206,7 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
             api_key="ollama",
             base_url=cfg.ollama_base_url,
             reasoning_effort=cfg.reasoning_effort,
+            first_byte_timeout=120,
             strict_tools=False,
         )
     elif cfg.provider == "anthropic" and cfg.anthropic_api_key:

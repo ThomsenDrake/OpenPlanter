@@ -50,7 +50,7 @@ openplanter-agent --provider ollama --model mistral
 openplanter-agent --provider ollama --list-models
 ```
 
-The base URL defaults to `http://localhost:11434/v1` and can be overridden with `OPENPLANTER_OLLAMA_BASE_URL` or `--base-url`.
+The base URL defaults to `http://localhost:11434/v1` and can be overridden with `OPENPLANTER_OLLAMA_BASE_URL` or `--base-url`. The first request may be slow while Ollama loads the model into memory; a 120-second first-byte timeout is used automatically.
 
 Additional service keys: `EXA_API_KEY` (web search), `VOYAGE_API_KEY` (embeddings).
 

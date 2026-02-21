@@ -561,6 +561,16 @@ def list_openrouter_models(
     return _sorted_models(rows)
 
 
+def _truncate_nanoseconds(ts: str) -> str:
+    """Truncate nanosecond-precision fractional seconds to microseconds.
+
+    Python 3.10's ``fromisoformat`` only handles up to 6 decimal places.
+    Ollama emits 9 (e.g. ``2026-02-21T12:44:19.177147556-05:00``).
+    """
+    import re as _re
+    return _re.sub(r"(\.\d{6})\d+", r"\1", ts)
+
+
 def list_ollama_models(
     base_url: str = "http://localhost:11434/v1",
     timeout_sec: int = 10,
@@ -584,7 +594,10 @@ def list_ollama_models(
             model_id = str(row.get("name", "")).strip()
             if not model_id:
                 continue
-            created = _parse_timestamp(row.get("modified_at") or row.get("created_at"))
+            raw_ts = row.get("modified_at") or row.get("created_at") or ""
+            if isinstance(raw_ts, str):
+                raw_ts = _truncate_nanoseconds(raw_ts)
+            created = _parse_timestamp(raw_ts)
             rows.append(
                 {
                     "provider": "ollama",
@@ -609,6 +622,7 @@ class OpenAICompatibleModel:
     reasoning_effort: str | None = None
     timeout_sec: int = 300
     extra_headers: dict[str, str] = field(default_factory=dict)
+    first_byte_timeout: float = 10
     strict_tools: bool = True
     tool_defs: list[dict[str, Any]] | None = None
     on_content_delta: Callable[[str, str], None] | None = None
@@ -689,6 +703,7 @@ class OpenAICompatibleModel:
                 method="POST",
                 headers=headers,
                 payload=payload,
+                first_byte_timeout=self.first_byte_timeout,
                 stream_timeout=self.timeout_sec,
                 on_sse_event=sse_cb,
             )
@@ -708,6 +723,7 @@ class OpenAICompatibleModel:
                 method="POST",
                 headers=headers,
                 payload=payload,
+                first_byte_timeout=self.first_byte_timeout,
                 stream_timeout=self.timeout_sec,
                 on_sse_event=sse_cb,
             )

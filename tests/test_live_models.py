@@ -257,6 +257,7 @@ class OllamaLiveTests(unittest.TestCase):
             api_key="ollama",
             base_url="http://localhost:11434/v1",
             timeout_sec=60,
+            first_byte_timeout=120,
             strict_tools=False,
         )
         conv = model.create_conversation(
