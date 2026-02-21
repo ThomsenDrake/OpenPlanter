@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -188,6 +189,36 @@ class SessionStore:
         meta_path.write_text(json.dumps(base, indent=2), encoding="utf-8")
 
 
+def _seed_wiki(workspace: Path, session_root_dir: str) -> None:
+    """Copy baseline wiki/ into the runtime .openplanter/wiki/ directory.
+
+    On first run, copies the entire tree. On subsequent runs, copies only
+    new baseline files — never overwrites agent-modified entries.
+    """
+    baseline = workspace / "wiki"
+    if not baseline.is_dir():
+        return
+    runtime_wiki = workspace / session_root_dir / "wiki"
+    if not runtime_wiki.exists():
+        shutil.copytree(
+            baseline,
+            runtime_wiki,
+            ignore=shutil.ignore_patterns(".*", "__pycache__"),
+        )
+        return
+    # Incremental: copy only new baseline files
+    for src in baseline.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(baseline)
+        if any(p.startswith(".") or p == "__pycache__" for p in rel.parts):
+            continue
+        dst = runtime_wiki / rel
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+
 @dataclass
 class SessionRuntime:
     engine: RLMEngine
@@ -208,6 +239,10 @@ class SessionRuntime:
             workspace=config.workspace,
             session_root_dir=config.session_root_dir,
         )
+        try:
+            _seed_wiki(config.workspace, config.session_root_dir)
+        except OSError:
+            pass
         sid, state, created_new = store.open_session(session_id=session_id, resume=resume)
         persisted = state.get("external_observations", [])
         obs = [str(x) for x in persisted] if isinstance(persisted, list) else []

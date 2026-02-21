@@ -334,6 +334,19 @@ programming language names.
 """
 
 
+WIKI_SECTION = """
+== DATA SOURCES WIKI ==
+A runtime wiki of data source documentation is available at .openplanter/wiki/.
+Read .openplanter/wiki/index.md at the start of any investigation to see what
+data sources are documented. Each entry describes access methods, schemas,
+coverage, and cross-reference potential.
+
+When you discover new information about a data source — updated URLs, new fields,
+cross-reference joins, data quality issues, or entirely new sources — update the
+relevant entry or create a new one using .openplanter/wiki/template.md.
+"""
+
+
 def build_system_prompt(
     recursive: bool,
     acceptance_criteria: bool = False,
@@ -341,6 +354,7 @@ def build_system_prompt(
 ) -> str:
     """Assemble the system prompt, including recursion sections only when enabled."""
     prompt = SYSTEM_PROMPT_BASE
+    prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION
     if acceptance_criteria:
