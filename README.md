@@ -182,4 +182,6 @@ Requires Python 3.10+. Dependencies: `rich`, `prompt_toolkit`, `pyfiglet`.
 
 ## License
 
+MIT — see [LICENSE](LICENSE) for details.
+
 See [VISION.md](VISION.md) for the project's design philosophy and roadmap.
