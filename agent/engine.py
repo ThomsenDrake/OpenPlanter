@@ -133,6 +133,7 @@ class RLMEngine:
     session_dir: Path | None = None
     session_id: str | None = None
     _shell_command_counts: dict[tuple[int, str], int] = field(default_factory=dict)
+    _cancel: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
         if not self.system_prompt:
@@ -145,6 +146,10 @@ class RLMEngine:
         tool_defs = get_tool_definitions(include_subtask=self.config.recursive, include_acceptance_criteria=ac)
         if hasattr(self.model, "tool_defs"):
             self.model.tool_defs = tool_defs
+
+    def cancel(self) -> None:
+        """Signal the engine to stop after the current model call or tool."""
+        self._cancel.set()
 
     def solve(self, objective: str, on_event: EventCallback | None = None) -> str:
         result, _ = self.solve_with_context(objective=objective, on_event=on_event)
@@ -161,6 +166,7 @@ class RLMEngine:
     ) -> tuple[str, ExternalContext]:
         if not objective.strip():
             return "No objective provided.", context or ExternalContext()
+        self._cancel.clear()
         with self._lock:
             self._shell_command_counts.clear()
         active_context = context if context is not None else ExternalContext()
@@ -317,6 +323,9 @@ class RLMEngine:
             )
 
         for step in range(1, self.config.max_steps_per_call + 1):
+            if self._cancel.is_set():
+                self._emit(f"[d{depth}] cancelled by user", on_event)
+                return "Task cancelled."
             if deadline and time.monotonic() > deadline:
                 self._emit(f"[d{depth}] wall-clock limit reached", on_event)
                 return "Time limit exceeded. Try a more focused objective."
@@ -586,6 +595,8 @@ class RLMEngine:
         parallel_owner: str | None = None,
     ) -> tuple[ToolResult, bool]:
         """Run a single tool call. Returns (ToolResult, is_final)."""
+        if self._cancel.is_set():
+            return ToolResult(tc.id, tc.name, "Task cancelled.", is_error=False), False
         arg_summary = _summarize_args(tc.arguments)
         self._emit(f"[d{depth}/s{step}] {tc.name}({arg_summary})", on_event)
 

@@ -18,6 +18,12 @@ from .settings import SettingsStore
 SLASH_COMMANDS: list[str] = ["/quit", "/exit", "/help", "/status", "/clear", "/model", "/reasoning"]
 
 
+def _queue_prompt_style():
+    """Prompt style for the secondary (queued input) prompt."""
+    from prompt_toolkit.styles import Style
+    return Style.from_dict({"dim": "ansibrightblack italic"})
+
+
 def _make_left_markdown():
     """Create a Markdown subclass that left-aligns headings instead of centering."""
     from rich import box as _box
@@ -395,6 +401,7 @@ _RE_CALLING = re.compile(r"calling model")
 _RE_SUBTASK = re.compile(r">> entering subtask")
 _RE_EXECUTE = re.compile(r">> executing leaf")
 _RE_ERROR = re.compile(r"model error:", re.IGNORECASE)
+_RE_TOOL_START = re.compile(r"(\w+)\((.*)?\)$")
 
 # Max characters to display per trace event line (first line only for multi-line).
 _EVENT_MAX_CHARS = 300
@@ -478,26 +485,50 @@ def _extract_key_arg(name: str, arguments: dict[str, Any]) -> str:
     return s
 
 
-class _ThinkingDisplay:
-    """Manages a Rich Live display showing a spinner + streaming thinking text."""
+class _ActivityDisplay:
+    """Unified live display for thinking, streaming response, and tool execution.
+
+    Modes:
+      - ``thinking``  — cyan header with streaming thinking text
+      - ``streaming`` — green header with streaming response text
+      - ``tool``      — yellow header with tool name and key argument
+    """
 
     def __init__(self, console: Any, censor_fn: Callable[[str], str] | None = None) -> None:
         self._console = console
         self._censor_fn = censor_fn
         self._lock = threading.Lock()
-        self._thinking_buf: str = ""
+        self._text_buf: str = ""
+        self._mode: str = "thinking"  # thinking | streaming | tool
+        self._step_label: str = ""
+        self._tool_name: str = ""
+        self._tool_key_arg: str = ""
         self._start_time: float = 0.0
         self._live: Any | None = None
         self._active = False
 
-    def start(self) -> None:
+    # -- lifecycle -----------------------------------------------------------
+
+    def start(self, mode: str = "thinking", step_label: str = "") -> None:
         from rich.live import Live
-        if self._active:
-            return
+
         with self._lock:
-            self._thinking_buf = ""
+            self._mode = mode
+            self._step_label = step_label
+            self._text_buf = ""
+            self._tool_name = ""
+            self._tool_key_arg = ""
             self._start_time = time.monotonic()
-            self._active = True
+
+        if self._active and self._live is not None:
+            # Reuse existing Live — just update mode
+            try:
+                self._live.update(self._build_renderable())
+            except Exception:
+                pass
+            return
+
+        self._active = True
         self._live = Live(
             self._build_renderable(),
             console=self._console,
@@ -516,31 +547,86 @@ class _ThinkingDisplay:
             except Exception:
                 pass
             self._live = None
+        with self._lock:
+            self._text_buf = ""
+            self._tool_name = ""
+            self._tool_key_arg = ""
+
+    # -- data feeds ----------------------------------------------------------
 
     def feed(self, delta_type: str, text: str) -> None:
+        """Handle thinking or text content deltas."""
         if not self._active:
             return
-        if delta_type != "thinking":
-            return
         with self._lock:
-            self._thinking_buf += text
+            if delta_type == "text" and self._mode == "thinking":
+                # Auto-transition from thinking to streaming on first text delta
+                self._mode = "streaming"
+                self._text_buf = ""
+            if delta_type in ("thinking", "text"):
+                self._text_buf += text
         if self._live is not None:
             try:
                 self._live.update(self._build_renderable())
             except Exception:
                 pass
 
+    def set_tool(self, tool_name: str, key_arg: str = "", step_label: str = "") -> None:
+        """Switch to tool mode."""
+        with self._lock:
+            self._mode = "tool"
+            self._tool_name = tool_name
+            self._tool_key_arg = key_arg
+            self._text_buf = ""
+            if step_label:
+                self._step_label = step_label
+            self._start_time = time.monotonic()
+        if not self._active:
+            self.start(mode="tool", step_label=step_label)
+            return
+        if self._live is not None:
+            try:
+                self._live.update(self._build_renderable())
+            except Exception:
+                pass
+
+    def set_step_label(self, label: str) -> None:
+        with self._lock:
+            self._step_label = label
+
+    # -- rendering -----------------------------------------------------------
+
     def _build_renderable(self) -> Any:
         from rich.text import Text
 
         elapsed = time.monotonic() - self._start_time if self._start_time else 0.0
-        header = f"[bold cyan]Thinking...[/bold cyan]  [dim]({elapsed:.1f}s)[/dim]"
 
         with self._lock:
-            buf = self._thinking_buf
+            mode = self._mode
+            buf = self._text_buf
+            step_label = self._step_label
+            tool_name = self._tool_name
+            tool_key_arg = self._tool_key_arg
 
         if self._censor_fn:
             buf = self._censor_fn(buf)
+
+        step_part = f"  [dim]{step_label}[/dim]" if step_label else ""
+
+        if mode == "thinking":
+            header = f"[bold cyan]Thinking...[/bold cyan]  [dim]({elapsed:.1f}s)[/dim]{step_part}"
+        elif mode == "streaming":
+            header = f"[bold green]Responding...[/bold green]  [dim]({elapsed:.1f}s)[/dim]{step_part}"
+        else:  # tool
+            header = f"[bold yellow]Running {tool_name}...[/bold yellow]  [dim]({elapsed:.1f}s)[/dim]{step_part}"
+
+        if mode == "tool":
+            if tool_key_arg:
+                arg_display = tool_key_arg
+                if len(arg_display) > _THINKING_MAX_LINE_WIDTH:
+                    arg_display = arg_display[:_THINKING_MAX_LINE_WIDTH - 3] + "..."
+                return Text.from_markup(f"\u2800 {header}\n  [dim italic]{arg_display}[/dim italic]")
+            return Text.from_markup(f"\u2800 {header}")
 
         if not buf:
             return Text.from_markup(f"\u2800 {header}")
@@ -560,6 +646,11 @@ class _ThinkingDisplay:
     def active(self) -> bool:
         return self._active
 
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            return self._mode
+
 
 class RichREPL:
     def __init__(self, ctx: ChatContext, startup_info: dict[str, str] | None = None) -> None:
@@ -574,6 +665,11 @@ class RichREPL:
         self._startup_info = startup_info or {}
         self._current_step: _StepState | None = None
 
+        # Background agent thread state
+        self._agent_thread: threading.Thread | None = None
+        self._agent_result: str | None = None
+        self._queued_input: list[str] = []
+
         # Demo mode: prepare render hook (installed in run() after splash art).
         censor_fn = None
         self._demo_hook = None
@@ -583,7 +679,7 @@ class RichREPL:
             censor_fn = censor.censor_text
             self._demo_hook = DemoRenderHook(censor)
 
-        self._thinking = _ThinkingDisplay(self.console, censor_fn=censor_fn)
+        self._activity = _ActivityDisplay(self.console, censor_fn=censor_fn)
 
         history_dir = Path.home() / ".openplanter"
         history_dir.mkdir(parents=True, exist_ok=True)
@@ -602,6 +698,12 @@ class RichREPL:
             elif hasattr(event, "current_buffer"):
                 event.current_buffer.insert_text("\n")  # type: ignore[union-attr]
 
+        @kb.add("escape")
+        def _cancel_agent(event: object) -> None:
+            if self._agent_thread is not None and self._agent_thread.is_alive():
+                self.ctx.runtime.engine.cancel()
+                self.console.print("[dim]Cancelling...[/dim]")
+
         self.session: PromptSession[str] = PromptSession(
             history=FileHistory(str(history_path)),
             completer=completer,
@@ -618,23 +720,30 @@ class RichREPL:
         m = _RE_PREFIX.match(msg)
         body = msg[m.end():] if m else msg
 
+        # Extract step label from prefix (e.g. "[d0/s3]" → "Step 3/20")
+        step_label = ""
+        if m:
+            _s = m.group(2)
+            if _s:
+                step_label = f"Step {_s}/{self.ctx.cfg.max_steps_per_call}"
+
         # Calling model → flush previous step, start thinking display
         if _RE_CALLING.search(body):
             self._flush_step()
-            self._thinking.start()
+            self._activity.start(mode="thinking", step_label=step_label)
             return
 
         # Subtask/execute entry → flush step, render rule
         if _RE_SUBTASK.search(body) or _RE_EXECUTE.search(body):
             self._flush_step()
-            self._thinking.stop()
+            self._activity.stop()
             label = re.sub(r">> (entering subtask|executing leaf):\s*", "", body).strip()
             self.console.rule(f"[dim]{label}[/dim]", style="dim")
             return
 
         # Error
         if _RE_ERROR.search(body):
-            self._thinking.stop()
+            self._activity.stop()
             from rich.text import Text
             first_line = msg.split("\n", 1)[0]
             if len(first_line) > _EVENT_MAX_CHARS:
@@ -642,7 +751,13 @@ class RichREPL:
             self.console.print(Text(first_line, style="bold red"))
             return
 
-        # Everything else is handled by on_step — ignore here
+        # Tool start (e.g. "read_file(path=foo.py)") → switch to tool mode
+        tm = _RE_TOOL_START.search(body)
+        if tm:
+            tool_name = tm.group(1)
+            tool_arg = tm.group(2) or ""
+            self._activity.set_tool(tool_name, key_arg=tool_arg, step_label=step_label)
+            return
 
     # ------------------------------------------------------------------
     # on_step — receives structured step events from engine
@@ -655,8 +770,8 @@ class RichREPL:
         name = action.get("name", "")
 
         if name == "_model_turn":
-            # Model turn completed → stop thinking, create new step state
-            self._thinking.stop()
+            # Model turn completed → stop activity display, create new step state
+            self._activity.stop()
             self._current_step = _StepState(
                 depth=step_event.get("depth", 0),
                 step=step_event.get("step", 0),
@@ -692,7 +807,7 @@ class RichREPL:
     # ------------------------------------------------------------------
 
     def _on_content_delta(self, delta_type: str, text: str) -> None:
-        self._thinking.feed(delta_type, text)
+        self._activity.feed(delta_type, text)
 
     # ------------------------------------------------------------------
     # _flush_step — render a completed step
@@ -758,8 +873,35 @@ class RichREPL:
     # run — main REPL loop
     # ------------------------------------------------------------------
 
+    def _run_agent(self, objective: str) -> None:
+        """Run the agent in a background thread. Stores result in _agent_result."""
+        try:
+            self._agent_result = self.ctx.runtime.solve(
+                objective,
+                on_event=self._on_event,
+                on_step=self._on_step,
+                on_content_delta=self._on_content_delta,
+            )
+        except Exception as exc:
+            self._agent_result = f"Agent error: {type(exc).__name__}: {exc}"
+
+    def _present_result(self, answer: str) -> None:
+        """Render an agent answer to the console."""
+        from rich.text import Text
+
+        self._activity.stop()
+        self._flush_step()
+
+        self.console.print()
+        self.console.print(_LeftMarkdown(answer), justify="left")
+
+        token_str = _format_session_tokens(self.ctx.runtime.engine.session_tokens)
+        if token_str:
+            self.console.print(Text(f"  tokens: {token_str}", style="dim"))
+        self.console.print()
+
     def run(self) -> None:
-        from rich.markdown import Markdown
+        from prompt_toolkit.patch_stdout import patch_stdout
         from rich.text import Text
 
         self.console.clear()
@@ -773,52 +915,75 @@ class RichREPL:
             for key, val in self._startup_info.items():
                 self.console.print(Text(f"  {key:>10}  {val}", style="dim"))
             self.console.print()
-        self.console.print("Type /help for commands, Ctrl+D to exit.", style="dim")
+        self.console.print(
+            "Type /help for commands, Ctrl+D to exit.  ESC to cancel a running task.",
+            style="dim",
+        )
         self.console.print()
 
-        while True:
-            try:
-                user_input = self.session.prompt("you> ").strip()
-            except KeyboardInterrupt:
-                continue
-            except EOFError:
-                break
+        with patch_stdout():
+            while True:
+                # Check if there's queued input from a previous agent run
+                if self._queued_input:
+                    user_input = self._queued_input.pop(0)
+                    self.console.print(Text(f"you> {user_input}", style="bold"))
+                else:
+                    try:
+                        user_input = self.session.prompt("you> ").strip()
+                    except KeyboardInterrupt:
+                        continue
+                    except EOFError:
+                        break
 
-            if not user_input:
-                continue
+                if not user_input:
+                    continue
 
-            result = dispatch_slash_command(
-                user_input,
-                self.ctx,
-                emit=lambda line: self.console.print(Text(line, style="cyan")),
-            )
-            if result == "quit":
-                break
-            if result == "clear":
-                self.console.clear()
-                continue
-            if result == "handled":
-                continue
+                result = dispatch_slash_command(
+                    user_input,
+                    self.ctx,
+                    emit=lambda line: self.console.print(Text(line, style="cyan")),
+                )
+                if result == "quit":
+                    break
+                if result == "clear":
+                    self.console.clear()
+                    continue
+                if result == "handled":
+                    continue
 
-            # Regular objective
-            self.console.print()
-            answer = self.ctx.runtime.solve(
-                user_input,
-                on_event=self._on_event,
-                on_step=self._on_step,
-                on_content_delta=self._on_content_delta,
-            )
-            self._thinking.stop()
-            self._flush_step()
+                # Regular objective — run in background thread
+                self.console.print()
+                self._agent_result = None
+                self._agent_thread = threading.Thread(
+                    target=self._run_agent,
+                    args=(user_input,),
+                    daemon=True,
+                )
+                self._agent_thread.start()
 
-            self.console.print()
-            self.console.print(_LeftMarkdown(answer), justify="left")
+                # Secondary input loop: accept input while agent works
+                while self._agent_thread.is_alive():
+                    try:
+                        queued = self.session.prompt(
+                            [("class:dim", "... ")],
+                            style=_queue_prompt_style(),
+                        ).strip()
+                        if queued:
+                            self._queued_input.append(queued)
+                            self.console.print(
+                                Text(f"  (queued: {queued[:60]}{'...' if len(queued) > 60 else ''})", style="dim"),
+                            )
+                    except KeyboardInterrupt:
+                        continue
+                    except EOFError:
+                        # Ctrl+D during agent run — just wait for agent to finish
+                        break
 
-            # Token usage
-            token_str = _format_session_tokens(self.ctx.runtime.engine.session_tokens)
-            if token_str:
-                self.console.print(Text(f"  tokens: {token_str}", style="dim"))
-            self.console.print()
+                self._agent_thread.join()
+                self._agent_thread = None
+
+                if self._agent_result is not None:
+                    self._present_result(self._agent_result)
 
 
 def run_rich_repl(ctx: ChatContext, startup_info: dict[str, str] | None = None) -> None:
