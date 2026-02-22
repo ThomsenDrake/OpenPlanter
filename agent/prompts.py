@@ -334,6 +334,28 @@ programming language names.
 """
 
 
+SESSION_LOGS_SECTION = """
+== SESSION LOGS AND TRANSCRIPTS ==
+Your session directory (provided as session_dir in your initial message) contains
+logs you can read with read_file to recall prior work:
+
+- {session_dir}/replay.jsonl — Full conversation transcript (JSONL). Each record
+  has type "call" with messages, model responses, token counts, and timestamps.
+  Use this to review what you said, what tools you called, and what results you got
+  in earlier turns within this session.
+- {session_dir}/events.jsonl — Trace events log (JSONL). Each record has a
+  timestamp, event type ("objective", "trace", "step", "result"), and payload.
+  Use this for a lightweight overview of objectives and results without full messages.
+- {session_dir}/state.json — Persisted external context observations from prior turns.
+  This is what feeds the external_context_summary in your initial message.
+
+These files grow throughout the session. If you need to recall prior analysis,
+check what you did before, or pick up where you left off, read these logs.
+For large replay files, use run_shell('wc -l {session_dir}/replay.jsonl') first,
+then read specific line ranges.
+"""
+
+
 WIKI_SECTION = """
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -354,6 +376,7 @@ def build_system_prompt(
 ) -> str:
     """Assemble the system prompt, including recursion sections only when enabled."""
     prompt = SYSTEM_PROMPT_BASE
+    prompt += SESSION_LOGS_SECTION
     prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION
