@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AgentConfig
-from .engine import ContentDeltaCallback, ExternalContext, RLMEngine, StepCallback
+from .engine import ContentDeltaCallback, ExternalContext, RLMEngine, StepCallback, TurnSummary
 from .replay_log import ReplayLogger
 
 EventCallback = Callable[[str], None]
@@ -226,6 +226,8 @@ class SessionRuntime:
     session_id: str
     context: ExternalContext
     max_persisted_observations: int = 400
+    turn_history: list[TurnSummary] | None = None
+    max_turn_summaries: int = 50
 
     @classmethod
     def bootstrap(
@@ -252,12 +254,26 @@ class SessionRuntime:
         engine.session_dir = store._session_dir(sid)
         engine.session_id = sid
 
+        # Load turn history from persisted state
+        raw_history = state.get("turn_history", [])
+        turn_history: list[TurnSummary] = []
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if isinstance(item, dict):
+                    try:
+                        turn_history.append(TurnSummary.from_dict(item))
+                    except (KeyError, TypeError):
+                        pass
+        max_turns = max(1, config.max_turn_summaries)
+
         runtime = cls(
             engine=engine,
             store=store,
             session_id=sid,
             context=context,
             max_persisted_observations=max_obs,
+            turn_history=turn_history[-max_turns:],
+            max_turn_summaries=max_turns,
         )
         try:
             runtime.store.append_event(
@@ -344,6 +360,7 @@ class SessionRuntime:
 
         replay_path = self.store._session_dir(self.session_id) / "replay.jsonl"
         replay_logger = ReplayLogger(path=replay_path)
+        replay_seq_start = replay_logger._seq
 
         result, updated_context = self.engine.solve_with_context(
             objective=objective,
@@ -352,8 +369,27 @@ class SessionRuntime:
             on_step=_combined_on_step,
             on_content_delta=on_content_delta,
             replay_logger=replay_logger,
+            turn_history=self.turn_history,
         )
         self.context = updated_context
+
+        # Generate turn summary
+        if self.turn_history is None:
+            self.turn_history = []
+        turn_number = (self.turn_history[-1].turn_number + 1) if self.turn_history else 1
+        result_preview = result[:200] + "..." if len(result) > 200 else result
+        steps_used = replay_logger._seq - replay_seq_start
+        summary = TurnSummary(
+            turn_number=turn_number,
+            objective=objective,
+            result_preview=result_preview,
+            timestamp=_utc_now(),
+            steps_used=steps_used,
+            replay_seq_start=replay_seq_start,
+        )
+        self.turn_history.append(summary)
+        if len(self.turn_history) > self.max_turn_summaries:
+            self.turn_history = self.turn_history[-self.max_turn_summaries:]
         try:
             self.store.append_event(
                 self.session_id,
@@ -371,10 +407,12 @@ class SessionRuntime:
     def _persist_state(self) -> None:
         if len(self.context.observations) > self.max_persisted_observations:
             self.context.observations = self.context.observations[-self.max_persisted_observations :]
-        state = {
+        state: dict[str, Any] = {
             "session_id": self.session_id,
             "saved_at": _utc_now(),
             "external_observations": self.context.observations,
         }
+        if self.turn_history:
+            state["turn_history"] = [t.to_dict() for t in self.turn_history]
         self.store.save_state(self.session_id, state)
 

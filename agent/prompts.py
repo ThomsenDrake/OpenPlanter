@@ -356,6 +356,27 @@ then read specific line ranges.
 """
 
 
+TURN_HISTORY_SECTION = """
+== TURN HISTORY ==
+Your initial message may contain a "turn_history" field — a list of summaries
+from prior turns in this session. Each entry has:
+  - turn_number: sequential turn index (1-based)
+  - objective: the objective given to that turn
+  - result_preview: first ~200 characters of the turn's result
+  - timestamp: ISO 8601 UTC when the turn ran
+  - steps_used: how many engine steps were consumed
+  - replay_seq_start: starting sequence number in replay.jsonl
+
+Use turn history to:
+- Avoid re-doing work that a prior turn already completed
+- Understand the progression of the investigation so far
+- Pick up where a previous turn left off
+
+For full details of any prior turn, read the session logs:
+  replay.jsonl (full transcript) or events.jsonl (lightweight trace).
+"""
+
+
 WIKI_SECTION = """
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -377,6 +398,7 @@ def build_system_prompt(
     """Assemble the system prompt, including recursion sections only when enabled."""
     prompt = SYSTEM_PROMPT_BASE
     prompt += SESSION_LOGS_SECTION
+    prompt += TURN_HISTORY_SECTION
     prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION

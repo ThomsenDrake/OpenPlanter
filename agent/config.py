@@ -49,6 +49,7 @@ class AgentConfig:
     min_subtask_depth: int = 0
     acceptance_criteria: bool = True
     max_plan_chars: int = 40_000
+    max_turn_summaries: int = 50
     demo: bool = False
 
     @classmethod
@@ -102,5 +103,6 @@ class AgentConfig:
             min_subtask_depth=int(os.getenv("OPENPLANTER_MIN_SUBTASK_DEPTH", "0")),
             acceptance_criteria=os.getenv("OPENPLANTER_ACCEPTANCE_CRITERIA", "true").strip().lower() in ("1", "true", "yes"),
             max_plan_chars=int(os.getenv("OPENPLANTER_MAX_PLAN_CHARS", "40000")),
+            max_turn_summaries=int(os.getenv("OPENPLANTER_MAX_TURN_SUMMARIES", "50")),
             demo=os.getenv("OPENPLANTER_DEMO", "").strip().lower() in ("1", "true", "yes"),
         )

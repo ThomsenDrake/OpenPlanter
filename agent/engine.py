@@ -121,6 +121,38 @@ class ExternalContext:
 
 
 @dataclass
+class TurnSummary:
+    """Lightweight summary of a completed agent turn for session continuity."""
+    turn_number: int
+    objective: str
+    result_preview: str   # first ~200 chars
+    timestamp: str        # ISO 8601 UTC
+    steps_used: int = 0
+    replay_seq_start: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn_number": self.turn_number,
+            "objective": self.objective,
+            "result_preview": self.result_preview,
+            "timestamp": self.timestamp,
+            "steps_used": self.steps_used,
+            "replay_seq_start": self.replay_seq_start,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "TurnSummary":
+        return cls(
+            turn_number=d["turn_number"],
+            objective=d["objective"],
+            result_preview=d["result_preview"],
+            timestamp=d["timestamp"],
+            steps_used=d.get("steps_used", 0),
+            replay_seq_start=d.get("replay_seq_start", 0),
+        )
+
+
+@dataclass
 class RLMEngine:
     model: BaseModel
     tools: WorkspaceTools
@@ -164,6 +196,7 @@ class RLMEngine:
         on_step: StepCallback | None = None,
         on_content_delta: ContentDeltaCallback | None = None,
         replay_logger: ReplayLogger | None = None,
+        turn_history: list[TurnSummary] | None = None,
     ) -> tuple[str, ExternalContext]:
         if not objective.strip():
             return "No objective provided.", context or ExternalContext()
@@ -182,6 +215,7 @@ class RLMEngine:
                 on_content_delta=on_content_delta,
                 deadline=deadline,
                 replay_logger=replay_logger,
+                turn_history=turn_history,
             )
         finally:
             cleanup = getattr(self.tools, "cleanup_bg_jobs", None)
@@ -275,6 +309,7 @@ class RLMEngine:
         deadline: float = 0,
         model_override: BaseModel | None = None,
         replay_logger: ReplayLogger | None = None,
+        turn_history: list[TurnSummary] | None = None,
     ) -> str:
         model = model_override or self.model
 
@@ -308,6 +343,12 @@ class RLMEngine:
             initial_msg_dict["session_dir"] = str(self.session_dir)
         if self.session_id is not None:
             initial_msg_dict["session_id"] = self.session_id
+        if depth == 0 and turn_history:
+            initial_msg_dict["turn_history"] = [t.to_dict() for t in turn_history]
+            initial_msg_dict["turn_history_note"] = (
+                f"{len(turn_history)} prior turn(s). "
+                f"Read replay.jsonl/events.jsonl in session_dir for full details."
+            )
         initial_message = json.dumps(initial_msg_dict, ensure_ascii=True)
 
         conversation = model.create_conversation(self.system_prompt, initial_message)
