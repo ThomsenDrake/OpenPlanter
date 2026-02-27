@@ -133,6 +133,17 @@ pub async fn save_settings(
     store.save(&settings).map_err(|e| e.to_string())
 }
 
+/// Build credential status from config: which providers have API keys configured.
+pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<String, bool> {
+    let mut status = HashMap::new();
+    status.insert("openai".to_string(), cfg.openai_api_key.is_some());
+    status.insert("anthropic".to_string(), cfg.anthropic_api_key.is_some());
+    status.insert("openrouter".to_string(), cfg.openrouter_api_key.is_some());
+    status.insert("cerebras".to_string(), cfg.cerebras_api_key.is_some());
+    status.insert("ollama".to_string(), true); // Ollama never needs a key
+    status
+}
+
 /// Get credential status: which providers have API keys configured.
 #[tauri::command]
 pub async fn get_credentials_status(
@@ -160,4 +171,147 @@ pub async fn get_credentials_status(
     );
     status.insert("ollama".to_string(), true); // Ollama never needs a key
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    // ── known_models_for_provider ──
+
+    #[test]
+    fn test_openai_models_nonempty() {
+        let models = known_models_for_provider("openai");
+        assert!(!models.is_empty(), "openai should have known models");
+    }
+
+    #[test]
+    fn test_anthropic_models_nonempty() {
+        let models = known_models_for_provider("anthropic");
+        assert!(!models.is_empty(), "anthropic should have known models");
+    }
+
+    #[test]
+    fn test_openrouter_models_nonempty() {
+        let models = known_models_for_provider("openrouter");
+        assert!(!models.is_empty(), "openrouter should have known models");
+    }
+
+    #[test]
+    fn test_cerebras_models_nonempty() {
+        let models = known_models_for_provider("cerebras");
+        assert!(!models.is_empty(), "cerebras should have known models");
+    }
+
+    #[test]
+    fn test_ollama_models_nonempty() {
+        let models = known_models_for_provider("ollama");
+        assert!(!models.is_empty(), "ollama should have known models");
+    }
+
+    #[test]
+    fn test_unknown_provider_empty() {
+        let models = known_models_for_provider("foo");
+        assert!(models.is_empty(), "unknown provider should return empty vec");
+    }
+
+    #[test]
+    fn test_all_providers_model_ids_unique() {
+        let mut all_ids = HashSet::new();
+        for p in &["openai", "anthropic", "openrouter", "cerebras", "ollama"] {
+            for m in known_models_for_provider(p) {
+                assert!(
+                    all_ids.insert(m.id.clone()),
+                    "duplicate model ID: {}",
+                    m.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_model_info_fields() {
+        for provider in &["openai", "anthropic", "openrouter", "cerebras", "ollama"] {
+            for m in known_models_for_provider(provider) {
+                assert!(!m.id.is_empty(), "model id should not be empty");
+                assert!(m.name.is_some(), "model name should be Some for {}", m.id);
+                assert_eq!(m.provider, *provider, "provider mismatch for {}", m.id);
+            }
+        }
+    }
+
+    // ── build_credential_status ──
+
+    #[test]
+    fn test_cred_status_all_none() {
+        let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        // Force all keys to None
+        let mut cfg = cfg;
+        cfg.openai_api_key = None;
+        cfg.anthropic_api_key = None;
+        cfg.openrouter_api_key = None;
+        cfg.cerebras_api_key = None;
+        let status = build_credential_status(&cfg);
+        assert_eq!(status["openai"], false);
+        assert_eq!(status["anthropic"], false);
+        assert_eq!(status["openrouter"], false);
+        assert_eq!(status["cerebras"], false);
+        assert_eq!(status["ollama"], true, "ollama always true");
+    }
+
+    #[test]
+    fn test_cred_status_openai_set() {
+        let mut cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        cfg.openai_api_key = Some("sk-test".to_string());
+        cfg.anthropic_api_key = None;
+        cfg.openrouter_api_key = None;
+        cfg.cerebras_api_key = None;
+        let status = build_credential_status(&cfg);
+        assert_eq!(status["openai"], true);
+        assert_eq!(status["anthropic"], false);
+    }
+
+    #[test]
+    fn test_cred_status_anthropic_set() {
+        let mut cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        cfg.openai_api_key = None;
+        cfg.anthropic_api_key = Some("sk-ant-test".to_string());
+        cfg.openrouter_api_key = None;
+        cfg.cerebras_api_key = None;
+        let status = build_credential_status(&cfg);
+        assert_eq!(status["anthropic"], true);
+        assert_eq!(status["openai"], false);
+    }
+
+    #[test]
+    fn test_cred_status_ollama_always_true() {
+        let mut cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        cfg.openai_api_key = None;
+        cfg.anthropic_api_key = None;
+        cfg.openrouter_api_key = None;
+        cfg.cerebras_api_key = None;
+        let status = build_credential_status(&cfg);
+        assert_eq!(status["ollama"], true);
+    }
+
+    #[test]
+    fn test_cred_status_all_set() {
+        let mut cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        cfg.openai_api_key = Some("k1".to_string());
+        cfg.anthropic_api_key = Some("k2".to_string());
+        cfg.openrouter_api_key = Some("k3".to_string());
+        cfg.cerebras_api_key = Some("k4".to_string());
+        let status = build_credential_status(&cfg);
+        for (provider, has_key) in &status {
+            assert!(has_key, "{} should be true when key is set", provider);
+        }
+    }
+
+    #[test]
+    fn test_cred_status_has_five_providers() {
+        let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        let status = build_credential_status(&cfg);
+        assert_eq!(status.len(), 5, "should have exactly 5 provider entries");
+    }
 }

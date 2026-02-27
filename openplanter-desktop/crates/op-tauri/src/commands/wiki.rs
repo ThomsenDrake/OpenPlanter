@@ -1,39 +1,22 @@
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use regex::Regex;
 use tauri::State;
 use crate::state::AppState;
 use op_core::events::{GraphData, GraphEdge, GraphNode};
 
-/// Get the wiki knowledge graph data by parsing wiki/index.md.
-#[tauri::command]
-pub async fn get_graph_data(
-    state: State<'_, AppState>,
-) -> Result<GraphData, String> {
-    let cfg = state.config.lock().await;
-    let wiki_dir = cfg.workspace.join("wiki");
-    let index_path = wiki_dir.join("index.md");
-
-    if !index_path.exists() {
-        return Ok(GraphData {
-            nodes: vec![],
-            edges: vec![],
-        });
-    }
-
-    let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
-
+/// Parse wiki/index.md content into graph nodes.
+pub fn parse_index_nodes(content: &str) -> Vec<GraphNode> {
     let mut nodes = Vec::new();
     let mut current_category = String::new();
 
-    // Parse index.md for table rows: | Name | ... | [file.md](path) |
     let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+\.md)\)").unwrap();
     let category_re = Regex::new(r"^###\s+(.+)").unwrap();
 
     for line in content.lines() {
         if let Some(caps) = category_re.captures(line) {
             current_category = caps[1].trim().to_lowercase().replace(' ', "-");
-            // Normalize: "government contracts" -> "contracts"
             if current_category.starts_with("government-") {
                 current_category = current_category
                     .strip_prefix("government-")
@@ -46,11 +29,9 @@ pub async fn get_graph_data(
             continue;
         }
 
-        // Look for table rows with markdown links
         if !line.trim_start().starts_with('|') {
             continue;
         }
-        // Skip header/separator rows
         if line.contains("---") || line.contains("Source") {
             continue;
         }
@@ -58,16 +39,13 @@ pub async fn get_graph_data(
         if let Some(caps) = link_re.captures(line) {
             let path = caps[2].to_string();
 
-            // Extract human-readable source name from the first table column
-            // Format: | Source Name | Jurisdiction | [link](path) |
             let label = line
                 .split('|')
-                .nth(1) // first cell after leading |
+                .nth(1)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| caps[1].to_string()); // fallback to link text
+                .unwrap_or_else(|| caps[1].to_string());
 
-            // Build node ID from filename
             let id = path
                 .rsplit('/')
                 .next()
@@ -84,12 +62,18 @@ pub async fn get_graph_data(
         }
     }
 
-    // Parse individual wiki files for cross-references to build edges
-    let mut edges = Vec::new();
-    let node_ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    nodes
+}
 
-    for node in &nodes {
-        let file_path = cfg.workspace.join(&node.path);
+/// Find cross-references between nodes by reading wiki files from `wiki_dir`.
+pub fn find_cross_references(nodes: &[GraphNode], wiki_dir: &Path) -> Vec<GraphEdge> {
+    let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+\.md)\)").unwrap();
+    let node_ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut edges = Vec::new();
+
+    // wiki_dir is the workspace root; node.path is relative (e.g. "wiki/file.md")
+    for node in nodes {
+        let file_path = wiki_dir.join(&node.path);
         if !file_path.exists() {
             continue;
         }
@@ -98,7 +82,6 @@ pub async fn get_graph_data(
             Err(_) => continue,
         };
 
-        // Look for cross-references: links to other wiki files
         for caps in link_re.captures_iter(&file_content) {
             let ref_path = &caps[2];
             let ref_id = ref_path
@@ -117,5 +100,181 @@ pub async fn get_graph_data(
         }
     }
 
+    edges
+}
+
+/// Get the wiki knowledge graph data by parsing wiki/index.md.
+#[tauri::command]
+pub async fn get_graph_data(
+    state: State<'_, AppState>,
+) -> Result<GraphData, String> {
+    let cfg = state.config.lock().await;
+    let wiki_dir = cfg.workspace.join("wiki");
+    let index_path = wiki_dir.join("index.md");
+
+    if !index_path.exists() {
+        return Ok(GraphData {
+            nodes: vec![],
+            edges: vec![],
+        });
+    }
+
+    let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
+    let nodes = parse_index_nodes(&content);
+    let edges = find_cross_references(&nodes, &cfg.workspace);
+
     Ok(GraphData { nodes, edges })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // ── parse_index_nodes ──
+
+    #[test]
+    fn test_empty_content() {
+        let nodes = parse_index_nodes("");
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn test_category_heading() {
+        let content = "### Campaign Finance\n| MA OCPF | MA | [link](ocpf.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].category, "campaign-finance");
+    }
+
+    #[test]
+    fn test_table_row_with_link() {
+        let content = "### Data\n| MA OCPF | MA | [link](ocpf.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].label, "MA OCPF");
+        assert_eq!(nodes[0].id, "ocpf");
+        assert_eq!(nodes[0].path, "wiki/ocpf.md");
+    }
+
+    #[test]
+    fn test_multiple_categories() {
+        // Note: labels must not contain "Source" (parser skips header rows containing it)
+        let content = "\
+### Campaign Finance
+| FEC Data | US | [a](a.md) |
+
+### Corporate
+| SEC Data | UK | [b](b.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].category, "campaign-finance");
+        assert_eq!(nodes[1].category, "corporate");
+    }
+
+    #[test]
+    fn test_government_normalization() {
+        let content = "### Government Contracts\n| GovData | US | [g](gov.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes[0].category, "contracts");
+    }
+
+    #[test]
+    fn test_regulatory_normalization() {
+        let content = "### Regulatory & Enforcement\n| RegData | US | [r](reg.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes[0].category, "regulatory");
+    }
+
+    #[test]
+    fn test_skips_header_separator() {
+        let content = "### Data\n| Source | Jurisdiction | Link |\n| --- | --- | --- |\n| Real | US | [r](real.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "real");
+    }
+
+    #[test]
+    fn test_label_from_first_column() {
+        let content = "### Data\n| My Label | US | [different text](file.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes[0].label, "My Label");
+    }
+
+    #[test]
+    fn test_node_id_from_filename() {
+        let content = "### Data\n| Src | US | [link](subdir/file.md) |";
+        let nodes = parse_index_nodes(content);
+        assert_eq!(nodes[0].id, "file");
+        assert_eq!(nodes[0].path, "wiki/subdir/file.md");
+    }
+
+    #[test]
+    fn test_no_table_rows_no_nodes() {
+        let content = "### Category A\n### Category B\nSome text\n";
+        let nodes = parse_index_nodes(content);
+        assert!(nodes.is_empty());
+    }
+
+    // ── find_cross_references ──
+
+    #[test]
+    fn test_no_files_no_edges() {
+        let tmp = tempdir().unwrap();
+        let nodes = vec![GraphNode {
+            id: "a".to_string(),
+            label: "A".to_string(),
+            category: "test".to_string(),
+            path: "wiki/a.md".to_string(),
+        }];
+        let edges = find_cross_references(&nodes, tmp.path());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_cross_ref_found() {
+        let tmp = tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        fs::create_dir_all(&wiki_dir).unwrap();
+        // File A links to file B
+        fs::write(wiki_dir.join("a.md"), "See [B](b.md) for details.").unwrap();
+        fs::write(wiki_dir.join("b.md"), "# B\nContent here.").unwrap();
+
+        let nodes = vec![
+            GraphNode {
+                id: "a".to_string(),
+                label: "A".to_string(),
+                category: "test".to_string(),
+                path: "wiki/a.md".to_string(),
+            },
+            GraphNode {
+                id: "b".to_string(),
+                label: "B".to_string(),
+                category: "test".to_string(),
+                path: "wiki/b.md".to_string(),
+            },
+        ];
+        let edges = find_cross_references(&nodes, tmp.path());
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, "a");
+        assert_eq!(edges[0].target, "b");
+    }
+
+    #[test]
+    fn test_no_self_reference() {
+        let tmp = tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        fs::create_dir_all(&wiki_dir).unwrap();
+        // File A links to itself
+        fs::write(wiki_dir.join("a.md"), "See [self](a.md) for more.").unwrap();
+
+        let nodes = vec![GraphNode {
+            id: "a".to_string(),
+            label: "A".to_string(),
+            category: "test".to_string(),
+            path: "wiki/a.md".to_string(),
+        }];
+        let edges = find_cross_references(&nodes, tmp.path());
+        assert!(edges.is_empty(), "self-references should be excluded");
+    }
 }

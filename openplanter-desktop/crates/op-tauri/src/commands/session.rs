@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
 use crate::state::AppState;
 use op_core::events::SessionInfo;
@@ -12,20 +12,18 @@ async fn sessions_dir(state: &State<'_, AppState>) -> PathBuf {
     ws.join(root).join("sessions")
 }
 
-/// List recent sessions by scanning session directories.
-#[tauri::command]
-pub async fn list_sessions(
-    limit: Option<u32>,
-    state: State<'_, AppState>,
-) -> Result<Vec<SessionInfo>, String> {
-    let dir = sessions_dir(&state).await;
+/// Collect sessions from a directory, sorted by created_at descending, limited to `limit`.
+pub fn collect_sessions(dir: &Path, limit: usize) -> Vec<SessionInfo> {
     if !dir.exists() {
-        return Ok(vec![]);
+        return vec![];
     }
 
     let mut sessions: Vec<SessionInfo> = Vec::new();
 
-    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
     for entry in entries.flatten() {
         if !entry.path().is_dir() {
             continue;
@@ -45,13 +43,49 @@ pub async fn list_sessions(
         sessions.push(info);
     }
 
-    // Sort by created_at descending
     sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sessions.truncate(limit);
+    sessions
+}
 
+/// Create a new session in the given directory, returning the SessionInfo.
+pub fn create_session(dir: &Path) -> Result<SessionInfo, std::io::Error> {
+    fs::create_dir_all(dir)?;
+
+    let now = chrono::Utc::now();
+    let new_id = format!(
+        "{}-{:08x}",
+        now.format("%Y%m%d-%H%M%S"),
+        rand_hex()
+    );
+
+    let session_dir = dir.join(&new_id);
+    fs::create_dir_all(&session_dir)?;
+    fs::create_dir_all(session_dir.join("artifacts"))?;
+
+    let info = SessionInfo {
+        id: new_id,
+        created_at: now.to_rfc3339(),
+        turn_count: 0,
+        last_objective: None,
+    };
+
+    let json = serde_json::to_string_pretty(&info)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write(session_dir.join("metadata.json"), json)?;
+
+    Ok(info)
+}
+
+/// List recent sessions by scanning session directories.
+#[tauri::command]
+pub async fn list_sessions(
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SessionInfo>, String> {
+    let dir = sessions_dir(&state).await;
     let cap = limit.unwrap_or(20) as usize;
-    sessions.truncate(cap);
-
-    Ok(sessions)
+    Ok(collect_sessions(&dir, cap))
 }
 
 /// Open a session (create new or resume existing).
@@ -62,7 +96,6 @@ pub async fn open_session(
     state: State<'_, AppState>,
 ) -> Result<SessionInfo, String> {
     let dir = sessions_dir(&state).await;
-    let _ = fs::create_dir_all(&dir);
 
     if resume {
         if let Some(ref session_id) = id {
@@ -78,31 +111,9 @@ pub async fn open_session(
         }
     }
 
-    // Generate new session ID: YYYYMMDD-HHMMSS-hex
-    let now = chrono::Utc::now();
-    let new_id = format!(
-        "{}-{:08x}",
-        now.format("%Y%m%d-%H%M%S"),
-        rand_hex()
-    );
-
-    let session_dir = dir.join(&new_id);
-    fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(session_dir.join("artifacts")).map_err(|e| e.to_string())?;
-
-    let info = SessionInfo {
-        id: new_id.clone(),
-        created_at: now.to_rfc3339(),
-        turn_count: 0,
-        last_objective: None,
-    };
-
-    let json = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(session_dir.join("metadata.json"), json).map_err(|e| e.to_string())?;
-
+    let info = create_session(&dir).map_err(|e| e.to_string())?;
     let mut session_lock = state.session_id.lock().await;
-    *session_lock = Some(new_id);
-
+    *session_lock = Some(info.id.clone());
     Ok(info)
 }
 
@@ -114,4 +125,166 @@ fn rand_hex() -> u32 {
         .unwrap_or_default();
     // Mix nanos for some randomness
     (d.subsec_nanos() ^ 0xDEAD_BEEF) & 0xFFFF_FFFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_session(dir: &Path, id: &str, created_at: &str) {
+        let session_dir = dir.join(id);
+        fs::create_dir_all(session_dir.join("artifacts")).unwrap();
+        let info = SessionInfo {
+            id: id.to_string(),
+            created_at: created_at.to_string(),
+            turn_count: 0,
+            last_objective: None,
+        };
+        let json = serde_json::to_string_pretty(&info).unwrap();
+        fs::write(session_dir.join("metadata.json"), json).unwrap();
+    }
+
+    // ── collect_sessions ──
+
+    #[test]
+    fn test_empty_dir_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let result = collect_sessions(&sessions_dir, 20);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_nonexistent_dir_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let result = collect_sessions(&tmp.path().join("nope"), 20);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_session() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        write_session(&dir, "20260101-120000-deadbeef", "2026-01-01T12:00:00Z");
+        let result = collect_sessions(&dir, 20);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "20260101-120000-deadbeef");
+    }
+
+    #[test]
+    fn test_multiple_sessions_sorted_desc() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        write_session(&dir, "s1", "2026-01-01T10:00:00Z");
+        write_session(&dir, "s2", "2026-01-01T12:00:00Z");
+        write_session(&dir, "s3", "2026-01-01T11:00:00Z");
+        let result = collect_sessions(&dir, 20);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].id, "s2"); // most recent
+        assert_eq!(result[1].id, "s3");
+        assert_eq!(result[2].id, "s1"); // oldest
+    }
+
+    #[test]
+    fn test_limit_truncates() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..5 {
+            write_session(
+                &dir,
+                &format!("s{}", i),
+                &format!("2026-01-01T1{}:00:00Z", i),
+            );
+        }
+        let result = collect_sessions(&dir, 2);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_skips_dirs_without_metadata() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(dir.join("no-metadata")).unwrap();
+        write_session(&dir, "has-meta", "2026-01-01T12:00:00Z");
+        let result = collect_sessions(&dir, 20);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "has-meta");
+    }
+
+    #[test]
+    fn test_skips_invalid_json() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        let bad_dir = dir.join("bad-json");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join("metadata.json"), "not valid json").unwrap();
+        write_session(&dir, "good", "2026-01-01T12:00:00Z");
+        let result = collect_sessions(&dir, 20);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "good");
+    }
+
+    #[test]
+    fn test_skips_non_directories() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("some-file.txt"), "not a dir").unwrap();
+        write_session(&dir, "real-session", "2026-01-01T12:00:00Z");
+        let result = collect_sessions(&dir, 20);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "real-session");
+    }
+
+    // ── create_session ──
+
+    #[test]
+    fn test_creates_session_dir() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        let info = create_session(&dir).unwrap();
+        let session_dir = dir.join(&info.id);
+        assert!(session_dir.exists(), "session dir should exist");
+        assert!(session_dir.join("artifacts").exists(), "artifacts/ should exist");
+        assert!(session_dir.join("metadata.json").exists(), "metadata.json should exist");
+    }
+
+    #[test]
+    fn test_session_id_format() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        let info = create_session(&dir).unwrap();
+        // ID should match YYYYMMDD-HHMMSS-hex
+        let re = regex::Regex::new(r"^\d{8}-\d{6}-[0-9a-f]{8}$").unwrap();
+        assert!(
+            re.is_match(&info.id),
+            "session ID '{}' doesn't match expected format",
+            info.id
+        );
+    }
+
+    #[test]
+    fn test_metadata_json_valid() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        let info = create_session(&dir).unwrap();
+        let meta_path = dir.join(&info.id).join("metadata.json");
+        let content = fs::read_to_string(&meta_path).unwrap();
+        let deserialized: SessionInfo = serde_json::from_str(&content).unwrap();
+        assert_eq!(deserialized.id, info.id);
+    }
+
+    #[test]
+    fn test_session_turn_count_zero() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        let info = create_session(&dir).unwrap();
+        assert_eq!(info.turn_count, 0);
+        assert!(info.last_objective.is_none());
+    }
 }

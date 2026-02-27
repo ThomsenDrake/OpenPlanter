@@ -16,5 +16,9 @@ chrono = { workspace = true }
 tokio-util = { workspace = true }
 regex = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
