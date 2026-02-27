@@ -60,7 +60,6 @@ export interface AppState {
   maxStepsPerCall: number;
   currentStep: number;
   currentDepth: number;
-  perModelTokens: Record<string, { input: number; output: number }>;
   inputHistory: string[];
   inputQueue: string[];
 }
@@ -80,7 +79,6 @@ export const appState = new Store<AppState>({
   maxStepsPerCall: 100,
   currentStep: 0,
   currentDepth: 0,
-  perModelTokens: {},
   inputHistory: [],
   inputQueue: [],
 });

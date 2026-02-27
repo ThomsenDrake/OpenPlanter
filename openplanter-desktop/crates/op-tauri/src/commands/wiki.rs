@@ -56,8 +56,16 @@ pub async fn get_graph_data(
         }
 
         if let Some(caps) = link_re.captures(line) {
-            let label = caps[1].to_string();
             let path = caps[2].to_string();
+
+            // Extract human-readable source name from the first table column
+            // Format: | Source Name | Jurisdiction | [link](path) |
+            let label = line
+                .split('|')
+                .nth(1) // first cell after leading |
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| caps[1].to_string()); // fallback to link text
 
             // Build node ID from filename
             let id = path
