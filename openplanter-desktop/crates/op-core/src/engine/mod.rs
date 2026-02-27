@@ -242,4 +242,89 @@ mod tests {
             "complete result should contain objective, got: {complete_text}"
         );
     }
+
+    #[tokio::test]
+    async fn test_demo_solve_cancel_mid_flight() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let emitter = TestEmitter {
+            events: events.clone(),
+        };
+        let token = CancellationToken::new();
+        let cancel_handle = token.clone();
+
+        // Spawn demo_solve on a separate task, just like agent.rs does
+        let task = tokio::spawn(async move {
+            demo_solve("Mid-cancel test", &emitter, token).await;
+        });
+
+        // Wait for the trace event to be emitted, then cancel
+        // This proves cancellation works mid-solve, not just pre-solve
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let current = events.lock().unwrap().len();
+            if current >= 2 {
+                // At least trace + thinking delta emitted; cancel now
+                cancel_handle.cancel();
+                break;
+            }
+        }
+
+        task.await.expect("task should not panic");
+
+        let recorded = events.lock().unwrap().clone();
+
+        // Should have an error with "Cancelled"
+        let has_error = recorded
+            .iter()
+            .any(|e| matches!(e, RecordedEvent::Error(m) if m == "Cancelled"));
+        assert!(has_error, "expected Cancelled error after mid-flight cancel");
+
+        // Should NOT have a Complete event
+        let has_complete = recorded
+            .iter()
+            .any(|e| matches!(e, RecordedEvent::Complete(_)));
+        assert!(
+            !has_complete,
+            "should not have Complete after mid-flight cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_demo_solve_spawned_task_completes() {
+        // Simulates the exact pattern used in agent.rs:
+        // spawn demo_solve on a task, let it run to completion
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let emitter = TestEmitter {
+            events: events.clone(),
+        };
+        let token = CancellationToken::new();
+
+        let task = tokio::spawn(async move {
+            demo_solve("Spawned test", &emitter, token).await;
+        });
+
+        task.await.expect("spawned task should not panic");
+
+        let recorded = events.lock().unwrap().clone();
+
+        // Verify full sequence completed through the spawned task
+        assert!(
+            matches!(recorded.first(), Some(RecordedEvent::Trace(_))),
+            "first event should be Trace"
+        );
+        assert!(
+            matches!(recorded.last(), Some(RecordedEvent::Complete(_))),
+            "last event should be Complete"
+        );
+
+        // Verify the complete event contains the objective
+        let complete_text = recorded
+            .iter()
+            .find_map(|e| match e {
+                RecordedEvent::Complete(r) => Some(r.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(complete_text.contains("Spawned test"));
+    }
 }
