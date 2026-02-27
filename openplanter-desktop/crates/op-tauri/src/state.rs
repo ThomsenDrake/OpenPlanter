@@ -40,13 +40,14 @@ impl AppState {
 
         // Load .env files and merge credentials into config
         let env_creds = credentials_from_env();
-        for candidate in discover_env_candidates(&cfg.workspace) {
-            let file_creds = parse_env_file(&candidate);
+        let candidates = discover_env_candidates(&cfg.workspace);
+        for candidate in &candidates {
+            let file_creds = parse_env_file(candidate);
             merge_credentials_into_config(&mut cfg, &env_creds, &file_creds);
         }
 
         // If no .env candidates found, still merge from process env
-        if discover_env_candidates(&cfg.workspace).is_empty() {
+        if candidates.is_empty() {
             let empty = CredentialBundle::default();
             merge_credentials_into_config(&mut cfg, &env_creds, &empty);
         }

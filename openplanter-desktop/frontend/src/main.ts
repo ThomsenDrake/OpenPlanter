@@ -1,5 +1,5 @@
 import { createApp } from "./components/App";
-import { getConfig, openSession } from "./api/invoke";
+import { getConfig } from "./api/invoke";
 import {
   onAgentTrace,
   onAgentDelta,
@@ -45,17 +45,7 @@ async function init() {
     console.error("Failed to load config:", e);
   }
 
-  // Open a new session
-  let sessionId = "";
-  try {
-    const session = await openSession();
-    sessionId = session.id;
-    appState.update((s) => ({ ...s, sessionId: session.id }));
-  } catch (e) {
-    console.error("Failed to open session:", e);
-  }
-
-  // Add splash art and startup info
+  // Add splash art and startup info (session created lazily on first message)
   const state = appState.get();
   const reasoningLabel = state.reasoningEffort ?? "off";
   const modeLabel = state.recursive ? "recursive" : "flat";
@@ -78,8 +68,7 @@ async function init() {
           `reasoning: ${reasoningLabel}`,
           `mode: ${modeLabel}`,
           `workspace: ${state.workspace || "."}`,
-          sessionId ? `session: ${sessionId.slice(0, 8)}` : "",
-        ].filter(Boolean).join("  |  "),
+        ].join("  |  "),
         timestamp: Date.now(),
       },
       {

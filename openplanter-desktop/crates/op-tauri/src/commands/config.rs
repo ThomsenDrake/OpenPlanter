@@ -133,7 +133,7 @@ pub async fn save_settings(
     store.save(&settings).map_err(|e| e.to_string())
 }
 
-/// Build credential status from config: which providers have API keys configured.
+/// Build credential status from config: which providers/services have API keys configured.
 pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<String, bool> {
     let mut status = HashMap::new();
     status.insert("openai".to_string(), cfg.openai_api_key.is_some());
@@ -141,10 +141,11 @@ pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<St
     status.insert("openrouter".to_string(), cfg.openrouter_api_key.is_some());
     status.insert("cerebras".to_string(), cfg.cerebras_api_key.is_some());
     status.insert("ollama".to_string(), true); // Ollama never needs a key
+    status.insert("exa".to_string(), cfg.exa_api_key.is_some());
     status
 }
 
-/// Get credential status: which providers have API keys configured.
+/// Get credential status: which providers/services have API keys configured.
 #[tauri::command]
 pub async fn get_credentials_status(
     state: State<'_, AppState>,
@@ -170,6 +171,10 @@ pub async fn get_credentials_status(
         cfg.cerebras_api_key.is_some() || env_creds.cerebras_api_key.is_some(),
     );
     status.insert("ollama".to_string(), true); // Ollama never needs a key
+    status.insert(
+        "exa".to_string(),
+        cfg.exa_api_key.is_some() || env_creds.exa_api_key.is_some(),
+    );
     Ok(status)
 }
 
@@ -302,6 +307,7 @@ mod tests {
         cfg.anthropic_api_key = Some("k2".to_string());
         cfg.openrouter_api_key = Some("k3".to_string());
         cfg.cerebras_api_key = Some("k4".to_string());
+        cfg.exa_api_key = Some("k5".to_string());
         let status = build_credential_status(&cfg);
         for (provider, has_key) in &status {
             assert!(has_key, "{} should be true when key is set", provider);
@@ -309,9 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_status_has_five_providers() {
+    fn test_cred_status_has_six_entries() {
         let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
         let status = build_credential_status(&cfg);
-        assert_eq!(status.len(), 5, "should have exactly 5 provider entries");
+        assert_eq!(status.len(), 6, "should have 6 entries (5 providers + exa)");
     }
 }

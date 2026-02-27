@@ -215,7 +215,7 @@ async function loadCredentials(container: HTMLElement): Promise<void> {
   try {
     const status = await getCredentialsStatus();
     container.innerHTML = "";
-    const providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama"];
+    const providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama", "exa"];
     for (const p of providers) {
       const row = document.createElement("div");
       const hasKey = status[p] ?? false;

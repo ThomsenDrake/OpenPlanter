@@ -175,12 +175,22 @@ pub fn credentials_from_env() -> CredentialBundle {
     }
 }
 
-/// Discover `.env` file candidates in the workspace.
+/// Discover `.env` file candidates by walking from workspace up to ancestors.
 pub fn discover_env_candidates(workspace: &Path) -> Vec<PathBuf> {
     let ws = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    vec![ws.join(".env")]
+    let mut candidates = Vec::new();
+    let mut dir = Some(ws.as_path());
+    while let Some(d) = dir {
+        let env_path = d.join(".env");
+        if env_path.exists() {
+            candidates.push(env_path);
+            break; // use the nearest .env
+        }
+        dir = d.parent();
+    }
+    candidates
 }
 
 /// Workspace-level credential store at `{workspace}/.openplanter/credentials.json`.

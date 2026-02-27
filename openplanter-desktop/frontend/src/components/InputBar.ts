@@ -1,5 +1,5 @@
 /** Input bar: textarea, slash commands, input history, input queuing. */
-import { solve, cancel } from "../api/invoke";
+import { solve, cancel, openSession } from "../api/invoke";
 import { appState } from "../state/store";
 import { dispatchSlashCommand } from "../commands/slash";
 
@@ -100,6 +100,16 @@ export function createInputBar(): HTMLElement {
 
     textarea.value = "";
     autoResize();
+
+    // Create session lazily on first message
+    if (!appState.get().sessionId) {
+      try {
+        const session = await openSession();
+        appState.update((s) => ({ ...s, sessionId: session.id }));
+      } catch (e) {
+        console.error("Failed to create session:", e);
+      }
+    }
 
     try {
       await solve(text);
