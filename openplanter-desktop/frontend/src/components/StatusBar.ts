@@ -40,6 +40,10 @@ export function createStatusBar(): HTMLElement {
     modeEl.textContent = s.recursive ? "recursive" : "flat";
     sessionEl.textContent = s.sessionId ? `session ${s.sessionId.slice(0, 8)}` : "";
 
+    if (s.isRunning && s.currentStep > 0) {
+      sessionEl.textContent = `step ${s.currentStep} depth ${s.currentDepth}`;
+    }
+
     const inK = (s.inputTokens / 1000).toFixed(1);
     const outK = (s.outputTokens / 1000).toFixed(1);
     tokensEl.textContent = `${inK}k in / ${outK}k out`;
