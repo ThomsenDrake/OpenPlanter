@@ -1,22 +1,39 @@
-use tauri::State;
+use tauri::{AppHandle, State};
+use tokio_util::sync::CancellationToken;
+
+use crate::bridge::TauriEmitter;
 use crate::state::AppState;
+use op_core::engine::demo_solve;
 
 /// Start solving an objective. Result streamed via events.
 #[tauri::command]
 pub async fn solve(
     objective: String,
-    _state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Phase 6: spawn tokio task, run engine, stream events
-    let _ = objective;
+    // Create a fresh cancellation token for this solve run
+    let token = CancellationToken::new();
+    {
+        let mut current = state.cancel_token.lock().await;
+        *current = token.clone();
+    }
+
+    let emitter = TauriEmitter::new(app);
+
+    tokio::spawn(async move {
+        demo_solve(&objective, &emitter, token).await;
+    });
+
     Ok(())
 }
 
 /// Cancel a running solve.
 #[tauri::command]
 pub async fn cancel(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Phase 6: set cancellation token
+    let token = state.cancel_token.lock().await;
+    token.cancel();
     Ok(())
 }
