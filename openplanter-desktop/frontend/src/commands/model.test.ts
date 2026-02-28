@@ -1,7 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { __setHandler, __clearHandlers } from "../__mocks__/tauri";
+
+vi.mock("@tauri-apps/api/core", async () => {
+  const mock = await import("../__mocks__/tauri");
+  return { invoke: mock.invoke };
+});
+
 import { inferProvider, MODEL_ALIASES, handleModelCommand } from "./model";
 import { appState } from "../state/store";
-import { __setHandler, __clearHandlers } from "../__mocks__/tauri";
 
 describe("inferProvider", () => {
   it("claude returns anthropic", () => {

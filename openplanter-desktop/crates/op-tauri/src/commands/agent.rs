@@ -1,4 +1,4 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::bridge::TauriEmitter;
@@ -19,10 +19,27 @@ pub async fn solve(
     }
 
     let cfg = state.config.lock().await.clone();
-    let emitter = TauriEmitter::new(app);
+    let emitter = TauriEmitter::new(app.clone());
+    let error_handle = app;
 
     tokio::spawn(async move {
-        op_core::engine::solve(&objective, &cfg, &emitter, token).await;
+        let result = tokio::spawn(async move {
+            op_core::engine::solve(&objective, &cfg, &emitter, token).await;
+        })
+        .await;
+
+        // If the inner task panicked, emit an error so the frontend
+        // doesn't get stuck in "running" state forever.
+        if let Err(e) = result {
+            let msg = format!("Internal error: {e}");
+            eprintln!("[bridge] panic: {msg}");
+            let _ = error_handle.emit(
+                "agent:error",
+                op_core::events::ErrorEvent {
+                    message: msg,
+                },
+            );
+        }
     });
 
     Ok(())
