@@ -217,19 +217,42 @@ async function loadSessions(container: HTMLElement): Promise<void> {
       deleteBtn.className = "session-delete";
       deleteBtn.textContent = "\u00d7";
       deleteBtn.title = "Delete session";
+      let confirmPending = false;
+      let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+      function resetDeleteBtn() {
+        confirmPending = false;
+        deleteBtn.textContent = "\u00d7";
+        deleteBtn.style.color = "";
+        deleteBtn.style.fontWeight = "";
+        deleteBtn.style.display = "";
+      }
       deleteBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        if (!confirm(`Delete session ${session.id.slice(0, 8)}? This cannot be undone.`)) return;
+        if (!confirmPending) {
+          // First click: enter confirmation state
+          confirmPending = true;
+          deleteBtn.textContent = "Delete?";
+          deleteBtn.style.color = "var(--error)";
+          deleteBtn.style.fontWeight = "600";
+          deleteBtn.style.display = "inline"; // override CSS display:none
+          confirmTimer = setTimeout(resetDeleteBtn, 3000);
+          return;
+        }
+        // Second click: actually delete
+        if (confirmTimer) clearTimeout(confirmTimer);
+        confirmPending = false;
+        deleteBtn.textContent = "...";
         try {
           await deleteSession(session.id);
-          // If deleted session was active, switch to new one
           if (appState.get().sessionId === session.id) {
             await switchToNewSession(container);
           } else {
             await loadSessions(container);
           }
         } catch (err) {
+          deleteBtn.textContent = "Error!";
           console.error("Failed to delete session:", err);
+          setTimeout(resetDeleteBtn, 2000);
         }
       });
 
