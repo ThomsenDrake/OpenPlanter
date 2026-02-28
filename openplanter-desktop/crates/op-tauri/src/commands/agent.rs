@@ -3,7 +3,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bridge::TauriEmitter;
 use crate::state::AppState;
-use op_core::engine::demo_solve;
 
 /// Start solving an objective. Result streamed via events.
 #[tauri::command]
@@ -19,10 +18,11 @@ pub async fn solve(
         *current = token.clone();
     }
 
+    let cfg = state.config.lock().await.clone();
     let emitter = TauriEmitter::new(app);
 
     tokio::spawn(async move {
-        demo_solve(&objective, &emitter, token).await;
+        op_core::engine::solve(&objective, &cfg, &emitter, token).await;
     });
 
     Ok(())

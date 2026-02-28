@@ -1,11 +1,12 @@
 /// Model abstraction layer — trait + provider implementations.
-///
-/// Full implementation in Phase 2.
 pub mod openai;
 pub mod anthropic;
 pub mod sse;
 
 use serde::{Deserialize, Serialize};
+
+use crate::events::DeltaEvent;
+use tokio_util::sync::CancellationToken;
 
 /// A single tool call returned by the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +45,15 @@ pub enum Message {
 pub trait BaseModel: Send + Sync {
     /// Send a conversation and return the model's turn.
     async fn chat(&self, messages: &[Message], tools: &[serde_json::Value]) -> anyhow::Result<ModelTurn>;
+
+    /// Send a conversation with streaming deltas and cancellation support.
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+        on_delta: &(dyn Fn(DeltaEvent) + Send + Sync),
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<ModelTurn>;
 
     /// The model name.
     fn model_name(&self) -> &str;

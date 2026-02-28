@@ -1,14 +1,18 @@
 // Recursive language model engine.
 //
 // Full engine implementation in Phase 4. This module currently provides
-// the SolveEmitter trait and a demo_solve flow used by the Tauri frontend.
+// the SolveEmitter trait, demo_solve, and a real solve flow.
 
 pub mod context;
 pub mod judge;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::builder::build_model;
+use crate::config::AgentConfig;
 use crate::events::{DeltaEvent, DeltaKind, StepEvent, TokenUsage};
+use crate::model::Message;
+use crate::prompts::build_system_prompt;
 
 // Abstraction for emitting solve events.
 //
@@ -81,6 +85,80 @@ pub async fn demo_solve(
     });
 
     emitter.emit_complete(&response);
+}
+
+/// Real solve flow that calls an LLM API and streams the response.
+///
+/// Falls back to demo_solve when `config.demo` is true.
+pub async fn solve(
+    objective: &str,
+    config: &AgentConfig,
+    emitter: &dyn SolveEmitter,
+    cancel: CancellationToken,
+) {
+    if config.demo {
+        return demo_solve(objective, emitter, cancel).await;
+    }
+
+    // 1. Build model
+    let model = match build_model(config) {
+        Ok(m) => m,
+        Err(e) => {
+            emitter.emit_error(&e.to_string());
+            return;
+        }
+    };
+
+    emitter.emit_trace(&format!(
+        "Solving with {}/{}",
+        model.provider_name(),
+        model.model_name()
+    ));
+
+    // 2. Build messages
+    let system_prompt = build_system_prompt(
+        config.recursive,
+        config.acceptance_criteria,
+        config.demo,
+    );
+    let messages = vec![
+        Message::System {
+            content: system_prompt,
+        },
+        Message::User {
+            content: objective.to_string(),
+        },
+    ];
+
+    // 3. Call model with streaming
+    let start = std::time::Instant::now();
+    match model
+        .chat_stream(&messages, &[], &|delta| emitter.emit_delta(delta), &cancel)
+        .await
+    {
+        Ok(turn) => {
+            emitter.emit_step(StepEvent {
+                depth: 0,
+                step: 1,
+                tool_name: None,
+                tokens: TokenUsage {
+                    input_tokens: turn.input_tokens,
+                    output_tokens: turn.output_tokens,
+                },
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                is_final: true,
+            });
+            emitter.emit_complete(&turn.text);
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg == "Cancelled" {
+                emitter.emit_error("Cancelled");
+            } else {
+                emitter.emit_error(&msg);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

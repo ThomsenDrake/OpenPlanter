@@ -1,3 +1,1 @@
-// Shared SSE parser and accumulator.
-//
-// Full implementation in Phase 2.
+// SSE parsing is handled by reqwest-eventsource — no shared code needed here.
