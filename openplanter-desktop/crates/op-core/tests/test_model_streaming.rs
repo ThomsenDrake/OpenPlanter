@@ -1,4 +1,4 @@
-/// Integration tests for model streaming using a mock SSE server.
+//! Integration tests for model streaming using a mock SSE server.
 ///
 /// These tests start a real HTTP server that speaks SSE, point the model
 /// adapters at it, and verify the full streaming path end-to-end.
@@ -335,6 +335,41 @@ async fn test_anthropic_stream_cancel() {
     assert!(result.unwrap_err().to_string().contains("Cancelled"));
 }
 
+// ─── Non-streaming chat() tests ───
+
+#[tokio::test]
+async fn test_openai_chat_non_streaming() {
+    let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
+    let model = OpenAIModel::new(
+        "gpt-4o".to_string(),
+        "openai".to_string(),
+        format!("http://{addr}"),
+        "test-key".to_string(),
+        None,
+        HashMap::new(),
+    );
+
+    // chat() should internally call chat_stream with no-op callback
+    let turn = model.chat(&simple_messages(), &[]).await.expect("chat should succeed");
+    assert_eq!(turn.text, "Hello world");
+    assert_eq!(turn.input_tokens, 10);
+}
+
+#[tokio::test]
+async fn test_anthropic_chat_non_streaming() {
+    let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
+    let model = AnthropicModel::new(
+        "claude-sonnet-4-5".to_string(),
+        format!("http://{addr}"),
+        "test-key".to_string(),
+        None,
+    );
+
+    let turn = model.chat(&simple_messages(), &[]).await.expect("chat should succeed");
+    assert_eq!(turn.text, "Hello from Claude");
+    assert_eq!(turn.input_tokens, 25);
+}
+
 // ─── Error handling tests ───
 
 #[tokio::test]
@@ -470,6 +505,192 @@ async fn test_solve_with_mock_anthropic() {
     assert!(
         !recorded.iter().any(|e| matches!(e, Ev::Error(_))),
         "should not have any errors"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_with_mock_openai() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{solve, SolveEmitter};
+    use op_core::events::StepEvent;
+
+    let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev2 {
+        Trace(String),
+        Delta(DeltaEvent),
+        Step(StepEvent),
+        Complete(String),
+        Error(String),
+    }
+
+    struct TestEmitter2 {
+        events: Arc<Mutex<Vec<Ev2>>>,
+    }
+    impl SolveEmitter for TestEmitter2 {
+        fn emit_trace(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev2::Trace(message.to_string()));
+        }
+        fn emit_delta(&self, event: DeltaEvent) {
+            self.events.lock().unwrap().push(Ev2::Delta(event));
+        }
+        fn emit_step(&self, event: StepEvent) {
+            self.events.lock().unwrap().push(Ev2::Step(event));
+        }
+        fn emit_complete(&self, result: &str) {
+            self.events.lock().unwrap().push(Ev2::Complete(result.to_string()));
+        }
+        fn emit_error(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev2::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter2 { events: events.clone() };
+
+    let cfg = AgentConfig {
+        provider: "openai".into(),
+        model: "gpt-4o".into(),
+        openai_api_key: Some("test-key".into()),
+        openai_base_url: format!("http://{addr}"),
+        base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Hello", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+
+    // Should have a trace mentioning openai
+    assert!(
+        recorded.iter().any(|e| matches!(e, Ev2::Trace(m) if m.contains("openai"))),
+        "should have a trace mentioning openai, got: {:?}",
+        recorded.iter().filter_map(|e| match e { Ev2::Trace(m) => Some(m.clone()), _ => None }).collect::<Vec<_>>()
+    );
+
+    // Should have text deltas that spell "Hello world"
+    let text_content: String = recorded
+        .iter()
+        .filter_map(|e| match e {
+            Ev2::Delta(d) if matches!(d.kind, DeltaKind::Text) => Some(d.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text_content, "Hello world");
+
+    // Should have a step with correct tokens
+    assert!(
+        recorded.iter().any(|e| matches!(e, Ev2::Step(s) if s.is_final && s.tokens.input_tokens == 10)),
+        "should have a final step with 10 input tokens"
+    );
+
+    // Should complete with the full text
+    assert!(
+        recorded.iter().any(|e| matches!(e, Ev2::Complete(t) if t == "Hello world")),
+        "should complete with 'Hello world'"
+    );
+
+    // No errors
+    assert!(
+        !recorded.iter().any(|e| matches!(e, Ev2::Error(_))),
+        "should not have any errors"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_http_error_emits_error() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{solve, SolveEmitter};
+    use op_core::events::StepEvent;
+
+    let addr = start_error_server(
+        401,
+        r#"{"error":{"message":"Invalid API key"}}"#,
+    ).await;
+
+    struct ErrorEmitter {
+        errors: Arc<Mutex<Vec<String>>>,
+    }
+    impl SolveEmitter for ErrorEmitter {
+        fn emit_trace(&self, _: &str) {}
+        fn emit_delta(&self, _: DeltaEvent) {}
+        fn emit_step(&self, _: StepEvent) {}
+        fn emit_complete(&self, _: &str) {}
+        fn emit_error(&self, msg: &str) {
+            self.errors.lock().unwrap().push(msg.to_string());
+        }
+    }
+
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let emitter = ErrorEmitter { errors: errors.clone() };
+
+    let cfg = AgentConfig {
+        provider: "openai".into(),
+        model: "gpt-4o".into(),
+        openai_api_key: Some("bad-key".into()),
+        openai_base_url: format!("http://{addr}"),
+        base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Test", &cfg, &emitter, cancel).await;
+
+    let recorded = errors.lock().unwrap().clone();
+    assert!(
+        !recorded.is_empty(),
+        "should emit an error for HTTP 401"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_cancel_emits_cancelled() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{solve, SolveEmitter};
+    use op_core::events::StepEvent;
+
+    // Use a server that returns data but we cancel before processing
+    let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
+
+    struct CancelEmitter {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+    impl SolveEmitter for CancelEmitter {
+        fn emit_trace(&self, _: &str) {}
+        fn emit_delta(&self, _: DeltaEvent) {}
+        fn emit_step(&self, _: StepEvent) {}
+        fn emit_complete(&self, _: &str) {}
+        fn emit_error(&self, msg: &str) {
+            self.events.lock().unwrap().push(msg.to_string());
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = CancelEmitter { events: events.clone() };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    cancel.cancel(); // Cancel immediately
+    solve("Test", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|e| e.contains("Cancelled")),
+        "should emit Cancelled error, got: {:?}",
+        recorded
     );
 }
 
