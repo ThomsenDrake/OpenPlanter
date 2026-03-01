@@ -3,7 +3,7 @@ import cytoscape, { type Core, type NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import dagre from "cytoscape-dagre";
 import { getCategoryColor, CATEGORY_COLORS } from "./colors";
-import type { GraphData } from "../api/types";
+import type { GraphData, NodeType } from "../api/types";
 
 cytoscape.use(fcose);
 cytoscape.use(dagre);
@@ -11,8 +11,8 @@ cytoscape.use(dagre);
 let cy: Core | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-/** Cytoscape stylesheet — colored circles with degree-based sizing. */
-const graphStyle: cytoscape.Stylesheet[] = [
+/** Cytoscape stylesheet — tier-based shapes and edge type styling. */
+const graphStyle: cytoscape.StylesheetStyle[] = [
   {
     selector: "node",
     style: {
@@ -26,17 +26,30 @@ const graphStyle: cytoscape.Stylesheet[] = [
       "text-valign": "bottom",
       "text-halign": "center",
       "text-margin-y": 4,
-      "font-size": "9px",
+      "font-size": "data(fontSize)",
       "font-family": "JetBrains Mono, Fira Code, SF Mono, Menlo, monospace",
       shape: "ellipse",
       width: "data(size)",
       height: "data(size)",
       "text-wrap": "ellipsis",
       "text-max-width": "100px",
-      "min-zoomed-font-size": 6,
+      "min-zoomed-font-size": 4,
       "text-outline-color": "#0d1117",
       "text-outline-width": 1.5,
       "text-outline-opacity": 0.8,
+    },
+  },
+  // Tier-based shapes
+  {
+    selector: "node[node_type='section']",
+    style: {
+      shape: "diamond",
+    },
+  },
+  {
+    selector: "node[node_type='fact']",
+    style: {
+      shape: "round-rectangle",
     },
   },
   {
@@ -73,6 +86,7 @@ const graphStyle: cytoscape.Stylesheet[] = [
       "text-opacity": 0,
     },
   },
+  // Default edge styling
   {
     selector: "edge",
     style: {
@@ -81,6 +95,36 @@ const graphStyle: cytoscape.Stylesheet[] = [
       "target-arrow-shape": "none",
       "curve-style": "bezier",
       opacity: 0.25,
+    },
+  },
+  // Structural edges (has-section, contains) — subtle dotted
+  {
+    selector: "edge[label='has-section'], edge[label='contains']",
+    style: {
+      "line-style": "dotted",
+      opacity: 0.12,
+      width: 0.5,
+    },
+  },
+  // Cross-reference edges — blue with arrow
+  {
+    selector: "edge[label='cross-ref']",
+    style: {
+      "line-color": "#58a6ff",
+      "target-arrow-color": "#58a6ff",
+      "target-arrow-shape": "triangle",
+      opacity: 0.5,
+      width: 1.5,
+    },
+  },
+  // Shared-field edges — purple dashed
+  {
+    selector: "edge[label='shared-field']",
+    style: {
+      "line-color": "#d2a8ff",
+      "line-style": "dashed",
+      opacity: 0.4,
+      width: 1,
     },
   },
   {
@@ -109,9 +153,34 @@ const graphStyle: cytoscape.Stylesheet[] = [
       display: "none",
     },
   },
+  {
+    selector: "node.tier-hidden",
+    style: {
+      display: "none",
+    },
+  },
+  {
+    selector: "edge.tier-hidden",
+    style: {
+      display: "none",
+    },
+  },
 ] as any;
 
-/** Convert GraphData to Cytoscape element definitions with degree-based sizing. */
+/** Tier-based sizing parameters. */
+function tierSizing(nodeType: NodeType | undefined, deg: number): { size: number; fontSize: string } {
+  switch (nodeType) {
+    case "section":
+      return { size: 14 + Math.sqrt(deg) * 3, fontSize: "7px" };
+    case "fact":
+      return { size: 8 + Math.sqrt(deg) * 2, fontSize: "5px" };
+    case "source":
+    default:
+      return { size: 35 + Math.sqrt(deg) * 6, fontSize: "10px" };
+  }
+}
+
+/** Convert GraphData to Cytoscape element definitions with tier-based sizing. */
 function toCytoElements(data: GraphData): cytoscape.ElementDefinition[] {
   // Count degree (connections) for each node
   const degree = new Map<string, number>();
@@ -125,19 +194,24 @@ function toCytoElements(data: GraphData): cytoscape.ElementDefinition[] {
   const nodeCategory = new Map<string, string>();
   for (const n of data.nodes) nodeCategory.set(n.id, n.category);
 
-  const minSize = 20;
-  const sizeScale = 8;
-
-  const nodes: cytoscape.ElementDefinition[] = data.nodes.map((n) => ({
-    data: {
-      id: n.id,
-      label: n.label,
-      category: n.category,
-      path: n.path,
-      color: getCategoryColor(n.category),
-      size: minSize + Math.sqrt(degree.get(n.id) ?? 0) * sizeScale,
-    },
-  }));
+  const nodes: cytoscape.ElementDefinition[] = data.nodes.map((n) => {
+    const deg = degree.get(n.id) ?? 0;
+    const { size, fontSize } = tierSizing(n.node_type, deg);
+    return {
+      data: {
+        id: n.id,
+        label: n.label,
+        category: n.category,
+        path: n.path,
+        node_type: n.node_type ?? "source",
+        parent_id: n.parent_id ?? undefined,
+        content: n.content ?? undefined,
+        color: getCategoryColor(n.category),
+        size,
+        fontSize,
+      },
+    };
+  });
 
   const edges: cytoscape.ElementDefinition[] = data.edges.map((e, i) => ({
     data: {
@@ -195,9 +269,9 @@ function getLayoutOptions(name: string): cytoscape.LayoutOptions {
         animationDuration: 500,
         randomize: true,
         quality: "proof",
-        nodeSeparation: 75,
-        idealEdgeLength: 150,
-        nodeRepulsion: () => 12000,
+        nodeSeparation: 100,
+        idealEdgeLength: 200,
+        nodeRepulsion: () => 25000,
         edgeElasticity: () => 0.45,
         gravity: 0.15,
         gravityRange: 3.8,
@@ -408,4 +482,41 @@ export function getCategories(): string[] {
     if (cat) cats.add(cat);
   });
   return Array.from(cats).sort();
+}
+
+/** Filter visible nodes by tier level.
+ * "all" = show everything
+ * "sources-sections" = hide facts
+ * "sources" = show only source nodes
+ */
+export function filterByTier(tier: "all" | "sources-sections" | "sources"): void {
+  if (!cy) return;
+
+  cy.nodes().forEach((node) => {
+    const nt = node.data("node_type") as string;
+    let visible = true;
+
+    if (tier === "sources") {
+      visible = nt === "source" || !nt;
+    } else if (tier === "sources-sections") {
+      visible = nt !== "fact";
+    }
+
+    if (visible) {
+      node.removeClass("tier-hidden");
+    } else {
+      node.addClass("tier-hidden");
+    }
+  });
+
+  // Hide edges connected to hidden nodes
+  cy.edges().forEach((edge) => {
+    const src = edge.source();
+    const tgt = edge.target();
+    if (src.hasClass("tier-hidden") || tgt.hasClass("tier-hidden")) {
+      edge.addClass("tier-hidden");
+    } else {
+      edge.removeClass("tier-hidden");
+    }
+  });
 }

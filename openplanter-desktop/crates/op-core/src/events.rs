@@ -63,6 +63,15 @@ pub struct GraphData {
     pub edges: Vec<GraphEdge>,
 }
 
+/// The tier of a node in the wiki knowledge graph hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeType {
+    Source,
+    Section,
+    Fact,
+}
+
 /// A node in the wiki knowledge graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphNode {
@@ -70,6 +79,12 @@ pub struct GraphNode {
     pub label: String,
     pub category: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<NodeType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// An edge in the wiki knowledge graph.
@@ -170,6 +185,9 @@ mod tests {
                 label: "FEC Federal".into(),
                 category: "campaign-finance".into(),
                 path: "wiki/campaign-finance/fec-federal.md".into(),
+                node_type: None,
+                parent_id: None,
+                content: None,
             }],
             edges: vec![GraphEdge {
                 source: "fec".into(),
@@ -180,6 +198,37 @@ mod tests {
         let json = serde_json::to_string(&graph).unwrap();
         assert!(json.contains("fec"));
         assert!(json.contains("sec-edgar"));
+        // Optional fields should be omitted when None
+        assert!(!json.contains("node_type"));
+        assert!(!json.contains("parent_id"));
+        assert!(!json.contains("content"));
+    }
+
+    #[test]
+    fn test_graph_node_with_type_serialization() {
+        let node = GraphNode {
+            id: "fec::summary".into(),
+            label: "Summary".into(),
+            category: "campaign-finance".into(),
+            path: "wiki/campaign-finance/fec-federal.md".into(),
+            node_type: Some(NodeType::Section),
+            parent_id: Some("fec".into()),
+            content: Some("The FEC maintains data...".into()),
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains("\"node_type\":\"section\""));
+        assert!(json.contains("\"parent_id\":\"fec\""));
+        assert!(json.contains("\"content\":"));
+    }
+
+    #[test]
+    fn test_node_type_serialization() {
+        let source = NodeType::Source;
+        let section = NodeType::Section;
+        let fact = NodeType::Fact;
+        assert_eq!(serde_json::to_string(&source).unwrap(), "\"source\"");
+        assert_eq!(serde_json::to_string(&section).unwrap(), "\"section\"");
+        assert_eq!(serde_json::to_string(&fact).unwrap(), "\"fact\"");
     }
 
     #[test]

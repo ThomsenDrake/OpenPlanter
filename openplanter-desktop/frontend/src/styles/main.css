@@ -545,6 +545,67 @@ html, body {
   color: var(--accent-hover);
 }
 
+/* Node type badges */
+.graph-detail-type {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.graph-detail-type-source {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+
+.graph-detail-type-section {
+  background: rgba(210, 168, 255, 0.15);
+  color: #d2a8ff;
+  border: 1px solid rgba(210, 168, 255, 0.3);
+}
+
+.graph-detail-type-fact {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+/* Content block in detail overlay */
+.graph-detail-content {
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
+
+/* Tier filter select */
+.graph-tier-select {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.graph-tier-select:focus {
+  border-color: var(--accent);
+}
+
 /* Input bar */
 .input-bar {
   grid-column: 2 / 4;

@@ -10,6 +10,7 @@ import {
   setLayout,
   getCurrentLayout,
   filterByCategory,
+  filterByTier,
   searchNodes,
   fitSearchMatches,
   clearSearchHighlights,
@@ -46,12 +47,26 @@ export function createGraphPane(): HTMLElement {
     layoutSelect.appendChild(opt);
   }
 
+  const tierSelect = document.createElement("select");
+  tierSelect.className = "graph-tier-select";
+  const tiers = [
+    { value: "all", label: "All tiers" },
+    { value: "sources-sections", label: "Sources + Sections" },
+    { value: "sources", label: "Sources only" },
+  ];
+  for (const t of tiers) {
+    const opt = document.createElement("option");
+    opt.value = t.value;
+    opt.textContent = t.label;
+    tierSelect.appendChild(opt);
+  }
+
   const fitBtn = document.createElement("button");
   fitBtn.className = "graph-fit-btn";
   fitBtn.textContent = "\u229e"; // ⊞
   fitBtn.title = "Fit to view";
 
-  toolbar.append(searchInput, layoutSelect, fitBtn);
+  toolbar.append(searchInput, layoutSelect, tierSelect, fitBtn);
 
   // --- Graph container ---
   const graphContainer = document.createElement("div");
@@ -90,6 +105,11 @@ export function createGraphPane(): HTMLElement {
   // --- Layout handler ---
   layoutSelect.addEventListener("change", () => {
     setLayout(layoutSelect.value);
+  });
+
+  // --- Tier filter handler ---
+  tierSelect.addEventListener("change", () => {
+    filterByTier(tierSelect.value as "all" | "sources-sections" | "sources");
   });
 
   // --- Fit handler ---
@@ -134,6 +154,9 @@ export function createGraphPane(): HTMLElement {
     label: string;
     category: string;
     path: string;
+    node_type?: string;
+    parent_id?: string;
+    content?: string;
     connectedNodes: { id: string; label: string }[];
   }): void {
     detail.style.display = "block";
@@ -156,6 +179,14 @@ export function createGraphPane(): HTMLElement {
     const meta = document.createElement("div");
     meta.className = "graph-detail-meta";
 
+    // Node type badge
+    if (data.node_type) {
+      const typeBadge = document.createElement("span");
+      typeBadge.className = `graph-detail-type graph-detail-type-${data.node_type}`;
+      typeBadge.textContent = data.node_type;
+      meta.appendChild(typeBadge);
+    }
+
     const catBadge = document.createElement("span");
     catBadge.className = "graph-detail-badge";
     catBadge.style.borderColor = getCategoryColor(data.category);
@@ -168,6 +199,14 @@ export function createGraphPane(): HTMLElement {
     meta.append(catBadge, pathEl);
 
     detail.append(header, meta);
+
+    // Content block for section/fact nodes
+    if (data.content) {
+      const contentBlock = document.createElement("div");
+      contentBlock.className = "graph-detail-content";
+      contentBlock.textContent = data.content;
+      detail.appendChild(contentBlock);
+    }
 
     if (data.connectedNodes.length > 0) {
       const connLabel = document.createElement("div");

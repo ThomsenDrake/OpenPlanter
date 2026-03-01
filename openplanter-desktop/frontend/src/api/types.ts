@@ -33,11 +33,16 @@ export interface ErrorEvent {
   message: string;
 }
 
+export type NodeType = "source" | "section" | "fact";
+
 export interface GraphNode {
   id: string;
   label: string;
   category: string;
   path: string;
+  node_type?: NodeType;
+  parent_id?: string;
+  content?: string;
 }
 
 export interface GraphEdge {

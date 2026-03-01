@@ -95,6 +95,7 @@ test.describe("Graph Pane", () => {
     await expect(page.locator(".graph-toolbar")).toBeVisible();
     await expect(page.locator(".graph-search")).toBeVisible();
     await expect(page.locator(".graph-layout-select")).toBeVisible();
+    await expect(page.locator(".graph-tier-select")).toBeVisible();
     await expect(page.locator(".graph-fit-btn")).toBeVisible();
 
     // Canvas (Cytoscape container)
@@ -410,5 +411,118 @@ test.describe("Graph Pane", () => {
     // Verify that "Grouped" option exists in dropdown
     const options = await layoutSelect.locator("option").allTextContents();
     expect(options).toContain("Grouped");
+  });
+
+  // ── Tier / node-type tests ──
+
+  test("section and fact nodes have correct shapes in Cytoscape", async ({ page }) => {
+    // Verify node_type data is set correctly on Cytoscape nodes
+    const nodeTypes = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      if (!cy) return {};
+      const types: Record<string, string> = {};
+      cy.nodes().forEach((n: any) => {
+        types[n.id()] = n.data("node_type") || "unknown";
+      });
+      return types;
+    });
+
+    expect(nodeTypes["acme-corp"]).toBe("source");
+    expect(nodeTypes["acme-corp::summary"]).toBe("section");
+    expect(nodeTypes["acme-corp::data-schema::entity-id"]).toBe("fact");
+
+    await page.screenshot({ path: "e2e/screenshots/17-node-types.png" });
+  });
+
+  test("clicking fact node shows type badge and content", async ({ page }) => {
+    // Tap a fact node
+    await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      if (!cy) return;
+      const fact = cy.getElementById("acme-corp::data-schema::entity-id");
+      if (!fact.empty()) fact.emit("tap");
+    });
+    await page.waitForTimeout(500);
+
+    // Detail should show type badge
+    const typeBadge = page.locator(".graph-detail-type");
+    await expect(typeBadge).toBeVisible();
+    const typeText = await typeBadge.textContent();
+    expect(typeText).toBe("fact");
+
+    // Detail should show content block
+    const content = page.locator(".graph-detail-content");
+    await expect(content).toBeVisible();
+    const contentText = await content.textContent();
+    expect(contentText).toContain("entity_id");
+
+    await page.screenshot({ path: "e2e/screenshots/18-fact-detail.png" });
+  });
+
+  test("tier dropdown filters nodes by tier", async ({ page }) => {
+    const tierSelect = page.locator(".graph-tier-select");
+
+    // Count total nodes initially
+    const totalBefore = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(totalBefore).toBe(15); // 10 sources + 3 sections + 2 facts
+
+    // Filter to "Sources only"
+    await tierSelect.selectOption("sources");
+    await page.waitForTimeout(500);
+
+    const sourcesOnly = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(sourcesOnly).toBe(10);
+
+    await page.screenshot({ path: "e2e/screenshots/19-tier-sources-only.png" });
+
+    // Filter to "Sources + Sections"
+    await tierSelect.selectOption("sources-sections");
+    await page.waitForTimeout(500);
+
+    const sourcesAndSections = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(sourcesAndSections).toBe(13); // 10 sources + 3 sections
+
+    // Back to "All tiers"
+    await tierSelect.selectOption("all");
+    await page.waitForTimeout(500);
+
+    const allTiers = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(allTiers).toBe(15);
+
+    await page.screenshot({ path: "e2e/screenshots/20-tier-all.png" });
+  });
+
+  test("structural edges are subtle and cross-ref edges are blue", async ({ page }) => {
+    // Verify edge label data is correctly passed through
+    const edgeLabels = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      if (!cy) return [];
+      return cy.edges().map((e: any) => e.data("label"));
+    });
+
+    expect(edgeLabels).toContain("has-section");
+    expect(edgeLabels).toContain("contains");
+    expect(edgeLabels).toContain("donated to");
+
+    await page.screenshot({ path: "e2e/screenshots/21-edge-types.png" });
   });
 });

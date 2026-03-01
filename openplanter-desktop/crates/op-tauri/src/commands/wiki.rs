@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use tauri::State;
 use crate::state::AppState;
-use op_core::events::{GraphData, GraphEdge, GraphNode};
+use op_core::events::{GraphData, GraphEdge, GraphNode, NodeType};
 
 /// Walk up from `start` to find a directory containing `wiki/index.md`.
 fn find_wiki_dir(start: &Path) -> Option<PathBuf> {
@@ -71,6 +71,9 @@ pub fn parse_index_nodes(content: &str) -> Vec<GraphNode> {
                 label,
                 category: current_category.clone(),
                 path: format!("wiki/{}", path),
+                node_type: Some(op_core::events::NodeType::Source),
+                parent_id: None,
+                content: None,
             });
         }
     }
@@ -191,7 +194,364 @@ pub fn find_cross_references(nodes: &[GraphNode], wiki_dir: &Path) -> Vec<GraphE
     edges
 }
 
-/// Get the wiki knowledge graph data by parsing wiki/index.md.
+/// Convert a heading text to a URL-friendly slug.
+fn slugify(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Split a markdown table row into cell values, trimming whitespace.
+fn split_table_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
+    trimmed.split('|').map(|s| s.trim().to_string()).collect()
+}
+
+/// Ensure an ID is unique by appending a numeric suffix if needed.
+fn ensure_unique_id(id: String, used: &mut HashSet<String>) -> String {
+    if used.insert(id.clone()) {
+        return id;
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{}-{}", id, n);
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Table parsing state machine.
+#[derive(PartialEq)]
+enum TableState {
+    Outside,
+    Header,
+    Body,
+}
+
+/// Parse a single wiki source file into section and fact nodes + structural edges.
+pub fn parse_source_file(
+    source_node: &GraphNode,
+    content: &str,
+) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut used_ids = HashSet::new();
+    used_ids.insert(source_node.id.clone());
+
+    let mut current_h2_id: Option<String> = None;
+    let mut current_section_id: Option<String> = None; // tracks the most recent section (h2 or h3)
+    let mut table_state = TableState::Outside;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect heading transitions — any heading exits table state
+        if trimmed.starts_with('#') {
+            table_state = TableState::Outside;
+        }
+
+        // ## Heading → section node (child of source)
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            let heading = heading.trim();
+            if heading.is_empty() {
+                continue;
+            }
+            let slug = slugify(heading);
+            let raw_id = format!("{}::{}", source_node.id, slug);
+            let id = ensure_unique_id(raw_id, &mut used_ids);
+
+            nodes.push(GraphNode {
+                id: id.clone(),
+                label: heading.to_string(),
+                category: source_node.category.clone(),
+                path: source_node.path.clone(),
+                node_type: Some(NodeType::Section),
+                parent_id: Some(source_node.id.clone()),
+                content: None,
+            });
+            edges.push(GraphEdge {
+                source: source_node.id.clone(),
+                target: id.clone(),
+                label: Some("has-section".to_string()),
+            });
+
+            current_h2_id = Some(id.clone());
+            current_section_id = Some(id);
+            continue;
+        }
+
+        // ### Subheading → section node (child of current ##)
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            let heading = heading.trim();
+            if heading.is_empty() {
+                continue;
+            }
+            let parent = current_h2_id.as_deref().unwrap_or(&source_node.id);
+            let slug = slugify(heading);
+            let raw_id = format!("{}::{}", parent, slug);
+            let id = ensure_unique_id(raw_id, &mut used_ids);
+
+            nodes.push(GraphNode {
+                id: id.clone(),
+                label: heading.to_string(),
+                category: source_node.category.clone(),
+                path: source_node.path.clone(),
+                node_type: Some(NodeType::Section),
+                parent_id: Some(parent.to_string()),
+                content: None,
+            });
+            edges.push(GraphEdge {
+                source: parent.to_string(),
+                target: id.clone(),
+                label: Some("has-section".to_string()),
+            });
+
+            current_section_id = Some(id);
+            continue;
+        }
+
+        // Bold bullet: - **Key**: value → fact node
+        if trimmed.starts_with("- **") {
+            table_state = TableState::Outside;
+            if let Some(parent_id) = &current_section_id {
+                // Extract the key text from - **Key**: ...
+                if let Some(rest) = trimmed.strip_prefix("- **") {
+                    let label = if let Some(pos) = rest.find("**") {
+                        rest[..pos].to_string()
+                    } else {
+                        rest.to_string()
+                    };
+                    if !label.is_empty() {
+                        let slug = slugify(&label);
+                        let raw_id = format!("{}::{}", parent_id, slug);
+                        let id = ensure_unique_id(raw_id, &mut used_ids);
+
+                        nodes.push(GraphNode {
+                            id: id.clone(),
+                            label: label.clone(),
+                            category: source_node.category.clone(),
+                            path: source_node.path.clone(),
+                            node_type: Some(NodeType::Fact),
+                            parent_id: Some(parent_id.clone()),
+                            content: Some(trimmed.to_string()),
+                        });
+                        edges.push(GraphEdge {
+                            source: parent_id.clone(),
+                            target: id,
+                            label: Some("contains".to_string()),
+                        });
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Table rows
+        if trimmed.starts_with('|') {
+            match table_state {
+                TableState::Outside => {
+                    // First table row = header
+                    table_state = TableState::Header;
+                }
+                TableState::Header => {
+                    // Second row should be separator (|---|---|)
+                    if trimmed.contains("---") {
+                        table_state = TableState::Body;
+                    } else {
+                        // Not a separator → treat as body (unusual)
+                        table_state = TableState::Body;
+                        // Process this row as body
+                        if let Some(parent_id) = &current_section_id {
+                            let cells = split_table_row(trimmed);
+                            let label = cells.first().map(|s| s.as_str()).unwrap_or("").to_string();
+                            if !label.is_empty() {
+                                let slug = slugify(&label);
+                                let raw_id = format!("{}::{}", parent_id, slug);
+                                let id = ensure_unique_id(raw_id, &mut used_ids);
+
+                                nodes.push(GraphNode {
+                                    id: id.clone(),
+                                    label: label.clone(),
+                                    category: source_node.category.clone(),
+                                    path: source_node.path.clone(),
+                                    node_type: Some(NodeType::Fact),
+                                    parent_id: Some(parent_id.clone()),
+                                    content: Some(trimmed.to_string()),
+                                });
+                                edges.push(GraphEdge {
+                                    source: parent_id.clone(),
+                                    target: id,
+                                    label: Some("contains".to_string()),
+                                });
+                            }
+                        }
+                    }
+                }
+                TableState::Body => {
+                    // Data rows
+                    if let Some(parent_id) = &current_section_id {
+                        let cells = split_table_row(trimmed);
+                        let label_raw = cells.first().map(|s| s.as_str()).unwrap_or("");
+                        // Strip backticks and markdown formatting from field names
+                        let label = label_raw.replace('`', "").trim().to_string();
+                        if !label.is_empty() {
+                            let slug = slugify(&label);
+                            let raw_id = format!("{}::{}", parent_id, slug);
+                            let id = ensure_unique_id(raw_id, &mut used_ids);
+
+                            nodes.push(GraphNode {
+                                id: id.clone(),
+                                label: label.clone(),
+                                category: source_node.category.clone(),
+                                path: source_node.path.clone(),
+                                node_type: Some(NodeType::Fact),
+                                parent_id: Some(parent_id.clone()),
+                                content: Some(trimmed.to_string()),
+                            });
+                            edges.push(GraphEdge {
+                                source: parent_id.clone(),
+                                target: id,
+                                label: Some("contains".to_string()),
+                            });
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Non-table, non-heading, non-bullet line → reset table state
+        if !trimmed.is_empty() && !trimmed.starts_with('|') {
+            table_state = TableState::Outside;
+        }
+    }
+
+    (nodes, edges)
+}
+
+/// Extract cross-reference edges from fact nodes under cross-reference sections.
+pub fn extract_cross_ref_edges(
+    all_nodes: &[GraphNode],
+    source_nodes: &[GraphNode],
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Build lookup: source label search terms
+    let source_terms: Vec<(String, Vec<String>)> = source_nodes
+        .iter()
+        .map(|n| (n.id.clone(), search_terms_for_node(n)))
+        .collect();
+
+    // Find fact nodes under cross-reference sections
+    for node in all_nodes {
+        if node.node_type.as_ref() != Some(&NodeType::Fact) {
+            continue;
+        }
+        // Check if this fact is under a cross-reference section
+        let in_cross_ref = node.parent_id.as_ref().map_or(false, |pid| {
+            pid.contains("cross-reference")
+        });
+        if !in_cross_ref {
+            continue;
+        }
+
+        let content_lower = node.content.as_deref().unwrap_or("").to_lowercase();
+        if content_lower.is_empty() {
+            continue;
+        }
+
+        // Find the root source for this fact (walk up parent chain)
+        let source_id = node.id.split("::").next().unwrap_or("");
+
+        for (sid, terms) in &source_terms {
+            // Don't create self-references
+            if sid == source_id {
+                continue;
+            }
+            let matched = terms.iter().any(|t| content_lower.contains(t.as_str()));
+            if matched {
+                let key = (node.id.clone(), sid.clone());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: node.id.clone(),
+                        target: sid.clone(),
+                        label: Some("cross-ref".to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+/// Find shared-field edges between fact nodes under data-schema sections
+/// across different sources.
+pub fn find_shared_field_edges(all_nodes: &[GraphNode]) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+
+    // Collect fact nodes under data-schema sections, grouped by normalized field name
+    let mut field_map: HashMap<String, Vec<&GraphNode>> = HashMap::new();
+
+    for node in all_nodes {
+        if node.node_type.as_ref() != Some(&NodeType::Fact) {
+            continue;
+        }
+        // Check if this fact is under a data-schema section
+        let in_data_schema = node.parent_id.as_ref().map_or(false, |pid| {
+            pid.contains("data-schema")
+        });
+        if !in_data_schema {
+            continue;
+        }
+
+        // Normalize field name: lowercase, strip backticks
+        let normalized = node.label.to_lowercase().replace('`', "").trim().to_string();
+        if !normalized.is_empty() {
+            field_map.entry(normalized).or_default().push(node);
+        }
+    }
+
+    // For each field name shared across different sources, create edges
+    let mut seen = HashSet::new();
+    for facts in field_map.values() {
+        if facts.len() < 2 {
+            continue;
+        }
+        for i in 0..facts.len() {
+            for j in (i + 1)..facts.len() {
+                let source_i = facts[i].id.split("::").next().unwrap_or("");
+                let source_j = facts[j].id.split("::").next().unwrap_or("");
+                // Only create edges between different sources
+                if source_i == source_j {
+                    continue;
+                }
+                let mut pair = [facts[i].id.clone(), facts[j].id.clone()];
+                pair.sort();
+                let key = (pair[0].clone(), pair[1].clone());
+                if seen.insert(key) {
+                    edges.push(GraphEdge {
+                        source: facts[i].id.clone(),
+                        target: facts[j].id.clone(),
+                        label: Some("shared-field".to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+/// Get the wiki knowledge graph data by parsing wiki/index.md and all source files.
 #[tauri::command]
 pub async fn get_graph_data(
     state: State<'_, AppState>,
@@ -204,11 +564,35 @@ pub async fn get_graph_data(
 
     let index_path = wiki_dir.join("index.md");
     let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
-    let nodes = parse_index_nodes(&content);
+    let source_nodes = parse_index_nodes(&content);
     let project_root = wiki_dir.parent().unwrap_or(&cfg.workspace);
-    let edges = find_cross_references(&nodes, project_root);
 
-    Ok(GraphData { nodes, edges })
+    // Parse each source file into section/fact nodes
+    let mut all_nodes: Vec<GraphNode> = source_nodes.clone();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
+
+    for source in &source_nodes {
+        let file_path = project_root.join(&source.path);
+        if let Ok(file_content) = fs::read_to_string(&file_path) {
+            let (sub_nodes, sub_edges) = parse_source_file(source, &file_content);
+            all_nodes.extend(sub_nodes);
+            all_edges.extend(sub_edges);
+        }
+    }
+
+    // Source-to-source edges (existing: link + mentions)
+    let source_edges = find_cross_references(&source_nodes, project_root);
+    all_edges.extend(source_edges);
+
+    // Fact-to-source cross-reference edges
+    let cross_ref_edges = extract_cross_ref_edges(&all_nodes, &source_nodes);
+    all_edges.extend(cross_ref_edges);
+
+    // Fact-to-fact shared-field edges
+    let shared_field_edges = find_shared_field_edges(&all_nodes);
+    all_edges.extend(shared_field_edges);
+
+    Ok(GraphData { nodes: all_nodes, edges: all_edges })
 }
 
 #[cfg(test)]
@@ -311,6 +695,7 @@ mod tests {
             label: "A".to_string(),
             category: "test".to_string(),
             path: "wiki/a.md".to_string(),
+            node_type: None, parent_id: None, content: None,
         }];
         let edges = find_cross_references(&nodes, tmp.path());
         assert!(edges.is_empty());
@@ -331,12 +716,14 @@ mod tests {
                 label: "A".to_string(),
                 category: "test".to_string(),
                 path: "wiki/a.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
             GraphNode {
                 id: "b".to_string(),
                 label: "B".to_string(),
                 category: "test".to_string(),
                 path: "wiki/b.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
         ];
         let edges = find_cross_references(&nodes, tmp.path());
@@ -394,12 +781,14 @@ mod tests {
                 label: "FEC Data".to_string(),
                 category: "campaign-finance".to_string(),
                 path: "wiki/a.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
             GraphNode {
                 id: "b".to_string(),
                 label: "SEC EDGAR".to_string(),
                 category: "corporate".to_string(),
                 path: "wiki/b.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
         ];
         let edges = find_cross_references(&nodes, tmp.path());
@@ -423,6 +812,7 @@ mod tests {
                 label: "SEC EDGAR".to_string(),
                 category: "corporate".to_string(),
                 path: "wiki/a.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
         ];
         let edges = find_cross_references(&nodes, tmp.path());
@@ -443,12 +833,14 @@ mod tests {
                 label: "EPA Data".to_string(),
                 category: "regulatory".to_string(),
                 path: "wiki/a.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
             GraphNode {
                 id: "b".to_string(),
                 label: "OSHA Inspections".to_string(),
                 category: "regulatory".to_string(),
                 path: "wiki/b.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
         ];
         let edges = find_cross_references(&nodes, tmp.path());
@@ -470,12 +862,14 @@ mod tests {
                 label: "A Data".to_string(),
                 category: "test".to_string(),
                 path: "wiki/a.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
             GraphNode {
                 id: "b".to_string(),
                 label: "SEC EDGAR".to_string(),
                 category: "corporate".to_string(),
                 path: "wiki/b.md".to_string(),
+                node_type: None, parent_id: None, content: None,
             },
         ];
         let edges = find_cross_references(&nodes, tmp.path());
@@ -495,8 +889,381 @@ mod tests {
             label: "A".to_string(),
             category: "test".to_string(),
             path: "wiki/a.md".to_string(),
+            node_type: None, parent_id: None, content: None,
         }];
         let edges = find_cross_references(&nodes, tmp.path());
         assert!(edges.is_empty(), "self-references should be excluded");
+    }
+
+    // ── helpers ──
+
+    #[test]
+    fn test_slugify_basic() {
+        assert_eq!(slugify("Data Schema"), "data-schema");
+        assert_eq!(slugify("Cross-Reference Potential"), "cross-reference-potential");
+        assert_eq!(slugify("Legal & Licensing"), "legal-licensing");
+        assert_eq!(slugify("  multiple   spaces  "), "multiple-spaces");
+    }
+
+    #[test]
+    fn test_split_table_row() {
+        let cells = split_table_row("| foo | bar | baz |");
+        assert_eq!(cells, vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn test_ensure_unique_id() {
+        let mut used = HashSet::new();
+        assert_eq!(ensure_unique_id("a".into(), &mut used), "a");
+        assert_eq!(ensure_unique_id("a".into(), &mut used), "a-2");
+        assert_eq!(ensure_unique_id("a".into(), &mut used), "a-3");
+        assert_eq!(ensure_unique_id("b".into(), &mut used), "b");
+    }
+
+    // ── parse_source_file ──
+
+    fn make_source(id: &str) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            label: id.to_uppercase(),
+            category: "test".to_string(),
+            path: format!("wiki/{}.md", id),
+            node_type: Some(NodeType::Source),
+            parent_id: None,
+            content: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_content() {
+        let source = make_source("fec");
+        let (nodes, edges) = parse_source_file(&source, "");
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_parse_single_section() {
+        let source = make_source("fec");
+        let (nodes, edges) = parse_source_file(&source, "## Summary\n\nSome text.");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "fec::summary");
+        assert_eq!(nodes[0].label, "Summary");
+        assert_eq!(nodes[0].node_type, Some(NodeType::Section));
+        assert_eq!(nodes[0].parent_id.as_deref(), Some("fec"));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].label.as_deref(), Some("has-section"));
+    }
+
+    #[test]
+    fn test_parse_multiple_sections() {
+        let source = make_source("fec");
+        let content = "## Summary\n\nText.\n\n## Access Methods\n\nMore text.";
+        let (nodes, edges) = parse_source_file(&source, content);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, "fec::summary");
+        assert_eq!(nodes[1].id, "fec::access-methods");
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_subsections() {
+        let source = make_source("fec");
+        let content = "## Data Schema\n\n### Candidate Records\n\nText.\n\n### Committee Records\n\nMore.";
+        let (nodes, edges) = parse_source_file(&source, content);
+        assert_eq!(nodes.len(), 3); // Data Schema + 2 subsections
+        // Subsections are children of the h2
+        assert_eq!(nodes[1].parent_id.as_deref(), Some("fec::data-schema"));
+        assert_eq!(nodes[2].parent_id.as_deref(), Some("fec::data-schema"));
+        // All section edges
+        assert!(edges.iter().all(|e| e.label.as_deref() == Some("has-section")));
+    }
+
+    #[test]
+    fn test_parse_bold_bullets() {
+        let source = make_source("fec");
+        let content = "## Coverage\n\n- **Jurisdiction**: Federal\n- **Time range**: 1979-present";
+        let (nodes, edges) = parse_source_file(&source, content);
+        // 1 section + 2 facts
+        assert_eq!(nodes.len(), 3);
+        let facts: Vec<_> = nodes.iter().filter(|n| n.node_type == Some(NodeType::Fact)).collect();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].label, "Jurisdiction");
+        assert_eq!(facts[1].label, "Time range");
+        // Facts should have content
+        assert!(facts[0].content.as_ref().unwrap().contains("Federal"));
+        // Facts parented to section
+        assert!(facts.iter().all(|f| f.parent_id.as_deref() == Some("fec::coverage")));
+        // Contains edges
+        let contains: Vec<_> = edges.iter().filter(|e| e.label.as_deref() == Some("contains")).collect();
+        assert_eq!(contains.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_table_rows() {
+        let source = make_source("fec");
+        let content = "## Data Schema\n\n| Field | Description |\n|-------|-------------|\n| `candidate_id` | Unique ID |\n| `name` | Full name |";
+        let (nodes, edges) = parse_source_file(&source, content);
+        // 1 section + 2 fact rows (header + separator skipped)
+        let facts: Vec<_> = nodes.iter().filter(|n| n.node_type == Some(NodeType::Fact)).collect();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].label, "candidate_id"); // backticks stripped
+        assert_eq!(facts[1].label, "name");
+    }
+
+    #[test]
+    fn test_parse_table_skips_header_and_separator() {
+        let source = make_source("fec");
+        let content = "## Schema\n\n| Header1 | Header2 |\n| --- | --- |\n| value1 | desc1 |";
+        let (nodes, _edges) = parse_source_file(&source, content);
+        let facts: Vec<_> = nodes.iter().filter(|n| n.node_type == Some(NodeType::Fact)).collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].label, "value1");
+    }
+
+    #[test]
+    fn test_parse_fact_parents_correct() {
+        let source = make_source("fec");
+        let content = "## Data Schema\n\n### Candidate Records\n\n| Field | Desc |\n|---|---|\n| cid | ID |";
+        let (nodes, _) = parse_source_file(&source, content);
+        let fact = nodes.iter().find(|n| n.label == "cid").unwrap();
+        // Fact should be parented to the h3 section, not the h2
+        assert!(fact.parent_id.as_ref().unwrap().contains("candidate-records"));
+    }
+
+    #[test]
+    fn test_parse_duplicate_ids() {
+        let source = make_source("fec");
+        // Two sections with same name
+        let content = "## Summary\n\nFirst.\n\n## Summary\n\nSecond.";
+        let (nodes, _) = parse_source_file(&source, content);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, "fec::summary");
+        assert_eq!(nodes[1].id, "fec::summary-2"); // deduplicated
+    }
+
+    #[test]
+    fn test_parse_source_inherits_category() {
+        let mut source = make_source("fec");
+        source.category = "campaign-finance".to_string();
+        let content = "## Summary\n\n- **Key**: value";
+        let (nodes, _) = parse_source_file(&source, content);
+        assert!(nodes.iter().all(|n| n.category == "campaign-finance"));
+    }
+
+    #[test]
+    fn test_parse_mixed_content() {
+        let source = make_source("fec");
+        let content = "\
+## Summary
+
+Overview paragraph.
+
+## Coverage
+
+- **Jurisdiction**: Federal
+- **Time range**: 1979-present
+
+## Data Schema
+
+### Records
+
+| Field | Desc |
+|-------|------|
+| `id` | Key |
+| `name` | Name |
+
+## References
+
+Links here.";
+        let (nodes, edges) = parse_source_file(&source, content);
+        let sections: Vec<_> = nodes.iter().filter(|n| n.node_type == Some(NodeType::Section)).collect();
+        let facts: Vec<_> = nodes.iter().filter(|n| n.node_type == Some(NodeType::Fact)).collect();
+        // 4 h2 sections + 1 h3 subsection = 5 sections
+        assert_eq!(sections.len(), 5);
+        // 2 bullets + 2 table rows = 4 facts
+        assert_eq!(facts.len(), 4);
+        // Structural edges: 4 has-section (h2→source) + 1 has-section (h3→h2) + 4 contains
+        let has_section_count = edges.iter().filter(|e| e.label.as_deref() == Some("has-section")).count();
+        let contains_count = edges.iter().filter(|e| e.label.as_deref() == Some("contains")).count();
+        assert_eq!(has_section_count, 5);
+        assert_eq!(contains_count, 4);
+    }
+
+    // ── extract_cross_ref_edges ──
+
+    #[test]
+    fn test_extract_cross_ref_match() {
+        let source_a = make_source("fec");
+        let source_b = GraphNode {
+            id: "sec-edgar".to_string(),
+            label: "SEC EDGAR".to_string(),
+            category: "corporate".to_string(),
+            path: "wiki/sec-edgar.md".to_string(),
+            node_type: Some(NodeType::Source),
+            parent_id: None,
+            content: None,
+        };
+        let fact = GraphNode {
+            id: "fec::cross-reference-potential::corporate".to_string(),
+            label: "Corporate".to_string(),
+            category: "campaign-finance".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::cross-reference-potential".to_string()),
+            content: Some("Match contributors to SEC EDGAR corporate filings".to_string()),
+        };
+        let all_nodes = vec![source_a.clone(), source_b.clone(), fact.clone()];
+        let source_nodes = vec![source_a, source_b];
+        let edges = extract_cross_ref_edges(&all_nodes, &source_nodes);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, "fec::cross-reference-potential::corporate");
+        assert_eq!(edges[0].target, "sec-edgar");
+        assert_eq!(edges[0].label.as_deref(), Some("cross-ref"));
+    }
+
+    #[test]
+    fn test_extract_cross_ref_no_self() {
+        let source = make_source("fec");
+        let fact = GraphNode {
+            id: "fec::cross-reference-potential::self".to_string(),
+            label: "Self".to_string(),
+            category: "test".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::cross-reference-potential".to_string()),
+            content: Some("FEC data is great".to_string()),
+        };
+        let all_nodes = vec![source.clone(), fact];
+        let source_nodes = vec![source];
+        let edges = extract_cross_ref_edges(&all_nodes, &source_nodes);
+        assert!(edges.is_empty(), "should not cross-ref to own source");
+    }
+
+    #[test]
+    fn test_extract_cross_ref_skips_non_cross_ref_section() {
+        let source_a = make_source("fec");
+        let source_b = GraphNode {
+            id: "sec-edgar".to_string(),
+            label: "SEC EDGAR".to_string(),
+            category: "corporate".to_string(),
+            path: "wiki/sec-edgar.md".to_string(),
+            node_type: Some(NodeType::Source),
+            parent_id: None,
+            content: None,
+        };
+        // Fact under coverage section, not cross-reference
+        let fact = GraphNode {
+            id: "fec::coverage::jurisdiction".to_string(),
+            label: "Jurisdiction".to_string(),
+            category: "campaign-finance".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::coverage".to_string()),
+            content: Some("Contains SEC EDGAR data".to_string()),
+        };
+        let all_nodes = vec![source_a.clone(), source_b.clone(), fact];
+        let source_nodes = vec![source_a, source_b];
+        let edges = extract_cross_ref_edges(&all_nodes, &source_nodes);
+        assert!(edges.is_empty(), "should only match facts under cross-reference sections");
+    }
+
+    // ── find_shared_field_edges ──
+
+    #[test]
+    fn test_shared_field_cross_source() {
+        let fact_a = GraphNode {
+            id: "fec::data-schema::candidate-id".to_string(),
+            label: "candidate_id".to_string(),
+            category: "campaign-finance".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::data-schema".to_string()),
+            content: Some("| candidate_id | Unique ID |".to_string()),
+        };
+        let fact_b = GraphNode {
+            id: "ocpf::data-schema::candidate-id".to_string(),
+            label: "candidate_id".to_string(),
+            category: "campaign-finance".to_string(),
+            path: "wiki/ocpf.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("ocpf::data-schema".to_string()),
+            content: Some("| candidate_id | State ID |".to_string()),
+        };
+        let edges = find_shared_field_edges(&vec![fact_a, fact_b]);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].label.as_deref(), Some("shared-field"));
+    }
+
+    #[test]
+    fn test_shared_field_no_same_source() {
+        let fact_a = GraphNode {
+            id: "fec::data-schema::records::id".to_string(),
+            label: "id".to_string(),
+            category: "test".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::data-schema::records".to_string()),
+            content: None,
+        };
+        let fact_b = GraphNode {
+            id: "fec::data-schema::other::id".to_string(),
+            label: "id".to_string(),
+            category: "test".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::data-schema::other".to_string()),
+            content: None,
+        };
+        let edges = find_shared_field_edges(&vec![fact_a, fact_b]);
+        assert!(edges.is_empty(), "should not create edge between same-source facts");
+    }
+
+    #[test]
+    fn test_shared_field_normalization() {
+        let fact_a = GraphNode {
+            id: "fec::data-schema::cid".to_string(),
+            label: "`committee_id`".to_string(), // with backticks
+            category: "test".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::data-schema".to_string()),
+            content: None,
+        };
+        let fact_b = GraphNode {
+            id: "sec::data-schema::cid".to_string(),
+            label: "Committee_ID".to_string(), // different case
+            category: "test".to_string(),
+            path: "wiki/sec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("sec::data-schema".to_string()),
+            content: None,
+        };
+        let edges = find_shared_field_edges(&vec![fact_a, fact_b]);
+        assert_eq!(edges.len(), 1, "should normalize case and backticks");
+    }
+
+    #[test]
+    fn test_shared_field_skips_non_data_schema() {
+        let fact_a = GraphNode {
+            id: "fec::coverage::jurisdiction".to_string(),
+            label: "Jurisdiction".to_string(),
+            category: "test".to_string(),
+            path: "wiki/fec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("fec::coverage".to_string()),
+            content: None,
+        };
+        let fact_b = GraphNode {
+            id: "sec::coverage::jurisdiction".to_string(),
+            label: "Jurisdiction".to_string(),
+            category: "test".to_string(),
+            path: "wiki/sec.md".to_string(),
+            node_type: Some(NodeType::Fact),
+            parent_id: Some("sec::coverage".to_string()),
+            content: None,
+        };
+        let edges = find_shared_field_edges(&vec![fact_a, fact_b]);
+        assert!(edges.is_empty(), "should only match facts under data-schema sections");
     }
 }

@@ -8,7 +8,16 @@ import {
 } from "./cytoGraph";
 
 export interface InteractionCallbacks {
-  onNodeSelect: (nodeData: { id: string; label: string; category: string; path: string; connectedNodes: { id: string; label: string }[] }) => void;
+  onNodeSelect: (nodeData: {
+    id: string;
+    label: string;
+    category: string;
+    path: string;
+    node_type?: string;
+    parent_id?: string;
+    content?: string;
+    connectedNodes: { id: string; label: string }[];
+  }) => void;
   onNodeDeselect: () => void;
 }
 
@@ -41,6 +50,9 @@ export function bindInteractions(callbacks: InteractionCallbacks): void {
       label: node.data("label") as string,
       category: node.data("category") as string,
       path: node.data("path") as string,
+      node_type: node.data("node_type") as string | undefined,
+      parent_id: node.data("parent_id") as string | undefined,
+      content: node.data("content") as string | undefined,
       connectedNodes,
     });
   });
