@@ -1,6 +1,7 @@
 /** Chat pane: terminal-style messages, streaming, markdown rendering. */
 import { appState, type ChatMessage, type StepToolCall } from "../state/store";
 import { createInputBar } from "./InputBar";
+import { parseAgentContent, stripToolXml, type ContentSegment } from "./contentParser";
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 
@@ -163,6 +164,75 @@ class ActivityIndicator {
   }
 }
 
+/** Render a tool call as a compact inline block: ├─ tool_name "key arg" */
+function renderToolCallBlock(seg: Extract<ContentSegment, { type: "tool_call" }>): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "tool-call-block";
+
+  const connector = document.createTextNode("\u251C\u2500 ");
+  block.appendChild(connector);
+
+  const fn = document.createElement("span");
+  fn.className = "tool-fn";
+  fn.textContent = seg.name;
+  block.appendChild(fn);
+
+  if (seg.keyArg) {
+    const arg = document.createElement("span");
+    arg.className = "tool-arg";
+    arg.textContent = ` "${seg.keyArg}"`;
+    block.appendChild(arg);
+  }
+
+  return block;
+}
+
+/** Render a tool result as a collapsible output block. */
+function renderToolResultBlock(seg: Extract<ContentSegment, { type: "tool_result" }>): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "tool-result-wrapper";
+
+  const output = seg.stdout || seg.stderr || "";
+  const lines = output.split("\n").filter((l) => l !== "");
+  const hasError = seg.stderr.length > 0 || (seg.returncode !== null && seg.returncode !== 0);
+  const collapsible = lines.length > 4;
+
+  // Toggle header
+  const toggle = document.createElement("div");
+  toggle.className = "tool-result-toggle";
+  toggle.textContent = collapsible
+    ? `\u25B6 Output (${lines.length} lines)`
+    : `\u25BC Output`;
+  wrapper.appendChild(toggle);
+
+  // Output block
+  const block = document.createElement("div");
+  block.className = "tool-result-block";
+  if (hasError) block.classList.add("has-error");
+  if (collapsible) {
+    // Collapsed by default
+  } else {
+    block.classList.add("expanded");
+  }
+
+  // Build content with │ prefix
+  const prefixed = lines.map((l) => `\u2502 ${l}`).join("\n");
+  block.textContent = prefixed;
+  wrapper.appendChild(block);
+
+  // Toggle click handler
+  if (collapsible) {
+    toggle.addEventListener("click", () => {
+      const isExpanded = block.classList.toggle("expanded");
+      toggle.textContent = isExpanded
+        ? `\u25BC Output (${lines.length} lines)`
+        : `\u25B6 Output (${lines.length} lines)`;
+    });
+  }
+
+  return wrapper;
+}
+
 export function createChatPane(): HTMLElement {
   const pane = document.createElement("div");
   pane.className = "chat-pane";
@@ -285,7 +355,23 @@ export function createChatPane(): HTMLElement {
       case "assistant":
         if (msg.isRendered) {
           el.classList.add("rendered");
-          el.innerHTML = md.render(msg.content);
+          const segments = parseAgentContent(msg.content);
+          if (segments.length === 1 && segments[0].type === "text") {
+            // Fast path: no tool XML
+            el.innerHTML = md.render(msg.content);
+          } else {
+            for (const seg of segments) {
+              if (seg.type === "text" && seg.text.trim()) {
+                const textEl = document.createElement("div");
+                textEl.innerHTML = md.render(seg.text);
+                el.appendChild(textEl);
+              } else if (seg.type === "tool_call") {
+                el.appendChild(renderToolCallBlock(seg));
+              } else if (seg.type === "tool_result") {
+                el.appendChild(renderToolResultBlock(seg));
+              }
+            }
+          }
         } else {
           el.textContent = msg.content;
         }
@@ -315,16 +401,19 @@ export function createChatPane(): HTMLElement {
 
     // Model text preview (if any)
     if (msg.stepModelPreview) {
-      const preview = document.createElement("div");
-      preview.className = "step-model-text";
-      const elapsedStr = msg.stepElapsed ? `(${formatElapsed(msg.stepElapsed)}) ` : "";
-      // Truncate to ~200 chars
-      const truncated =
-        msg.stepModelPreview.length > 200
-          ? msg.stepModelPreview.slice(0, 200) + "..."
-          : msg.stepModelPreview;
-      preview.textContent = elapsedStr + truncated;
-      el.appendChild(preview);
+      const cleanPreview = stripToolXml(msg.stepModelPreview);
+      if (cleanPreview.trim()) {
+        const preview = document.createElement("div");
+        preview.className = "step-model-text";
+        const elapsedStr = msg.stepElapsed ? `(${formatElapsed(msg.stepElapsed)}) ` : "";
+        // Truncate to ~200 chars
+        const truncated =
+          cleanPreview.length > 200
+            ? cleanPreview.slice(0, 200) + "..."
+            : cleanPreview;
+        preview.textContent = elapsedStr + truncated;
+        el.appendChild(preview);
+      }
     }
 
     // Tool tree
@@ -398,7 +487,7 @@ export function createChatPane(): HTMLElement {
       streamingBuf += text;
       const ai = ensureActivity();
       ai.setMode("streaming");
-      ai.setPreview(streamingBuf);
+      ai.setPreview(stripToolXml(streamingBuf));
       autoScroll();
     } else if (kind === "tool_call_start") {
       // Finalize any previous tool's timing
