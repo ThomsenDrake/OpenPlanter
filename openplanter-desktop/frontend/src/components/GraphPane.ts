@@ -66,6 +66,7 @@ export function createGraphPane(): HTMLElement {
   sessionToggle.className = "graph-session-toggle";
   sessionToggle.textContent = "\u2726"; // ✦
   sessionToggle.title = "Show only new nodes from this session";
+  sessionToggle.classList.add("active");
 
   const sessionHint = document.createElement("span");
   sessionHint.className = "graph-session-hint";
@@ -101,7 +102,7 @@ export function createGraphPane(): HTMLElement {
   const hiddenCategories = new Set<string>();
   let baselineNodeIds = new Set<string>();
   let baselineCaptured = false;
-  let sessionFilterActive = false;
+  let sessionFilterActive = true;
 
   // --- Search handler (200ms debounce) ---
   let searchTimer: ReturnType<typeof setTimeout> | null = null;

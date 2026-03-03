@@ -81,6 +81,13 @@ test.describe("Graph Pane", () => {
     await page.waitForSelector(".graph-pane", { timeout: 5000 });
     // Give Cytoscape time to initialize and layout
     await page.waitForTimeout(2000);
+    // Session filter defaults ON (hides all pre-existing nodes).
+    // Turn it off so non-session tests see all nodes.
+    const toggle = page.locator(".graph-session-toggle");
+    if (await toggle.evaluate((el) => el.classList.contains("active"))) {
+      await toggle.click();
+      await page.waitForTimeout(300);
+    }
   });
 
   test("full app layout renders three columns", async ({ page }) => {
@@ -709,15 +716,25 @@ test.describe("Graph Pane", () => {
     await page.waitForSelector(".graph-pane", { timeout: 5000 });
     await page.waitForTimeout(2000);
 
-    // Initial state: 15 nodes visible
-    const initialCount = await page.evaluate(() => {
+    // Session filter defaults ON — all 15 baseline nodes hidden
+    const toggle = page.locator(".graph-session-toggle");
+    await expect(toggle).toHaveClass(/active/);
+
+    const initialTotal = await page.evaluate(() => {
       const container = document.querySelector(".graph-canvas");
       const cy = (container as any)?._cyreg?.cy;
       return cy ? cy.nodes().length : 0;
     });
-    expect(initialCount).toBe(15);
+    expect(initialTotal).toBe(15);
 
-    // Click refresh — should get 17 nodes (2 new ones)
+    const initialVisible = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(initialVisible).toBe(0);
+
+    // Click refresh — 2 new nodes appear (visible), old nodes stay hidden
     await page.locator(".graph-refresh-btn").click();
     await page.waitForTimeout(1000);
 
@@ -728,18 +745,14 @@ test.describe("Graph Pane", () => {
     });
     expect(afterRefresh).toBe(17);
 
-    // Toggle session filter — should show only new nodes + neighbors
-    await page.locator(".graph-session-toggle").click();
-    await page.waitForTimeout(500);
-
-    const visibleAfterToggle = await page.evaluate(() => {
+    // With filter still ON, only new nodes + neighbors visible
+    const visibleAfterRefresh = await page.evaluate(() => {
       const container = document.querySelector(".graph-canvas");
       const cy = (container as any)?._cyreg?.cy;
       return cy ? cy.nodes(":visible").length : 0;
     });
-    // 2 new nodes + their neighbors (acme-corp, bank-of-west), not all 17
-    expect(visibleAfterToggle).toBeLessThan(17);
-    expect(visibleAfterToggle).toBeGreaterThanOrEqual(2);
+    expect(visibleAfterRefresh).toBeLessThan(17);
+    expect(visibleAfterRefresh).toBeGreaterThanOrEqual(2);
 
     // New nodes should have .new-node class
     const newNodeCount = await page.evaluate(() => {
@@ -748,6 +761,17 @@ test.describe("Graph Pane", () => {
       return cy ? cy.nodes(".new-node").length : 0;
     });
     expect(newNodeCount).toBe(2);
+
+    // Toggle OFF → all 17 nodes visible
+    await toggle.click();
+    await page.waitForTimeout(500);
+
+    const allVisible = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      return cy ? cy.nodes(":visible").length : 0;
+    });
+    expect(allVisible).toBe(17);
 
     await page.screenshot({ path: "e2e/screenshots/26-session-toggle.png" });
 
