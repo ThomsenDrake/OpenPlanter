@@ -51,15 +51,22 @@ impl AnthropicModel {
     }
 
     /// Convert messages to Anthropic format, excluding system messages.
+    ///
+    /// Consecutive `Tool` messages are merged into a single `user` message
+    /// with multiple `tool_result` content blocks, since Anthropic rejects
+    /// consecutive same-role messages.
     fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
-        messages
-            .iter()
-            .filter_map(|msg| match msg {
-                Message::System { .. } => None,
-                Message::User { content } => Some(serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                })),
+        let mut result: Vec<serde_json::Value> = Vec::new();
+
+        for msg in messages {
+            match msg {
+                Message::System { .. } => {}
+                Message::User { content } => {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    }));
+                }
                 Message::Assistant { content, tool_calls } => {
                     let mut blocks: Vec<serde_json::Value> = Vec::new();
                     if !content.is_empty() {
@@ -70,7 +77,6 @@ impl AnthropicModel {
                     }
                     if let Some(tcs) = tool_calls {
                         for tc in tcs {
-                            // Parse arguments string as JSON object for Anthropic's input field
                             let input: serde_json::Value =
                                 serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
                             blocks.push(serde_json::json!({
@@ -81,21 +87,37 @@ impl AnthropicModel {
                             }));
                         }
                     }
-                    Some(serde_json::json!({
+                    result.push(serde_json::json!({
                         "role": "assistant",
                         "content": blocks,
-                    }))
+                    }));
                 }
-                Message::Tool { tool_call_id, content } => Some(serde_json::json!({
-                    "role": "user",
-                    "content": [{
+                Message::Tool { tool_call_id, content } => {
+                    let block = serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": tool_call_id,
                         "content": content,
-                    }],
-                })),
-            })
-            .collect()
+                    });
+                    // Merge into previous user message if it contains tool_result blocks
+                    if let Some(last) = result.last_mut() {
+                        if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                            if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                if arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")) {
+                                    arr.push(block);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": [block],
+                    }));
+                }
+            }
+        }
+
+        result
     }
 
     fn build_payload(
@@ -478,6 +500,28 @@ mod tests {
         let content = converted[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "toolu_1");
+    }
+
+    #[test]
+    fn test_convert_merges_consecutive_tool_messages() {
+        let msgs = vec![
+            Message::Assistant {
+                content: "Using tools.".to_string(),
+                tool_calls: Some(vec![
+                    ToolCall { id: "t1".into(), name: "read_file".into(), arguments: "{}".into() },
+                    ToolCall { id: "t2".into(), name: "list_files".into(), arguments: "{}".into() },
+                ]),
+            },
+            Message::Tool { tool_call_id: "t1".into(), content: "file1 contents".into() },
+            Message::Tool { tool_call_id: "t2".into(), content: "file list".into() },
+        ];
+        let converted = AnthropicModel::convert_messages(&msgs);
+        // Should be 2 messages: assistant + one merged user
+        assert_eq!(converted.len(), 2, "consecutive Tool messages should merge into one user message");
+        let user_content = converted[1]["content"].as_array().unwrap();
+        assert_eq!(user_content.len(), 2, "merged user message should have 2 tool_result blocks");
+        assert_eq!(user_content[0]["tool_use_id"], "t1");
+        assert_eq!(user_content[1]["tool_use_id"], "t2");
     }
 
     // ── build_payload ──

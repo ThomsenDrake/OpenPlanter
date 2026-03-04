@@ -1,7 +1,7 @@
 // Recursive language model engine.
 //
-// Full engine implementation in Phase 4. This module currently provides
-// the SolveEmitter trait, demo_solve, and a real solve flow.
+// Provides the SolveEmitter trait, demo_solve, and a real solve flow
+// with a multi-step agentic loop that executes tool calls.
 
 pub mod context;
 pub mod judge;
@@ -13,6 +13,8 @@ use crate::config::AgentConfig;
 use crate::events::{DeltaEvent, DeltaKind, StepEvent, TokenUsage};
 use crate::model::Message;
 use crate::prompts::build_system_prompt;
+use crate::tools::defs::build_tool_defs;
+use crate::tools::WorkspaceTools;
 
 // Abstraction for emitting solve events.
 //
@@ -87,7 +89,11 @@ pub async fn demo_solve(
     emitter.emit_complete(&response);
 }
 
-/// Real solve flow that calls an LLM API and streams the response.
+/// Real solve flow with a multi-step agentic loop.
+///
+/// Calls the model with tool definitions. If the model returns tool calls,
+/// executes them, appends results, and loops until the model returns a
+/// final text answer or the step budget is exhausted.
 ///
 /// Falls back to demo_solve when `config.demo` is true.
 pub async fn solve(
@@ -109,19 +115,23 @@ pub async fn solve(
         }
     };
 
+    let provider = model.provider_name().to_string();
     emitter.emit_trace(&format!(
         "Solving with {}/{}",
-        model.provider_name(),
+        provider,
         model.model_name()
     ));
 
-    // 2. Build messages
+    // 2. Build tools and messages
+    let tool_defs = build_tool_defs(&provider);
+    let mut tools = WorkspaceTools::new(config);
+
     let system_prompt = build_system_prompt(
         config.recursive,
         config.acceptance_criteria,
         config.demo,
     );
-    let messages = vec![
+    let mut messages = vec![
         Message::System {
             content: system_prompt,
         },
@@ -130,35 +140,120 @@ pub async fn solve(
         },
     ];
 
-    // 3. Call model with streaming
-    let start = std::time::Instant::now();
-    match model
-        .chat_stream(&messages, &[], &|delta| emitter.emit_delta(delta), &cancel)
-        .await
-    {
-        Ok(turn) => {
+    let max_steps = config.max_steps_per_call as usize;
+
+    // 3. Agentic loop
+    for step in 1..=max_steps {
+        if cancel.is_cancelled() {
+            emitter.emit_error("Cancelled");
+            tools.cleanup();
+            return;
+        }
+
+        let step_start = std::time::Instant::now();
+
+        // Call model with streaming
+        let turn = match model
+            .chat_stream(&messages, &tool_defs, &|delta| emitter.emit_delta(delta), &cancel)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = e.to_string();
+                tools.cleanup();
+                if msg == "Cancelled" {
+                    emitter.emit_error("Cancelled");
+                } else {
+                    emitter.emit_error(&msg);
+                }
+                return;
+            }
+        };
+
+        // Append assistant message to conversation
+        let tool_calls_opt = if turn.tool_calls.is_empty() {
+            None
+        } else {
+            Some(turn.tool_calls.clone())
+        };
+        messages.push(Message::Assistant {
+            content: turn.text.clone(),
+            tool_calls: tool_calls_opt,
+        });
+
+        // No tool calls → final answer
+        if turn.tool_calls.is_empty() {
+            let tool_name = None;
             emitter.emit_step(StepEvent {
                 depth: 0,
-                step: 1,
-                tool_name: None,
+                step: step as u32,
+                tool_name,
                 tokens: TokenUsage {
                     input_tokens: turn.input_tokens,
                     output_tokens: turn.output_tokens,
                 },
-                elapsed_ms: start.elapsed().as_millis() as u64,
+                elapsed_ms: step_start.elapsed().as_millis() as u64,
                 is_final: true,
             });
             emitter.emit_complete(&turn.text);
+            tools.cleanup();
+            return;
         }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg == "Cancelled" {
+
+        // Emit step (non-final) with first tool name
+        let first_tool = turn.tool_calls.first().map(|tc| tc.name.clone());
+        emitter.emit_step(StepEvent {
+            depth: 0,
+            step: step as u32,
+            tool_name: first_tool,
+            tokens: TokenUsage {
+                input_tokens: turn.input_tokens,
+                output_tokens: turn.output_tokens,
+            },
+            elapsed_ms: step_start.elapsed().as_millis() as u64,
+            is_final: false,
+        });
+
+        // Execute each tool call and collect results
+        for tc in &turn.tool_calls {
+            if cancel.is_cancelled() {
                 emitter.emit_error("Cancelled");
-            } else {
-                emitter.emit_error(&msg);
+                tools.cleanup();
+                return;
             }
+
+            emitter.emit_trace(&format!("Executing tool: {} ({})", tc.name, tc.id));
+            let result = tools.execute(&tc.name, &tc.arguments).await;
+
+            if result.is_error {
+                emitter.emit_trace(&format!("Tool {} error: {}", tc.name, &result.content[..result.content.len().min(200)]));
+            }
+
+            messages.push(Message::Tool {
+                tool_call_id: tc.id.clone(),
+                content: result.content,
+            });
+        }
+
+        // Budget warnings
+        let remaining = max_steps - step;
+        if remaining == max_steps / 2 {
+            emitter.emit_trace(&format!(
+                "Step budget: {remaining}/{max_steps} steps remaining (50%)"
+            ));
+        } else if remaining == max_steps / 4 {
+            emitter.emit_trace(&format!(
+                "Step budget: {remaining}/{max_steps} steps remaining (25%)"
+            ));
         }
     }
+
+    // Budget exhausted
+    tools.cleanup();
+    emitter.emit_error(&format!(
+        "Step budget exhausted after {max_steps} steps. \
+         The model did not produce a final answer within the allowed steps."
+    ));
 }
 
 #[cfg(test)]
