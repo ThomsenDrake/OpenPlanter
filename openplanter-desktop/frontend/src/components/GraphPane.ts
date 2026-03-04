@@ -169,9 +169,8 @@ export function createGraphPane(): HTMLElement {
     }
   });
 
-  // --- Refresh handler ---
-  refreshBtn.addEventListener("click", async () => {
-    refreshBtn.classList.add("spinning");
+  // --- Auto-refresh helper (used by button, agent-step, etc.) ---
+  async function autoRefreshGraph() {
     try {
       const data = await getGraphData();
       if (data.nodes.length > 0) {
@@ -181,6 +180,16 @@ export function createGraphPane(): HTMLElement {
           filterBySession(true, baselineNodeIds);
         }
       }
+    } catch {
+      // Silently ignore — graph refresh is best-effort
+    }
+  }
+
+  // --- Refresh handler ---
+  refreshBtn.addEventListener("click", async () => {
+    refreshBtn.classList.add("spinning");
+    try {
+      await autoRefreshGraph();
     } catch (e) {
       console.error("Failed to refresh graph data:", e);
     } finally {
@@ -374,6 +383,11 @@ export function createGraphPane(): HTMLElement {
       updateGraph(data);
     }
   }) as EventListener);
+
+  // Auto-refresh graph after each agent step (tool calls may write wiki files)
+  window.addEventListener("agent-step", () => {
+    autoRefreshGraph();
+  });
 
   // Listen for session changes — reset baseline
   window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean }>) => {
