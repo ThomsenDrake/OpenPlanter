@@ -156,14 +156,8 @@ export function createGraphPane(): HTMLElement {
     }
     const newCount = filterBySession(sessionFilterActive, baselineNodeIds);
 
-    if (sessionFilterActive && newCount === 0) {
-      // Immediately deactivate — nothing to show
-      sessionFilterActive = false;
-      sessionToggle.classList.remove("active");
-      filterBySession(false, baselineNodeIds);
-      showHint("no new nodes yet");
-    } else if (sessionFilterActive) {
-      showHint(`${newCount} new`);
+    if (sessionFilterActive) {
+      showHint(newCount === 0 ? "0 new" : `${newCount} new`);
     } else {
       sessionHint.classList.remove("visible");
     }

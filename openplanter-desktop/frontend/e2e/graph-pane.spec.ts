@@ -643,16 +643,16 @@ test.describe("Graph Pane", () => {
     const toggle = page.locator(".graph-session-toggle");
     const hint = page.locator(".graph-session-hint");
 
-    // Initially not active
+    // After beforeEach, toggle is deactivated
     await expect(toggle).not.toHaveClass(/active/);
 
-    // Click with no new nodes — should auto-deactivate and show hint
+    // Click to activate with no new nodes — stays active, shows "0 new"
     await toggle.click();
     await page.waitForTimeout(300);
-    await expect(toggle).not.toHaveClass(/active/);
+    await expect(toggle).toHaveClass(/active/);
     await expect(hint).toHaveClass(/visible/);
     const text = await hint.textContent();
-    expect(text).toContain("no new nodes");
+    expect(text).toContain("0 new");
   });
 
   test("session toggle filters to new nodes after refresh", async ({ page: _ }, testInfo) => {

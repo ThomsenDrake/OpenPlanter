@@ -198,6 +198,14 @@ const graphStyle: cytoscape.StylesheetStyle[] = [
       "background-opacity": 1,
     },
   },
+  // search-match overrides ALL hidden classes so search works regardless of
+  // which filters (session, tier, category) are active.
+  {
+    selector: "node.search-match",
+    style: {
+      display: "element",
+    },
+  },
 ] as any;
 
 /** Tier-based sizing parameters. */
@@ -415,12 +423,18 @@ export function setLayout(name: string): void {
 /** Hidden class names used by all filter systems. */
 const HIDDEN_CLASSES = ["hidden", "tier-hidden", "filter-hidden", "session-hidden"] as const;
 
-/** Sync edge visibility — an edge inherits a hidden class if either endpoint has it. */
+/** Sync edge visibility — an edge inherits a hidden class if either endpoint has it.
+ *  Exception: edges between two search-match nodes stay visible regardless. */
 function syncEdgeVisibility(): void {
   if (!cy) return;
   cy.edges().forEach((edge) => {
+    const bothMatch =
+      edge.source().hasClass("search-match") &&
+      edge.target().hasClass("search-match");
     for (const cls of HIDDEN_CLASSES) {
-      if (edge.source().hasClass(cls) || edge.target().hasClass(cls)) {
+      if (bothMatch) {
+        edge.removeClass(cls);
+      } else if (edge.source().hasClass(cls) || edge.target().hasClass(cls)) {
         edge.addClass(cls);
       } else {
         edge.removeClass(cls);
