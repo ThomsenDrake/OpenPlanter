@@ -1,6 +1,8 @@
 # OpenPlanter
 
-A recursive-language-model investigation agent with a terminal UI. OpenPlanter ingests heterogeneous datasets — corporate registries, campaign finance records, lobbying disclosures, government contracts, and more — resolves entities across them, and surfaces non-obvious connections through evidence-backed analysis. It operates autonomously with file I/O, shell execution, web search, and recursive sub-agent delegation.
+A recursive-language-model investigation agent with a desktop GUI and terminal interface. OpenPlanter ingests heterogeneous datasets — corporate registries, campaign finance records, lobbying disclosures, government contracts, and more — resolves entities across them, and surfaces non-obvious connections through evidence-backed analysis. It operates autonomously with file I/O, shell execution, web search, and recursive sub-agent delegation.
+
+![OpenPlanter Desktop](screenshot.png)
 
 ## Download
 
@@ -10,7 +12,44 @@ Pre-built binaries are available on the [Releases page](https://github.com/ShinM
 - **Windows** — `.msi`
 - **Linux** — `.AppImage`
 
-## Quickstart
+## Desktop App
+
+The desktop app (`openplanter-desktop/`) is a Tauri 2 application with a three-pane layout:
+
+- **Sidebar** — Session management, provider/model settings, and API credential status
+- **Chat pane** — Conversational interface showing the agent's objectives, reasoning steps, tool calls, and findings with syntax-highlighted code blocks
+- **Knowledge graph** — Interactive Cytoscape.js visualization of entities and relationships discovered during investigation. Nodes are color-coded by category (corporate, campaign-finance, lobbying, contracts, sanctions, etc.). Click a source node to open a slide-out drawer with the full rendered wiki document.
+
+### Features
+
+- **Live knowledge graph** — Entities and connections render in real time as the agent works. Switch between force-directed, hierarchical, and circular layouts. Search and filter by category.
+- **Wiki source drawer** — Click any source node to read the full markdown document in a slide-out panel. Internal wiki links navigate between documents and focus the corresponding graph node.
+- **Session persistence** — Investigations are saved automatically. Resume previous sessions or start new ones from the sidebar.
+- **Background wiki curator** — A lightweight agent runs in the background to keep wiki documents consistent and cross-linked.
+- **Multi-provider support** — Switch between OpenAI, Anthropic, OpenRouter, Cerebras, and Ollama (local) from the sidebar.
+
+### Building from Source
+
+```bash
+cd openplanter-desktop
+
+# Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# Run in development mode
+cargo tauri dev
+
+# Build distributable binary
+cargo tauri build
+```
+
+Requires: Rust stable, Node.js 20+, and platform-specific Tauri dependencies ([see Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
+
+## CLI Agent
+
+The Python CLI agent can be used independently of the desktop app.
+
+### Quickstart
 
 ```bash
 # Install
@@ -125,21 +164,6 @@ openplanter-agent [options]
 
 Use `--default-model`, `--default-reasoning-effort`, or per-provider variants like `--default-model-openai` to save workspace defaults to `.openplanter/settings.json`. View them with `--show-settings`.
 
-## TUI Commands
-
-Inside the interactive REPL:
-
-| Command | Action |
-|---------|--------|
-| `/model` | Show current model and provider |
-| `/model NAME` | Switch model (aliases: `opus`, `sonnet`, `gpt5`, etc.) |
-| `/model NAME --save` | Switch and persist as default |
-| `/model list [all]` | List available models |
-| `/reasoning LEVEL` | Change reasoning effort |
-| `/status` | Show session status and token usage |
-| `/clear` | Clear the screen |
-| `/quit` | Exit |
-
 ## Configuration
 
 Keys are resolved in this priority order (highest wins):
@@ -155,25 +179,57 @@ All runtime settings can also be set via `OPENPLANTER_*` environment variables (
 ## Project Structure
 
 ```
-agent/
-  __main__.py    CLI entry point and REPL
-  engine.py      Recursive language model engine
-  runtime.py     Session persistence and lifecycle
-  model.py       Provider-agnostic LLM abstraction
-  builder.py     Engine/model factory
-  tools.py       Workspace tool implementations
-  tool_defs.py   Tool JSON schemas
-  prompts.py     System prompt construction
-  config.py      Configuration dataclass
-  credentials.py Credential management
-  tui.py         Rich terminal UI
-  demo.py        Demo mode (output censoring)
-  patching.py    File patching utilities
-  settings.py    Persistent settings
-tests/           Unit and integration tests
+openplanter-desktop/         Tauri 2 desktop application
+  crates/
+    op-tauri/                 Tauri backend (Rust)
+      src/commands/           IPC command handlers (agent, wiki, config)
+    op-core/                  Shared core library
+  frontend/                   TypeScript/Vite frontend
+    src/components/           UI components (ChatPane, GraphPane, InputBar, Sidebar)
+    src/graph/                Cytoscape.js graph rendering
+    src/api/                  Tauri IPC wrappers
+    e2e/                      Playwright E2E tests
+
+agent/                        Python CLI agent
+  __main__.py                 CLI entry point and REPL
+  engine.py                   Recursive language model engine
+  runtime.py                  Session persistence and lifecycle
+  model.py                    Provider-agnostic LLM abstraction
+  builder.py                  Engine/model factory
+  tools.py                    Workspace tool implementations
+  tool_defs.py                Tool JSON schemas
+  prompts.py                  System prompt construction
+  config.py                   Configuration dataclass
+  credentials.py              Credential management
+  tui.py                      Rich terminal UI
+  demo.py                     Demo mode (output censoring)
+  patching.py                 File patching utilities
+  settings.py                 Persistent settings
+
+tests/                        Unit and integration tests
 ```
 
 ## Development
+
+### Desktop App
+
+```bash
+cd openplanter-desktop
+
+# Development mode (hot-reload)
+cargo tauri dev
+
+# Frontend tests
+cd frontend && npm test
+
+# E2E tests (Playwright)
+cd frontend && npm run test:e2e
+
+# Backend tests
+cargo test
+```
+
+### CLI Agent
 
 ```bash
 # Install in editable mode
