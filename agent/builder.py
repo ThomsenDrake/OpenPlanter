@@ -235,6 +235,8 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
         exa_base_url=cfg.exa_base_url,
         firecrawl_api_key=cfg.firecrawl_api_key,
         firecrawl_base_url=cfg.firecrawl_base_url,
+        brave_api_key=cfg.brave_api_key,
+        brave_base_url=cfg.brave_base_url,
     )
 
     try:

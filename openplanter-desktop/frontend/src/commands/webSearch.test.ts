@@ -31,7 +31,7 @@ describe("handleWebSearchCommand", () => {
 
   it("switches provider for the current session", async () => {
     __setHandler("update_config", ({ partial }: { partial: Record<string, string> }) => {
-      expect(partial.web_search_provider).toBe("firecrawl");
+      expect(partial.web_search_provider).toBe("brave");
       return {
         provider: "anthropic",
         model: "claude-opus-4-6",
@@ -42,14 +42,14 @@ describe("handleWebSearchCommand", () => {
         max_depth: 4,
         max_steps_per_call: 100,
         reasoning_effort: "high",
-        web_search_provider: "firecrawl",
+        web_search_provider: "brave",
         demo: false,
       };
     });
 
-    const result = await handleWebSearchCommand("firecrawl");
-    expect(result.lines).toContain("Web search provider set to: firecrawl");
-    expect(appState.get().webSearchProvider).toBe("firecrawl");
+    const result = await handleWebSearchCommand("brave");
+    expect(result.lines).toContain("Web search provider set to: brave");
+    expect(appState.get().webSearchProvider).toBe("brave");
   });
 
   it("save persists the selected provider", async () => {
@@ -63,14 +63,14 @@ describe("handleWebSearchCommand", () => {
       max_depth: 4,
       max_steps_per_call: 100,
       reasoning_effort: "high",
-      web_search_provider: "firecrawl",
+      web_search_provider: "brave",
       demo: false,
     }));
     __setHandler("save_settings", ({ settings }: { settings: Record<string, string> }) => {
-      expect(settings.web_search_provider).toBe("firecrawl");
+      expect(settings.web_search_provider).toBe("brave");
     });
 
-    const result = await handleWebSearchCommand("firecrawl --save");
+    const result = await handleWebSearchCommand("brave --save");
     expect(result.lines).toContain("(Settings saved)");
   });
 });

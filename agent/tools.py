@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import base64
 import fnmatch
+import html as _html
 import json
 import os
 import signal
@@ -11,11 +12,13 @@ import subprocess
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import re as _re
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,66 @@ _WS_RE = _re.compile(r"\s+")
 _HASHLINE_PREFIX_RE = _re.compile(r"^\d+:[0-9a-f]{2}\|")
 _HEREDOC_RE = _re.compile(r"<<-?\s*['\"]?\w+['\"]?")
 _INTERACTIVE_RE = _re.compile(r"(^|[;&|]\s*)(vim|nano|less|more|top|htop|man)\b")
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._title_parts: list[str] = []
+        self._text_parts: list[str] = []
+        self._skip_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.lower()
+        if lowered in {"script", "style"}:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        if lowered == "title":
+            self._in_title = True
+            return
+        if lowered in {"article", "br", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "p", "section", "td", "th", "tr"}:
+            self._text_parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if lowered in {"script", "style"}:
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if self._skip_depth:
+            return
+        if lowered == "title":
+            self._in_title = False
+            return
+        if lowered in {"article", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "p", "section", "td", "th", "tr"}:
+            self._text_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth or not data:
+            return
+        if self._in_title:
+            self._title_parts.append(data)
+        self._text_parts.append(data)
+
+    def title(self) -> str:
+        return _WS_RE.sub(" ", _html.unescape("".join(self._title_parts))).strip()
+
+    def text(self) -> str:
+        return _WS_RE.sub(" ", _html.unescape(" ".join(self._text_parts))).strip()
+
+
+def _extract_html_text(raw_html: str) -> tuple[str, str]:
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(raw_html)
+        parser.close()
+        return parser.title(), parser.text()
+    except Exception:
+        stripped = _WS_RE.sub(" ", _re.sub(r"(?is)<[^>]+>", " ", raw_html)).strip()
+        return "", _html.unescape(stripped)
 
 
 def _line_hash(line: str) -> str:
@@ -59,6 +122,8 @@ class WorkspaceTools:
     exa_base_url: str = "https://api.exa.ai"
     firecrawl_api_key: str | None = None
     firecrawl_base_url: str = "https://api.firecrawl.dev/v1"
+    brave_api_key: str | None = None
+    brave_base_url: str = "https://api.search.brave.com/res/v1"
 
     def __post_init__(self) -> None:
         self.root = self.root.expanduser().resolve()
@@ -839,6 +904,84 @@ class WorkspaceTools:
             raise ToolError(f"Firecrawl API returned non-object response: {type(parsed)!r}")
         return parsed
 
+    def _brave_request(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not (self.brave_api_key and self.brave_api_key.strip()):
+            raise ToolError("BRAVE_API_KEY not configured")
+        query = urllib.parse.urlencode(params, doseq=True)
+        url = self.brave_base_url.rstrip("/") + endpoint
+        if query:
+            url = f"{url}?{query}"
+        req = urllib.request.Request(
+            url=url,
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": self.brave_api_key,
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.command_timeout_sec) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ToolError(f"Brave API HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise ToolError(f"Brave API connection error: {exc}") from exc
+        except OSError as exc:
+            raise ToolError(f"Brave API network error: {exc}") from exc
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Brave API returned non-JSON payload: {raw[:500]}") from exc
+        if not isinstance(parsed, dict):
+            raise ToolError(f"Brave API returned non-object response: {type(parsed)!r}")
+        return parsed
+
+    def _fetch_url_direct(self, url: str) -> dict[str, str]:
+        req = urllib.request.Request(
+            url=url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8",
+                "User-Agent": "OpenPlanter/1.0",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.command_timeout_sec) as resp:
+                resolved_url = resp.geturl()
+                charset = resp.headers.get_content_charset() or "utf-8"
+                raw = resp.read().decode(charset, errors="replace")
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+        except urllib.error.HTTPError as exc:
+            return {
+                "url": url,
+                "title": "",
+                "text": f"Direct fetch failed: HTTP {exc.code}",
+            }
+        except urllib.error.URLError as exc:
+            return {
+                "url": url,
+                "title": "",
+                "text": f"Direct fetch failed: {exc}",
+            }
+        except OSError as exc:
+            return {
+                "url": url,
+                "title": "",
+                "text": f"Direct fetch failed: {exc}",
+            }
+
+        if "html" in content_type:
+            title, text = _extract_html_text(raw)
+        else:
+            title, text = "", raw
+        return {
+            "url": resolved_url,
+            "title": title,
+            "text": self._clip(text or raw, 8000),
+        }
+
     def web_search(
         self,
         query: str,
@@ -850,7 +993,7 @@ class WorkspaceTools:
             return "web_search requires non-empty query"
         clamped_results = max(1, min(int(num_results), 20))
         provider = (self.web_search_provider or "exa").strip().lower()
-        if provider not in {"exa", "firecrawl"}:
+        if provider not in {"exa", "firecrawl", "brave"}:
             provider = "exa"
 
         if provider == "firecrawl":
@@ -892,6 +1035,58 @@ class WorkspaceTools:
                     text_value = row.get("markdown") or row.get("text") or ""
                     if isinstance(text_value, str) and text_value:
                         item["text"] = self._clip(text_value, 4000)
+                out_results.append(item)
+
+            output = {
+                "query": query,
+                "provider": provider,
+                "results": out_results,
+                "total": len(out_results),
+            }
+            return self._clip(json.dumps(output, indent=2, ensure_ascii=True), self.max_file_chars)
+
+        if provider == "brave":
+            params: dict[str, Any] = {
+                "q": query,
+                "count": clamped_results,
+            }
+            if include_text:
+                params["extra_snippets"] = "true"
+
+            try:
+                parsed = self._brave_request("/web/search", params)
+            except Exception as exc:
+                return f"Web search failed: {exc}"
+
+            rows: list[Any] = []
+            web = parsed.get("web")
+            if isinstance(web, dict):
+                web_rows = web.get("results")
+                if isinstance(web_rows, list):
+                    rows = web_rows
+            elif isinstance(parsed.get("results"), list):
+                rows = parsed["results"]
+
+            out_results: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                description = str(row.get("description", "") or row.get("snippet", ""))
+                extra_snippets = row.get("extra_snippets")
+                extra_texts = [
+                    snippet
+                    for snippet in extra_snippets
+                    if isinstance(snippet, str) and snippet
+                ] if isinstance(extra_snippets, list) else []
+                item: dict[str, Any] = {
+                    "url": str(row.get("url", "")),
+                    "title": str(row.get("title", "")),
+                    "snippet": description or (extra_texts[0] if extra_texts else ""),
+                }
+                if include_text:
+                    text_parts = [part for part in [description, *extra_texts] if part]
+                    if text_parts:
+                        item["text"] = self._clip("\n\n".join(text_parts), 4000)
                 out_results.append(item)
 
             output = {
@@ -949,7 +1144,7 @@ class WorkspaceTools:
             return "fetch_url requires at least one valid URL"
         normalized = normalized[:10]
         provider = (self.web_search_provider or "exa").strip().lower()
-        if provider not in {"exa", "firecrawl"}:
+        if provider not in {"exa", "firecrawl", "brave"}:
             provider = "exa"
 
         if provider == "firecrawl":
@@ -978,6 +1173,15 @@ class WorkspaceTools:
                         "text": self._clip(str(text), 8000),
                     }
                 )
+            output = {
+                "provider": provider,
+                "pages": pages,
+                "total": len(pages),
+            }
+            return self._clip(json.dumps(output, indent=2, ensure_ascii=True), self.max_file_chars)
+
+        if provider == "brave":
+            pages = [self._fetch_url_direct(url) for url in normalized]
             output = {
                 "provider": provider,
                 "pages": pages,

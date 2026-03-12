@@ -104,6 +104,7 @@ class AgentConfig:
     ollama_base_url: str = "http://localhost:11434/v1"
     exa_base_url: str = "https://api.exa.ai"
     firecrawl_base_url: str = "https://api.firecrawl.dev/v1"
+    brave_base_url: str = "https://api.search.brave.com/res/v1"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
@@ -111,6 +112,7 @@ class AgentConfig:
     zai_api_key: str | None = None
     exa_api_key: str | None = None
     firecrawl_api_key: str | None = None
+    brave_api_key: str | None = None
     web_search_provider: str = "exa"
     voyage_api_key: str | None = None
     max_depth: int = 4
@@ -157,6 +159,7 @@ class AgentConfig:
         zai_api_key = os.getenv("OPENPLANTER_ZAI_API_KEY") or os.getenv("ZAI_API_KEY")
         exa_api_key = os.getenv("OPENPLANTER_EXA_API_KEY") or os.getenv("EXA_API_KEY")
         firecrawl_api_key = os.getenv("OPENPLANTER_FIRECRAWL_API_KEY") or os.getenv("FIRECRAWL_API_KEY")
+        brave_api_key = os.getenv("OPENPLANTER_BRAVE_API_KEY") or os.getenv("BRAVE_API_KEY")
         voyage_api_key = os.getenv("OPENPLANTER_VOYAGE_API_KEY") or os.getenv("VOYAGE_API_KEY")
         openai_base_url = os.getenv("OPENPLANTER_OPENAI_BASE_URL") or os.getenv(
             "OPENPLANTER_BASE_URL",
@@ -181,7 +184,7 @@ class AgentConfig:
             )
         )
         web_search_provider = (os.getenv("OPENPLANTER_WEB_SEARCH_PROVIDER", "exa").strip().lower() or "exa")
-        if web_search_provider not in {"exa", "firecrawl"}:
+        if web_search_provider not in {"exa", "firecrawl", "brave"}:
             web_search_provider = "exa"
         return cls(
             workspace=ws,
@@ -201,6 +204,7 @@ class AgentConfig:
             ollama_base_url=os.getenv("OPENPLANTER_OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             exa_base_url=os.getenv("OPENPLANTER_EXA_BASE_URL", "https://api.exa.ai"),
             firecrawl_base_url=os.getenv("OPENPLANTER_FIRECRAWL_BASE_URL", "https://api.firecrawl.dev/v1"),
+            brave_base_url=os.getenv("OPENPLANTER_BRAVE_BASE_URL", "https://api.search.brave.com/res/v1"),
             openai_api_key=openai_api_key,
             anthropic_api_key=anthropic_api_key,
             openrouter_api_key=openrouter_api_key,
@@ -208,6 +212,7 @@ class AgentConfig:
             zai_api_key=zai_api_key,
             exa_api_key=exa_api_key,
             firecrawl_api_key=firecrawl_api_key,
+            brave_api_key=brave_api_key,
             web_search_provider=web_search_provider,
             voyage_api_key=voyage_api_key,
             max_depth=int(os.getenv("OPENPLANTER_MAX_DEPTH", "4")),
