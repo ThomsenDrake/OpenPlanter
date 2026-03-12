@@ -24,6 +24,7 @@ describe("completionRegistry", () => {
     expect(values).toContain("/status");
     expect(values).toContain("/model");
     expect(values).toContain("/reasoning");
+    expect(values).toContain("/init");
   });
 
   it("every item has a non-empty value and description", () => {
@@ -90,5 +91,17 @@ describe("completionRegistry", () => {
     const helpCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/help");
     expect(helpCmd).toBeDefined();
     expect(helpCmd!.children).toBeUndefined();
+  });
+
+  it("/init has expected subcommands", () => {
+    const initCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/init");
+    expect(initCmd).toBeDefined();
+    expect(initCmd!.children?.map((child) => child.value)).toEqual([
+      "status",
+      "standard",
+      "migrate",
+      "open",
+      "done",
+    ]);
   });
 });
