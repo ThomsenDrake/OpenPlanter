@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn test_curator_tool_defs_openai() {
         let tools = build_curator_tool_defs("openai");
-        assert_eq!(tools.len(), 8, "curator should have exactly 8 tools");
+        assert_eq!(tools.len(), 6, "curator should have exactly 6 tools");
 
         let names: Vec<String> = tools
             .iter()
@@ -555,6 +555,8 @@ mod tests {
         assert!(names.contains(&"list_files".to_string()));
         assert!(names.contains(&"search_files".to_string()));
         assert!(names.contains(&"think".to_string()));
+        assert!(!names.contains(&"apply_patch".to_string()));
+        assert!(!names.contains(&"hashline_edit".to_string()));
 
         // Should NOT include web, shell, or bg job tools
         assert!(!names.contains(&"web_search".to_string()));
@@ -568,7 +570,7 @@ mod tests {
     #[test]
     fn test_curator_tool_defs_anthropic() {
         let tools = build_curator_tool_defs("anthropic");
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 6);
 
         // Anthropic format: flat with input_schema
         assert!(tools[0].get("input_schema").is_some());

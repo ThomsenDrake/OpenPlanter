@@ -31,8 +31,9 @@ Your ONLY job is to update the wiki at .openplanter/wiki/ based on the main agen
 6. Use EXACT source names in Cross-Reference sections to power the knowledge graph
 7. If nothing in the step context is wiki-relevant, respond with ONLY: "No wiki updates needed"
 8. Keep entries factual and concise — document what was found, not speculation
-9. Never modify files outside .openplanter/wiki/
-10. Maximum 8 tool calls — be efficient
+9. Never modify files outside .openplanter/wiki/ — this is enforced at runtime
+10. Only use write_file or edit_file for mutations
+11. Maximum 8 tool calls — be efficient
 
 == WIKI ENTRY TEMPLATE ==
 When creating a new entry, use this format:
@@ -126,8 +127,6 @@ pub const CURATOR_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
-    "apply_patch",
-    "hashline_edit",
     "think",
 ];
 
@@ -152,7 +151,7 @@ pub async fn run_curator(
 
     let provider = model.provider_name().to_string();
     let tool_defs = build_curator_tool_defs(&provider);
-    let mut tools = WorkspaceTools::new(config);
+    let mut tools = WorkspaceTools::new_curator(config);
 
     let mut messages = vec![
         Message::System {
@@ -227,11 +226,7 @@ pub async fn run_curator(
             let result = tools.execute(&tc.name, &tc.arguments).await;
 
             // Track file modifications
-            if matches!(
-                tc.name.as_str(),
-                "write_file" | "edit_file" | "apply_patch" | "hashline_edit"
-            ) && !result.is_error
-            {
+            if matches!(tc.name.as_str(), "write_file" | "edit_file") && !result.is_error {
                 files_changed += 1;
                 // Extract path for summary
                 if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.arguments) {
@@ -365,7 +360,9 @@ mod tests {
                     "run_shell",
                     "run_shell_bg",
                     "check_shell_bg",
-                    "kill_shell_bg"
+                    "kill_shell_bg",
+                    "apply_patch",
+                    "hashline_edit"
                 ]
                 .contains(name),
                 "Curator should not have access to {name}"

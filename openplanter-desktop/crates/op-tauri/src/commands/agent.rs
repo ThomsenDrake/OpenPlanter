@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bridge::{LoggingEmitter, TauriEmitter};
 use crate::commands::session::sessions_dir;
 use crate::state::AppState;
+use op_core::engine::SolveEmitter;
 use op_core::session::replay::{ReplayEntry, ReplayLogger};
 
 /// Start solving an objective. Result streamed via events.
@@ -55,6 +56,17 @@ pub async fn solve(
     }
 
     let emitter = LoggingEmitter::new(TauriEmitter::new(app), replay);
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|_| "<unavailable>".to_string());
+    emitter.emit_trace(&format!(
+        "[solve] pid={} cwd={} workspace={} session={}",
+        std::process::id(),
+        cwd,
+        cfg.workspace.display(),
+        session_id
+    ));
+    emitter.emit_trace(&format!("[startup:info] {}", state.startup_trace()));
 
     tokio::spawn(async move {
         let result = tokio::spawn(async move {
