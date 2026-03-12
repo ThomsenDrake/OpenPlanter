@@ -19,13 +19,14 @@ pub struct CredentialBundle {
     pub zai_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub firecrawl_api_key: Option<String>,
+    pub brave_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
 }
 
 impl CredentialBundle {
     /// Returns `true` if any key has a non-empty value.
     pub fn has_any(&self) -> bool {
-        let keys: [&Option<String>; 8] = [
+        let keys: [&Option<String>; 9] = [
             &self.openai_api_key,
             &self.anthropic_api_key,
             &self.openrouter_api_key,
@@ -33,6 +34,7 @@ impl CredentialBundle {
             &self.zai_api_key,
             &self.exa_api_key,
             &self.firecrawl_api_key,
+            &self.brave_api_key,
             &self.voyage_api_key,
         ];
         keys.iter()
@@ -55,6 +57,7 @@ impl CredentialBundle {
         fill!(zai_api_key);
         fill!(exa_api_key);
         fill!(firecrawl_api_key);
+        fill!(brave_api_key);
         fill!(voyage_api_key);
     }
 
@@ -75,6 +78,7 @@ impl CredentialBundle {
         add!(zai_api_key, "zai_api_key");
         add!(exa_api_key, "exa_api_key");
         add!(firecrawl_api_key, "firecrawl_api_key");
+        add!(brave_api_key, "brave_api_key");
         add!(voyage_api_key, "voyage_api_key");
         out
     }
@@ -95,6 +99,7 @@ impl CredentialBundle {
             zai_api_key: get_str(payload, "zai_api_key"),
             exa_api_key: get_str(payload, "exa_api_key"),
             firecrawl_api_key: get_str(payload, "firecrawl_api_key"),
+            brave_api_key: get_str(payload, "brave_api_key"),
             voyage_api_key: get_str(payload, "voyage_api_key"),
         }
     }
@@ -161,6 +166,7 @@ pub fn parse_env_file(path: &Path) -> CredentialBundle {
             "FIRECRAWL_API_KEY",
             "OPENPLANTER_FIRECRAWL_API_KEY",
         ),
+        brave_api_key: get_key(&env_map, "BRAVE_API_KEY", "OPENPLANTER_BRAVE_API_KEY"),
         voyage_api_key: get_key(&env_map, "VOYAGE_API_KEY", "OPENPLANTER_VOYAGE_API_KEY"),
     }
 }
@@ -183,6 +189,7 @@ pub fn credentials_from_env() -> CredentialBundle {
         zai_api_key: env_key("OPENPLANTER_ZAI_API_KEY", "ZAI_API_KEY"),
         exa_api_key: env_key("OPENPLANTER_EXA_API_KEY", "EXA_API_KEY"),
         firecrawl_api_key: env_key("OPENPLANTER_FIRECRAWL_API_KEY", "FIRECRAWL_API_KEY"),
+        brave_api_key: env_key("OPENPLANTER_BRAVE_API_KEY", "BRAVE_API_KEY"),
         voyage_api_key: env_key("OPENPLANTER_VOYAGE_API_KEY", "VOYAGE_API_KEY"),
     }
 }
@@ -346,6 +353,7 @@ mod tests {
             anthropic_api_key: None,
             openrouter_api_key: Some("or-456".into()),
             firecrawl_api_key: Some("fc-789".into()),
+            brave_api_key: Some("brave-101".into()),
             ..Default::default()
         };
         let json = bundle.to_json();
@@ -353,6 +361,7 @@ mod tests {
         assert!(!json.contains_key("anthropic_api_key"));
         assert_eq!(json.get("openrouter_api_key").unwrap(), "or-456");
         assert_eq!(json.get("firecrawl_api_key").unwrap(), "fc-789");
+        assert_eq!(json.get("brave_api_key").unwrap(), "brave-101");
     }
 
     #[test]
@@ -368,6 +377,7 @@ export ANTHROPIC_API_KEY='ant-key'
 EXA_API_KEY="exa-quoted"
 ZAI_API_KEY=zai-from-env
 OPENPLANTER_FIRECRAWL_API_KEY="firecrawl-quoted"
+BRAVE_API_KEY=brave-from-env
 UNRELATED_VAR=foo
 "#,
         )
@@ -379,6 +389,7 @@ UNRELATED_VAR=foo
         assert_eq!(bundle.exa_api_key, Some("exa-quoted".into()));
         assert_eq!(bundle.zai_api_key, Some("zai-from-env".into()));
         assert_eq!(bundle.firecrawl_api_key, Some("firecrawl-quoted".into()));
+        assert_eq!(bundle.brave_api_key, Some("brave-from-env".into()));
         assert!(bundle.cerebras_api_key.is_none());
     }
 
@@ -390,6 +401,7 @@ UNRELATED_VAR=foo
             openai_api_key: Some("sk-test".into()),
             anthropic_api_key: Some("ant-test".into()),
             zai_api_key: Some("zai-test".into()),
+            brave_api_key: Some("brave-test".into()),
             ..Default::default()
         };
         store.save(&bundle).unwrap();
@@ -397,6 +409,7 @@ UNRELATED_VAR=foo
         assert_eq!(loaded.openai_api_key, Some("sk-test".into()));
         assert_eq!(loaded.anthropic_api_key, Some("ant-test".into()));
         assert_eq!(loaded.zai_api_key, Some("zai-test".into()));
+        assert_eq!(loaded.brave_api_key, Some("brave-test".into()));
     }
 
     #[test]

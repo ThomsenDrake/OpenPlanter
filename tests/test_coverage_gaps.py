@@ -69,11 +69,12 @@ class StripQuotesTests(unittest.TestCase):
 class MergeMissingTests(unittest.TestCase):
     def test_fills_missing_keys(self) -> None:
         a = CredentialBundle(openai_api_key="oa")
-        b = CredentialBundle(anthropic_api_key="an", exa_api_key="exa")
+        b = CredentialBundle(anthropic_api_key="an", exa_api_key="exa", brave_api_key="brave")
         a.merge_missing(b)
         self.assertEqual(a.openai_api_key, "oa")
         self.assertEqual(a.anthropic_api_key, "an")
         self.assertEqual(a.exa_api_key, "exa")
+        self.assertEqual(a.brave_api_key, "brave")
 
     def test_does_not_overwrite_existing(self) -> None:
         a = CredentialBundle(openai_api_key="mine")
@@ -95,6 +96,7 @@ class MergeMissingTests(unittest.TestCase):
             openrouter_api_key="or",
             cerebras_api_key="cb",
             exa_api_key="exa",
+            brave_api_key="brave",
         )
         a.merge_missing(b)
         self.assertEqual(a.openai_api_key, "oa")
@@ -102,6 +104,7 @@ class MergeMissingTests(unittest.TestCase):
         self.assertEqual(a.openrouter_api_key, "or")
         self.assertEqual(a.cerebras_api_key, "cb")
         self.assertEqual(a.exa_api_key, "exa")
+        self.assertEqual(a.brave_api_key, "brave")
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +119,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
             "ANTHROPIC_API_KEY": "an-key",
             "OPENROUTER_API_KEY": "or-key",
             "EXA_API_KEY": "exa-key",
+            "BRAVE_API_KEY": "brave-key",
         }
         with patch.dict(os.environ, env, clear=True):
             creds = credentials_from_env()
@@ -123,6 +127,7 @@ class CredentialsFromEnvTests(unittest.TestCase):
         self.assertEqual(creds.anthropic_api_key, "an-key")
         self.assertEqual(creds.openrouter_api_key, "or-key")
         self.assertEqual(creds.exa_api_key, "exa-key")
+        self.assertEqual(creds.brave_api_key, "brave-key")
 
     def test_rlm_prefix_takes_priority(self) -> None:
         env = {
@@ -241,6 +246,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
             "ANTHROPIC_API_KEY": "an",
             "OPENROUTER_API_KEY": "or",
             "EXA_API_KEY": "exa",
+            "BRAVE_API_KEY": "brave",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = AgentConfig.from_env("/tmp/test-ws")
@@ -248,6 +254,7 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.anthropic_api_key, "an")
         self.assertEqual(cfg.openrouter_api_key, "or")
         self.assertEqual(cfg.exa_api_key, "exa")
+        self.assertEqual(cfg.brave_api_key, "brave")
 
     def test_foundry_placeholder_keys_disabled_for_public_endpoints(self) -> None:
         env = {
