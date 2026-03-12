@@ -20,7 +20,7 @@ pub const BRAVE_BASE_URL: &str = "https://api.search.brave.com/res/v1";
 pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>> =
     LazyLock::new(|| {
         HashMap::from([
-            ("openai", "azure-foundry/gpt-5.3-codex"),
+            ("openai", "azure-foundry/gpt-5.4"),
             ("anthropic", "anthropic-foundry/claude-opus-4-6"),
             ("openrouter", "anthropic/claude-sonnet-4-5"),
             ("cerebras", "qwen-3-235b-a22b-instruct-2507"),
@@ -93,19 +93,42 @@ pub fn is_foundry_anthropic_base_url(value: &str) -> bool {
     normalize_base_url(value) == FOUNDRY_ANTHROPIC_BASE_URL
 }
 
-pub fn resolve_openai_api_key(api_key: Option<String>, base_url: &str) -> Option<String> {
+pub fn has_real_openai_api_key(api_key: Option<&str>) -> bool {
+    api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| value != FOUNDRY_OPENAI_API_KEY_PLACEHOLDER)
+}
+
+pub fn has_openai_auth(api_key: Option<&str>, openai_oauth_token: Option<&str>) -> bool {
+    has_real_openai_api_key(api_key)
+        || openai_oauth_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+pub fn resolve_openai_api_key(
+    api_key: Option<String>,
+    base_url: &str,
+    openai_oauth_token: Option<String>,
+) -> Option<String> {
     let normalized = api_key
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    if normalized.as_deref() == Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER)
-        && !is_foundry_openai_base_url(base_url)
-    {
-        return None;
+    let real_key = normalized.filter(|value| value != FOUNDRY_OPENAI_API_KEY_PLACEHOLDER);
+    if real_key.is_some() {
+        return real_key;
     }
-    if normalized.is_some() {
-        return normalized;
+    let token = openai_oauth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if token.is_some() {
+        return token;
     }
     if is_foundry_openai_base_url(base_url) {
         return Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.to_string());
@@ -173,6 +196,7 @@ pub struct AgentConfig {
     // API keys
     pub api_key: Option<String>,
     pub openai_api_key: Option<String>,
+    pub openai_oauth_token: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub cerebras_api_key: Option<String>,
@@ -231,6 +255,7 @@ impl Default for AgentConfig {
             brave_base_url: BRAVE_BASE_URL.into(),
             api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
             openai_api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
+            openai_oauth_token: None,
             anthropic_api_key: Some(FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER.into()),
             openrouter_api_key: None,
             cerebras_api_key: None,
@@ -272,10 +297,10 @@ impl AgentConfig {
     pub fn from_env(workspace: impl AsRef<Path>) -> Self {
         let ws = dunce_canonicalize(workspace.as_ref());
 
-        let openai_api_key = env_opt("OPENPLANTER_OPENAI_API_KEY")
-            .or_else(|| env_opt("OPENAI_API_KEY"))
-            .or_else(|| env_opt("OPENPLANTER_OPENAI_OAUTH_TOKEN"))
-            .or_else(|| env_opt("OPENAI_OAUTH_TOKEN"));
+        let openai_api_key =
+            env_opt("OPENPLANTER_OPENAI_API_KEY").or_else(|| env_opt("OPENAI_API_KEY"));
+        let openai_oauth_token =
+            env_opt("OPENPLANTER_OPENAI_OAUTH_TOKEN").or_else(|| env_opt("OPENAI_OAUTH_TOKEN"));
 
         let anthropic_api_key =
             env_opt("OPENPLANTER_ANTHROPIC_API_KEY").or_else(|| env_opt("ANTHROPIC_API_KEY"));
@@ -303,7 +328,8 @@ impl AgentConfig {
             .unwrap_or_else(|| FOUNDRY_OPENAI_BASE_URL.into());
         let anthropic_base_url =
             env_or("OPENPLANTER_ANTHROPIC_BASE_URL", FOUNDRY_ANTHROPIC_BASE_URL);
-        let openai_api_key = resolve_openai_api_key(openai_api_key, &openai_base_url);
+        let openai_api_key =
+            resolve_openai_api_key(openai_api_key, &openai_base_url, openai_oauth_token.clone());
         let anthropic_api_key = resolve_anthropic_api_key(anthropic_api_key, &anthropic_base_url);
 
         let reasoning_effort_raw = env_or("OPENPLANTER_REASONING_EFFORT", "high")
@@ -360,6 +386,7 @@ impl AgentConfig {
             ),
             brave_base_url: env_or("OPENPLANTER_BRAVE_BASE_URL", BRAVE_BASE_URL),
             openai_api_key,
+            openai_oauth_token,
             anthropic_api_key,
             openrouter_api_key,
             cerebras_api_key,
@@ -461,7 +488,7 @@ mod tests {
     fn test_provider_default_models() {
         assert_eq!(
             PROVIDER_DEFAULT_MODELS.get("openai"),
-            Some(&"azure-foundry/gpt-5.3-codex")
+            Some(&"azure-foundry/gpt-5.4")
         );
         assert_eq!(
             PROVIDER_DEFAULT_MODELS.get("anthropic"),
@@ -489,6 +516,8 @@ mod tests {
             "OPENPLANTER_REASONING_EFFORT",
             "OPENPLANTER_OPENAI_API_KEY",
             "OPENAI_API_KEY",
+            "OPENPLANTER_OPENAI_OAUTH_TOKEN",
+            "OPENAI_OAUTH_TOKEN",
             "OPENPLANTER_OPENAI_BASE_URL",
             "OPENPLANTER_BASE_URL",
             "OPENPLANTER_ANTHROPIC_API_KEY",
@@ -550,7 +579,7 @@ mod tests {
         unsafe {
             // --- Phase 2: test custom values ---
             env::set_var("OPENPLANTER_PROVIDER", "openai");
-            env::set_var("OPENPLANTER_MODEL", "azure-foundry/gpt-5.3-codex");
+            env::set_var("OPENPLANTER_MODEL", "azure-foundry/gpt-5.4");
             env::set_var("OPENPLANTER_REASONING_EFFORT", "low");
             env::set_var("OPENPLANTER_MAX_DEPTH", "8");
             env::set_var("OPENPLANTER_RECURSIVE", "false");
@@ -569,7 +598,7 @@ mod tests {
 
         let cfg = AgentConfig::from_env("/tmp");
         assert_eq!(cfg.provider, "openai");
-        assert_eq!(cfg.model, "azure-foundry/gpt-5.3-codex");
+        assert_eq!(cfg.model, "azure-foundry/gpt-5.4");
         assert_eq!(cfg.reasoning_effort, Some("low".into()));
         assert_eq!(cfg.max_depth, 8);
         assert!(!cfg.recursive);
@@ -587,6 +616,25 @@ mod tests {
         assert_eq!(cfg.rate_limit_retry_after_cap_sec, 90.0);
 
         // Restore original values
+        unsafe {
+            env::remove_var("OPENAI_API_KEY");
+            env::set_var("OPENAI_OAUTH_TOKEN", "oauth-token");
+        }
+
+        let cfg = AgentConfig::from_env("/tmp");
+        assert_eq!(cfg.openai_oauth_token.as_deref(), Some("oauth-token"));
+        assert_eq!(cfg.openai_api_key.as_deref(), Some("oauth-token"));
+        assert_eq!(cfg.api_key.as_deref(), Some("oauth-token"));
+
+        unsafe {
+            env::set_var("OPENAI_API_KEY", "sk-test456");
+        }
+
+        let cfg = AgentConfig::from_env("/tmp");
+        assert_eq!(cfg.openai_oauth_token.as_deref(), Some("oauth-token"));
+        assert_eq!(cfg.openai_api_key.as_deref(), Some("sk-test456"));
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-test456"));
+
         for (k, v) in saved {
             unsafe {
                 match v {
@@ -614,16 +662,34 @@ mod tests {
         assert!(is_foundry_openai_base_url(FOUNDRY_OPENAI_BASE_URL));
         assert!(is_foundry_anthropic_base_url(FOUNDRY_ANTHROPIC_BASE_URL));
         assert_eq!(
-            resolve_openai_api_key(None, FOUNDRY_OPENAI_BASE_URL).as_deref(),
+            resolve_openai_api_key(None, FOUNDRY_OPENAI_BASE_URL, None).as_deref(),
             Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER)
+        );
+        assert_eq!(
+            resolve_openai_api_key(
+                Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.to_string()),
+                FOUNDRY_OPENAI_BASE_URL,
+                Some("oauth-token".to_string()),
+            )
+            .as_deref(),
+            Some("oauth-token")
+        );
+        assert_eq!(
+            resolve_openai_api_key(
+                Some("sk-openai".to_string()),
+                FOUNDRY_OPENAI_BASE_URL,
+                Some("oauth-token".to_string()),
+            )
+            .as_deref(),
+            Some("sk-openai")
         );
         assert_eq!(
             resolve_anthropic_api_key(None, FOUNDRY_ANTHROPIC_BASE_URL).as_deref(),
             Some(FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER)
         );
         assert_eq!(
-            strip_foundry_model_prefix("azure-foundry/gpt-5.3-codex"),
-            "gpt-5.3-codex"
+            strip_foundry_model_prefix("azure-foundry/gpt-5.4"),
+            "gpt-5.4"
         );
         assert_eq!(
             strip_foundry_model_prefix("anthropic-foundry/claude-opus-4-6"),
