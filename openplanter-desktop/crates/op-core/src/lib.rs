@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod config;
+pub mod config_hydration;
 pub mod credentials;
 pub mod engine;
 pub mod events;
@@ -9,3 +10,4 @@ pub mod session;
 pub mod settings;
 pub mod tools;
 pub mod wiki;
+pub mod workspace_init;

@@ -1,6 +1,11 @@
 /** Tauri event subscriptions. */
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AgentEvent, CuratorUpdateEvent, GraphData } from "./types";
+import type {
+  AgentEvent,
+  CuratorUpdateEvent,
+  GraphData,
+  MigrationProgressEvent,
+} from "./types";
 
 export function onAgentTrace(
   callback: (message: string) => void
@@ -48,6 +53,14 @@ export function onCuratorUpdate(
   callback: (event: CuratorUpdateEvent) => void
 ): Promise<UnlistenFn> {
   return listen<CuratorUpdateEvent>("agent:curator-update", (e) =>
+    callback(e.payload)
+  );
+}
+
+export function onMigrationProgress(
+  callback: (event: MigrationProgressEvent) => void
+): Promise<UnlistenFn> {
+  return listen<MigrationProgressEvent>("init:migration-progress", (e) =>
     callback(e.payload)
   );
 }

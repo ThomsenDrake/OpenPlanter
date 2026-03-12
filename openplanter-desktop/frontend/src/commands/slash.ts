@@ -5,6 +5,7 @@ import { handleModelCommand, type CommandResult } from "./model";
 import { handleReasoningCommand } from "./reasoning";
 import { handleWebSearchCommand } from "./webSearch";
 import { handleZaiPlanCommand } from "./zaiPlan";
+import { handleInitCommand } from "./init";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -38,6 +39,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /web-search <provider> --save  Set and persist",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
+          "  /init status        Show workspace init status",
+          "  /init standard      Initialize the current workspace",
+          "  /init migrate       Open the migration init panel",
         ],
       };
 
@@ -109,6 +113,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/reasoning":
       return handleReasoningCommand(args);
+
+    case "/init":
+      return handleInitCommand(args);
 
     default:
       return {
