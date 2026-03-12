@@ -60,6 +60,7 @@ pub fn merge_credentials_into_config(
     merge!(zai_api_key);
     merge!(exa_api_key);
     merge!(firecrawl_api_key);
+    merge!(brave_api_key);
     merge!(voyage_api_key);
 }
 
@@ -385,6 +386,7 @@ mod tests {
         cfg.zai_api_key = None;
         cfg.exa_api_key = None;
         cfg.firecrawl_api_key = None;
+        cfg.brave_api_key = None;
         cfg.voyage_api_key = None;
         cfg
     }
@@ -442,16 +444,18 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_includes_zai_and_firecrawl() {
+    fn test_merge_includes_zai_firecrawl_and_brave() {
         let mut cfg = empty_cfg();
         let env_creds = CredentialBundle {
             zai_api_key: Some("zai-env".to_string()),
             firecrawl_api_key: Some("fc-env".to_string()),
+            brave_api_key: Some("brave-env".to_string()),
             ..Default::default()
         };
         merge_credentials_into_config(&mut cfg, &env_creds, &CredentialBundle::default());
         assert_eq!(cfg.zai_api_key, Some("zai-env".to_string()));
         assert_eq!(cfg.firecrawl_api_key, Some("fc-env".to_string()));
+        assert_eq!(cfg.brave_api_key, Some("brave-env".to_string()));
     }
 
     #[test]
@@ -476,7 +480,7 @@ mod tests {
             default_model_zai: Some("glm-5".to_string()),
             default_reasoning_effort: Some("medium".to_string()),
             zai_plan: Some("coding".to_string()),
-            web_search_provider: Some("firecrawl".to_string()),
+            web_search_provider: Some("brave".to_string()),
             ..Default::default()
         };
         apply_settings_to_config(&mut cfg, &settings);
@@ -484,7 +488,7 @@ mod tests {
         assert_eq!(cfg.reasoning_effort, Some("medium".to_string()));
         assert_eq!(cfg.zai_plan, "coding");
         assert_eq!(cfg.zai_base_url, op_core::config::ZAI_CODING_BASE_URL);
-        assert_eq!(cfg.web_search_provider, "firecrawl");
+        assert_eq!(cfg.web_search_provider, "brave");
 
         for (key, value) in saved {
             unsafe {

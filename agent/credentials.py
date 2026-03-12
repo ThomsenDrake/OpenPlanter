@@ -18,6 +18,7 @@ class CredentialBundle:
     zai_api_key: str | None = None
     exa_api_key: str | None = None
     firecrawl_api_key: str | None = None
+    brave_api_key: str | None = None
     voyage_api_key: str | None = None
 
     def has_any(self) -> bool:
@@ -29,6 +30,7 @@ class CredentialBundle:
             or (self.zai_api_key and self.zai_api_key.strip())
             or (self.exa_api_key and self.exa_api_key.strip())
             or (self.firecrawl_api_key and self.firecrawl_api_key.strip())
+            or (self.brave_api_key and self.brave_api_key.strip())
             or (self.voyage_api_key and self.voyage_api_key.strip())
         )
 
@@ -47,6 +49,8 @@ class CredentialBundle:
             self.exa_api_key = other.exa_api_key
         if not self.firecrawl_api_key and other.firecrawl_api_key:
             self.firecrawl_api_key = other.firecrawl_api_key
+        if not self.brave_api_key and other.brave_api_key:
+            self.brave_api_key = other.brave_api_key
         if not self.voyage_api_key and other.voyage_api_key:
             self.voyage_api_key = other.voyage_api_key
 
@@ -66,6 +70,8 @@ class CredentialBundle:
             out["exa_api_key"] = self.exa_api_key
         if self.firecrawl_api_key:
             out["firecrawl_api_key"] = self.firecrawl_api_key
+        if self.brave_api_key:
+            out["brave_api_key"] = self.brave_api_key
         if self.voyage_api_key:
             out["voyage_api_key"] = self.voyage_api_key
         return out
@@ -82,6 +88,7 @@ class CredentialBundle:
             zai_api_key=(payload.get("zai_api_key") or "").strip() or None,
             exa_api_key=(payload.get("exa_api_key") or "").strip() or None,
             firecrawl_api_key=(payload.get("firecrawl_api_key") or "").strip() or None,
+            brave_api_key=(payload.get("brave_api_key") or "").strip() or None,
             voyage_api_key=(payload.get("voyage_api_key") or "").strip() or None,
         )
 
@@ -127,6 +134,7 @@ def parse_env_file(path: Path) -> CredentialBundle:
         exa_api_key=(env.get("EXA_API_KEY") or env.get("OPENPLANTER_EXA_API_KEY") or "").strip() or None,
         firecrawl_api_key=(env.get("FIRECRAWL_API_KEY") or env.get("OPENPLANTER_FIRECRAWL_API_KEY") or "").strip()
         or None,
+        brave_api_key=(env.get("BRAVE_API_KEY") or env.get("OPENPLANTER_BRAVE_API_KEY") or "").strip() or None,
         voyage_api_key=(env.get("VOYAGE_API_KEY") or env.get("OPENPLANTER_VOYAGE_API_KEY") or "").strip() or None,
     )
 
@@ -160,6 +168,7 @@ def credentials_from_env() -> CredentialBundle:
             os.getenv("OPENPLANTER_FIRECRAWL_API_KEY") or os.getenv("FIRECRAWL_API_KEY") or ""
         ).strip()
         or None,
+        brave_api_key=(os.getenv("OPENPLANTER_BRAVE_API_KEY") or os.getenv("BRAVE_API_KEY") or "").strip() or None,
         voyage_api_key=(os.getenv("OPENPLANTER_VOYAGE_API_KEY") or os.getenv("VOYAGE_API_KEY") or "").strip() or None,
     )
 
@@ -257,6 +266,7 @@ def prompt_for_credentials(
         zai_api_key=existing.zai_api_key,
         exa_api_key=existing.exa_api_key,
         firecrawl_api_key=existing.firecrawl_api_key,
+        brave_api_key=existing.brave_api_key,
         voyage_api_key=existing.voyage_api_key,
     )
 
@@ -292,6 +302,7 @@ def prompt_for_credentials(
     current.zai_api_key = _ask("Z.AI", current.zai_api_key)
     current.exa_api_key = _ask("Exa", current.exa_api_key)
     current.firecrawl_api_key = _ask("Firecrawl", current.firecrawl_api_key)
+    current.brave_api_key = _ask("Brave", current.brave_api_key)
     current.voyage_api_key = _ask("Voyage", current.voyage_api_key)
     if not force and current.has_any() and not existing.has_any():
         changed = True

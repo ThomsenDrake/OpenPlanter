@@ -126,12 +126,14 @@ describe("invoke wrappers", () => {
       ollama: true,
       exa: false,
       firecrawl: true,
+      brave: false,
     }));
     const status = await getCredentialsStatus();
     expect(status.openai).toBe(true);
     expect(status.openrouter).toBe(false);
     expect(status.zai).toBe(true);
     expect(status.firecrawl).toBe(true);
+    expect(status.brave).toBe(false);
   });
 
   it("listSessions sends limit", async () => {

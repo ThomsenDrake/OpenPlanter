@@ -25,6 +25,7 @@ class CredentialTests(unittest.TestCase):
                         "ZAI_API_KEY=zai-key",
                         "EXA_API_KEY=exa-key",
                         "FIRECRAWL_API_KEY=fc-key",
+                        "BRAVE_API_KEY=brave-key",
                     ]
                 ),
                 encoding="utf-8",
@@ -36,6 +37,7 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(creds.zai_api_key, "zai-key")
             self.assertEqual(creds.exa_api_key, "exa-key")
             self.assertEqual(creds.firecrawl_api_key, "fc-key")
+            self.assertEqual(creds.brave_api_key, "brave-key")
 
     def test_store_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -48,6 +50,7 @@ class CredentialTests(unittest.TestCase):
                 zai_api_key="zai",
                 exa_api_key="exa",
                 firecrawl_api_key="fc",
+                brave_api_key="brave",
             )
             store.save(creds)
             loaded = store.load()

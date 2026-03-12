@@ -154,6 +154,55 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(parsed["pages"][0]["url"], "https://example.com")
             self.assertEqual(parsed["pages"][0]["text"], "Page body")
 
+    def test_web_search_with_mocked_brave_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tools = WorkspaceTools(
+                root=root,
+                web_search_provider="brave",
+                brave_api_key="brave-key",
+            )
+            mocked = {
+                "web": {
+                    "results": [
+                        {
+                            "url": "https://example.com/brave",
+                            "title": "Brave Result",
+                            "description": "Snippet",
+                            "extra_snippets": ["Extra context"],
+                        }
+                    ]
+                }
+            }
+            with patch.object(WorkspaceTools, "_brave_request", return_value=mocked):
+                raw = tools.web_search("test query", num_results=3, include_text=True)
+            parsed = json.loads(raw)
+            self.assertEqual(parsed["provider"], "brave")
+            self.assertEqual(parsed["query"], "test query")
+            self.assertEqual(parsed["total"], 1)
+            self.assertEqual(parsed["results"][0]["url"], "https://example.com/brave")
+            self.assertIn("Extra context", parsed["results"][0]["text"])
+
+    def test_fetch_url_with_mocked_brave_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tools = WorkspaceTools(
+                root=root,
+                web_search_provider="brave",
+            )
+            mocked = {
+                "url": "https://example.com/brave",
+                "title": "Brave Example",
+                "text": "Page body",
+            }
+            with patch.object(WorkspaceTools, "_fetch_url_direct", return_value=mocked):
+                raw = tools.fetch_url(["https://example.com/brave"])
+            parsed = json.loads(raw)
+            self.assertEqual(parsed["provider"], "brave")
+            self.assertEqual(parsed["total"], 1)
+            self.assertEqual(parsed["pages"][0]["title"], "Brave Example")
+            self.assertEqual(parsed["pages"][0]["text"], "Page body")
+
     def test_web_search_without_exa_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -167,6 +216,13 @@ class ToolTests(unittest.TestCase):
             tools = WorkspaceTools(root=root, web_search_provider="firecrawl", firecrawl_api_key=None)
             out = tools.web_search("test")
             self.assertIn("FIRECRAWL_API_KEY not configured", out)
+
+    def test_web_search_without_brave_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tools = WorkspaceTools(root=root, web_search_provider="brave", brave_api_key=None)
+            out = tools.web_search("test")
+            self.assertIn("BRAVE_API_KEY not configured", out)
 
     def test_repo_map_python_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
