@@ -140,6 +140,20 @@ class ToolsComplexTests(unittest.TestCase):
                 payload = mock_fc.call_args[0][1]
                 self.assertEqual(payload["limit"], 20)
 
+    def test_web_search_clamps_num_results_brave(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tools = WorkspaceTools(
+                root=Path(tmpdir), web_search_provider="brave", brave_api_key="test-key"
+            )
+            mock_response = {"web": {"results": []}}
+            with patch.object(
+                WorkspaceTools, "_brave_request", return_value=mock_response
+            ) as mock_brave:
+                tools.web_search("test query", num_results=50)
+                mock_brave.assert_called_once()
+                payload = mock_brave.call_args[0][1]
+                self.assertEqual(payload["count"], 20)
+
     # 12
     def test_fetch_url_non_list_returns_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,6 +198,13 @@ class ToolsComplexTests(unittest.TestCase):
             with self.assertRaises(ToolError) as ctx:
                 tools._firecrawl_request("/search", {"query": "test"})
             self.assertIn("FIRECRAWL_API_KEY not configured", str(ctx.exception))
+
+    def test_brave_request_no_key_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tools = WorkspaceTools(root=Path(tmpdir), brave_api_key=None)
+            with self.assertRaises(ToolError) as ctx:
+                tools._brave_request("/web/search", {"q": "test"})
+            self.assertIn("BRAVE_API_KEY not configured", str(ctx.exception))
 
     # 16
     def test_write_file_creates_nested_dirs(self) -> None:

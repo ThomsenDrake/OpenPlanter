@@ -104,9 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--exa-api-key", help="Exa API key override.")
     parser.add_argument("--firecrawl-api-key", help="Firecrawl API key override.")
+    parser.add_argument("--brave-api-key", help="Brave Search API key override.")
     parser.add_argument(
         "--web-search-provider",
-        choices=["exa", "firecrawl"],
+        choices=["exa", "firecrawl", "brave"],
         help="Web search backend provider.",
     )
     parser.add_argument("--voyage-api-key", help="Voyage API key override.")
@@ -246,6 +247,7 @@ def _load_credentials(
         zai_api_key=user_creds.zai_api_key,
         exa_api_key=user_creds.exa_api_key,
         firecrawl_api_key=user_creds.firecrawl_api_key,
+        brave_api_key=user_creds.brave_api_key,
         voyage_api_key=user_creds.voyage_api_key,
     )
 
@@ -267,6 +269,8 @@ def _load_credentials(
         creds.exa_api_key = stored.exa_api_key
     if stored.firecrawl_api_key:
         creds.firecrawl_api_key = stored.firecrawl_api_key
+    if stored.brave_api_key:
+        creds.brave_api_key = stored.brave_api_key
     if stored.voyage_api_key:
         creds.voyage_api_key = stored.voyage_api_key
 
@@ -287,6 +291,8 @@ def _load_credentials(
         creds.exa_api_key = env_creds.exa_api_key
     if env_creds.firecrawl_api_key:
         creds.firecrawl_api_key = env_creds.firecrawl_api_key
+    if env_creds.brave_api_key:
+        creds.brave_api_key = env_creds.brave_api_key
     if env_creds.voyage_api_key:
         creds.voyage_api_key = env_creds.voyage_api_key
 
@@ -312,6 +318,8 @@ def _load_credentials(
         creds.exa_api_key = args.exa_api_key.strip() or creds.exa_api_key
     if args.firecrawl_api_key:
         creds.firecrawl_api_key = args.firecrawl_api_key.strip() or creds.firecrawl_api_key
+    if args.brave_api_key:
+        creds.brave_api_key = args.brave_api_key.strip() or creds.brave_api_key
     if args.voyage_api_key:
         creds.voyage_api_key = args.voyage_api_key.strip() or creds.voyage_api_key
 
@@ -365,6 +373,7 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
     cfg.zai_api_key = creds.zai_api_key
     cfg.exa_api_key = creds.exa_api_key
     cfg.firecrawl_api_key = creds.firecrawl_api_key
+    cfg.brave_api_key = creds.brave_api_key
     cfg.voyage_api_key = creds.voyage_api_key
     cfg.api_key = cfg.openai_api_key
 
@@ -410,7 +419,7 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
         cfg.model = args.model
     if args.web_search_provider:
         cfg.web_search_provider = args.web_search_provider
-    if cfg.web_search_provider not in {"exa", "firecrawl"}:
+    if cfg.web_search_provider not in {"exa", "firecrawl", "brave"}:
         cfg.web_search_provider = "exa"
     if args.reasoning_effort:
         cfg.reasoning_effort = None if args.reasoning_effort == "none" else args.reasoning_effort

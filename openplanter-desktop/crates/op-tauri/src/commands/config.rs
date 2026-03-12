@@ -209,6 +209,7 @@ pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<St
     status.insert("ollama".to_string(), true); // Ollama never needs a key
     status.insert("exa".to_string(), cfg.exa_api_key.is_some());
     status.insert("firecrawl".to_string(), cfg.firecrawl_api_key.is_some());
+    status.insert("brave".to_string(), cfg.brave_api_key.is_some());
     status
 }
 
@@ -255,6 +256,10 @@ pub async fn get_credentials_status(
     status.insert(
         "firecrawl".to_string(),
         cfg.firecrawl_api_key.is_some() || env_creds.firecrawl_api_key.is_some(),
+    );
+    status.insert(
+        "brave".to_string(),
+        cfg.brave_api_key.is_some() || env_creds.brave_api_key.is_some(),
     );
     Ok(status)
 }
@@ -361,6 +366,7 @@ mod tests {
         cfg.zai_api_key = None;
         cfg.exa_api_key = None;
         cfg.firecrawl_api_key = None;
+        cfg.brave_api_key = None;
         let status = build_credential_status(&cfg);
         assert_eq!(status["openai"], false);
         assert_eq!(status["anthropic"], false);
@@ -368,6 +374,7 @@ mod tests {
         assert_eq!(status["cerebras"], false);
         assert_eq!(status["zai"], false);
         assert_eq!(status["ollama"], true, "ollama always true");
+        assert_eq!(status["brave"], false);
     }
 
     #[test]
@@ -421,6 +428,7 @@ mod tests {
         cfg.zai_api_key = Some("k5".to_string());
         cfg.exa_api_key = Some("k6".to_string());
         cfg.firecrawl_api_key = Some("k7".to_string());
+        cfg.brave_api_key = Some("k8".to_string());
         let status = build_credential_status(&cfg);
         for (provider, has_key) in &status {
             assert!(has_key, "{} should be true when key is set", provider);
@@ -428,13 +436,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_status_has_eight_entries() {
+    fn test_cred_status_has_nine_entries() {
         let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
         let status = build_credential_status(&cfg);
         assert_eq!(
             status.len(),
-            8,
-            "should have 8 entries (6 providers + 2 web services)"
+            9,
+            "should have 9 entries (6 providers + 3 web services)"
         );
     }
 
