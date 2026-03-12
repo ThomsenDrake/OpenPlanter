@@ -151,14 +151,17 @@ pub fn resolve_endpoint(cfg: &AgentConfig, provider: &str) -> Result<(String, St
     match provider {
         "anthropic" => {
             let key = resolve_anthropic_api_key(
-                cfg.anthropic_api_key.clone().or_else(|| cfg.api_key.clone()),
+                cfg.anthropic_api_key
+                    .clone()
+                    .or_else(|| cfg.api_key.clone()),
                 &cfg.anthropic_base_url,
             )
             .ok_or_else(|| {
-                    ModelError::Message(
-                        "No Anthropic API key. Set ANTHROPIC_API_KEY or OPENPLANTER_ANTHROPIC_API_KEY.".into(),
-                    )
-                })?;
+                ModelError::Message(
+                    "No Anthropic API key. Set ANTHROPIC_API_KEY or OPENPLANTER_ANTHROPIC_API_KEY."
+                        .into(),
+                )
+            })?;
             // Anthropic base URL does NOT include /v1 suffix for /messages endpoint —
             // the model adapter appends /messages itself. The config stores it with /v1.
             Ok((cfg.anthropic_base_url.clone(), key))
@@ -169,11 +172,10 @@ pub fn resolve_endpoint(cfg: &AgentConfig, provider: &str) -> Result<(String, St
                 &cfg.openai_base_url,
             )
             .ok_or_else(|| {
-                    ModelError::Message(
-                        "No OpenAI API key. Set OPENAI_API_KEY or OPENPLANTER_OPENAI_API_KEY."
-                            .into(),
-                    )
-                })?;
+                ModelError::Message(
+                    "No OpenAI API key. Set OPENAI_API_KEY or OPENPLANTER_OPENAI_API_KEY.".into(),
+                )
+            })?;
             Ok((cfg.openai_base_url.clone(), key))
         }
         "openrouter" => {
@@ -384,7 +386,10 @@ mod tests {
             provider: "openai".into(),
             ..Default::default()
         };
-        assert_eq!(resolve_model_name(&cfg).unwrap(), "azure-foundry/gpt-5.3-codex");
+        assert_eq!(
+            resolve_model_name(&cfg).unwrap(),
+            "azure-foundry/gpt-5.3-codex"
+        );
     }
 
     #[test]
@@ -394,7 +399,10 @@ mod tests {
             provider: "openai".into(),
             ..Default::default()
         };
-        assert_eq!(resolve_model_name(&cfg).unwrap(), "azure-foundry/gpt-5.3-codex");
+        assert_eq!(
+            resolve_model_name(&cfg).unwrap(),
+            "azure-foundry/gpt-5.3-codex"
+        );
     }
 
     // ── resolve_provider ──

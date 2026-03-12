@@ -7,14 +7,11 @@ use serde::{Deserialize, Serialize};
 
 pub const AZURE_FOUNDRY_MODEL_PREFIX: &str = "azure-foundry/";
 pub const ANTHROPIC_FOUNDRY_MODEL_PREFIX: &str = "anthropic-foundry/";
-pub const FOUNDRY_OPENAI_BASE_URL: &str =
-    "https://foundry-proxy.cheetah-koi.ts.net/openai/v1";
+pub const FOUNDRY_OPENAI_BASE_URL: &str = "https://foundry-proxy.cheetah-koi.ts.net/openai/v1";
 pub const FOUNDRY_ANTHROPIC_BASE_URL: &str =
     "https://foundry-proxy.cheetah-koi.ts.net/anthropic/v1";
-pub const FOUNDRY_OPENAI_API_KEY_PLACEHOLDER: &str =
-    "dont-worry-this-key-will-be-auto-injected";
-pub const FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER: &str =
-    "dont-worry-it-will-be-injected";
+pub const FOUNDRY_OPENAI_API_KEY_PLACEHOLDER: &str = "dont-worry-this-key-will-be-auto-injected";
+pub const FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER: &str = "dont-worry-it-will-be-injected";
 pub const ZAI_PAYGO_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 pub const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 
@@ -294,7 +291,8 @@ impl AgentConfig {
         let openai_base_url = env_opt("OPENPLANTER_OPENAI_BASE_URL")
             .or_else(|| env_opt("OPENPLANTER_BASE_URL"))
             .unwrap_or_else(|| FOUNDRY_OPENAI_BASE_URL.into());
-        let anthropic_base_url = env_or("OPENPLANTER_ANTHROPIC_BASE_URL", FOUNDRY_ANTHROPIC_BASE_URL);
+        let anthropic_base_url =
+            env_or("OPENPLANTER_ANTHROPIC_BASE_URL", FOUNDRY_ANTHROPIC_BASE_URL);
         let openai_api_key = resolve_openai_api_key(openai_api_key, &openai_base_url);
         let anthropic_api_key = resolve_anthropic_api_key(anthropic_api_key, &anthropic_base_url);
 
