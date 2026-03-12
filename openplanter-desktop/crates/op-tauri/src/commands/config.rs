@@ -105,12 +105,18 @@ fn known_models_for_provider(provider: &str) -> Vec<ModelInfo> {
             ("azure-foundry/Kimi-K2.5", "Kimi K2.5 (Foundry)"),
         ],
         "anthropic" => vec![
-            ("anthropic-foundry/claude-opus-4-6", "Claude Opus 4.6 (Foundry)"),
+            (
+                "anthropic-foundry/claude-opus-4-6",
+                "Claude Opus 4.6 (Foundry)",
+            ),
             (
                 "anthropic-foundry/claude-sonnet-4-6",
                 "Claude Sonnet 4.6 (Foundry)",
             ),
-            ("anthropic-foundry/claude-haiku-4-5", "Claude Haiku 4.5 (Foundry)"),
+            (
+                "anthropic-foundry/claude-haiku-4-5",
+                "Claude Haiku 4.5 (Foundry)",
+            ),
         ],
         "openrouter" => vec![
             ("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5 (OR)"),

@@ -30,10 +30,50 @@ enum CuratorOutcome {
     Error(String),
 }
 
-/// Abort all in-flight curator tasks.
-fn abort_curators(handles: &mut Vec<JoinHandle<()>>) {
-    for h in handles.drain(..) {
-        h.abort();
+fn spawn_curator_task(
+    context: String,
+    tx: mpsc::UnboundedSender<CuratorOutcome>,
+    config: AgentConfig,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome = match run_curator(&context, &config, cancel).await {
+            Ok(result) => CuratorOutcome::Done(result),
+            Err(err) => CuratorOutcome::Error(err),
+        };
+        let _ = tx.send(outcome);
+    })
+}
+
+fn schedule_curator_context(
+    has_running_curator: bool,
+    queued_context: &mut Option<String>,
+    context: String,
+) -> Option<String> {
+    if has_running_curator {
+        *queued_context = Some(context);
+        None
+    } else {
+        Some(context)
+    }
+}
+
+fn take_queued_context_if_idle(
+    has_running_curator: bool,
+    queued_context: &mut Option<String>,
+) -> Option<String> {
+    if has_running_curator {
+        None
+    } else {
+        queued_context.take()
+    }
+}
+
+/// Abort any active curator and clear pending work.
+fn abort_curators(running: &mut Option<JoinHandle<()>>, queued_context: &mut Option<String>) {
+    queued_context.take();
+    if let Some(handle) = running.take() {
+        handle.abort();
     }
 }
 
@@ -67,34 +107,97 @@ fn drain_curator_results(
 
 /// Wait for in-flight curators (up to timeout), drain final results, abort rest.
 async fn finish_curators(
-    handles: &mut Vec<JoinHandle<()>>,
+    running: &mut Option<JoinHandle<()>>,
+    queued_context: &mut Option<String>,
+    tx: &mpsc::UnboundedSender<CuratorOutcome>,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
     rx: &mut mpsc::UnboundedReceiver<CuratorOutcome>,
     messages: &mut Vec<Message>,
     emitter: &dyn SolveEmitter,
 ) {
-    if handles.is_empty() {
+    if running.is_none() && queued_context.is_none() {
         return;
     }
     emitter.emit_trace(&format!(
-        "[curator] waiting for {} in-flight curator(s)...",
-        handles.len()
+        "[curator] waiting for {} pending curator task(s)...",
+        usize::from(running.is_some()) + usize::from(queued_context.is_some())
     ));
 
     // Wait up to 30 seconds total for all curators to finish
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    for h in handles.iter_mut() {
-        let remaining = deadline - tokio::time::Instant::now();
+    loop {
+        if running.is_none() {
+            if let Some(context) = take_queued_context_if_idle(false, queued_context) {
+                emitter.emit_trace("[curator] spawning queued update");
+                *running = Some(spawn_curator_task(
+                    context,
+                    tx.clone(),
+                    config.clone(),
+                    cancel.clone(),
+                ));
+            } else {
+                break;
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
-        let _ = tokio::time::timeout(remaining, h).await;
+
+        if let Some(mut handle) = running.take() {
+            match tokio::time::timeout(remaining, &mut handle).await {
+                Ok(_) => {
+                    drain_curator_results(rx, messages, emitter);
+                }
+                Err(_) => {
+                    *running = Some(handle);
+                    break;
+                }
+            }
+        }
     }
 
     // Final drain
     drain_curator_results(rx, messages, emitter);
 
     // Abort any still running
-    abort_curators(handles);
+    abort_curators(running, queued_context);
+}
+
+async fn poll_curator_state(
+    running: &mut Option<JoinHandle<()>>,
+    queued_context: &mut Option<String>,
+    tx: &mpsc::UnboundedSender<CuratorOutcome>,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
+    rx: &mut mpsc::UnboundedReceiver<CuratorOutcome>,
+    messages: &mut Vec<Message>,
+    emitter: &dyn SolveEmitter,
+) {
+    drain_curator_results(rx, messages, emitter);
+
+    let should_join = running
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(false);
+    if should_join {
+        if let Some(mut handle) = running.take() {
+            let _ = (&mut handle).await;
+        }
+        drain_curator_results(rx, messages, emitter);
+    }
+
+    if let Some(context) = take_queued_context_if_idle(running.is_some(), queued_context) {
+        emitter.emit_trace("[curator] spawning queued update");
+        *running = Some(spawn_curator_task(
+            context,
+            tx.clone(),
+            config.clone(),
+            cancel.clone(),
+        ));
+    }
 }
 
 // Abstraction for emitting solve events.
@@ -195,6 +298,11 @@ fn estimate_tokens(messages: &[Message]) -> usize {
         / 4
 }
 
+fn safe_prefix(text: &str, max_chars: usize) -> &str {
+    let end = text.floor_char_boundary(text.len().min(max_chars));
+    &text[..end]
+}
+
 /// Compact conversation context when it grows too large.
 ///
 /// Keeps the system prompt, user objective, and the most recent messages
@@ -212,7 +320,7 @@ fn compact_messages(messages: &mut Vec<Message>, max_tokens: usize) {
     for i in 2..protected_tail {
         if let Message::Tool { content, .. } = &mut messages[i] {
             if content.len() > 200 {
-                let preview = &content[..content.len().min(150)];
+                let preview = safe_prefix(content, 150);
                 *content = format!("{preview}\n...[truncated — older tool result]");
             }
         }
@@ -336,19 +444,29 @@ pub async fn solve(
 
     // 3. Background curator channel
     let (curator_tx, mut curator_rx) = mpsc::unbounded_channel::<CuratorOutcome>();
-    let mut curator_handles: Vec<JoinHandle<()>> = Vec::new();
+    let mut running_curator: Option<JoinHandle<()>> = None;
+    let mut queued_curator_context: Option<String> = None;
 
     // 4. Agentic loop
     for step in 1..=max_steps {
         if cancel.is_cancelled() {
             emitter.emit_error("Cancelled");
             tools.cleanup();
-            abort_curators(&mut curator_handles);
+            abort_curators(&mut running_curator, &mut queued_curator_context);
             return;
         }
 
-        // Drain completed curator results and inject as system messages
-        drain_curator_results(&mut curator_rx, &mut messages, emitter);
+        poll_curator_state(
+            &mut running_curator,
+            &mut queued_curator_context,
+            &curator_tx,
+            config,
+            &cancel,
+            &mut curator_rx,
+            &mut messages,
+            emitter,
+        )
+        .await;
 
         let step_start = std::time::Instant::now();
 
@@ -372,7 +490,7 @@ pub async fn solve(
             Err(e) => {
                 let msg = e.to_string();
                 tools.cleanup();
-                abort_curators(&mut curator_handles);
+                abort_curators(&mut running_curator, &mut queued_curator_context);
                 if msg == "Cancelled" {
                     emitter.emit_error("Cancelled");
                 } else {
@@ -411,7 +529,11 @@ pub async fn solve(
             tools.cleanup();
             // Wait for in-flight curators before exiting
             finish_curators(
-                &mut curator_handles,
+                &mut running_curator,
+                &mut queued_curator_context,
+                &curator_tx,
+                config,
+                &cancel,
                 &mut curator_rx,
                 &mut messages,
                 emitter,
@@ -425,7 +547,7 @@ pub async fn solve(
             if cancel.is_cancelled() {
                 emitter.emit_error("Cancelled");
                 tools.cleanup();
-                abort_curators(&mut curator_handles);
+                abort_curators(&mut running_curator, &mut queued_curator_context);
                 return;
             }
 
@@ -436,7 +558,7 @@ pub async fn solve(
                 emitter.emit_trace(&format!(
                     "Tool {} error: {}",
                     tc.name,
-                    &result.content[..result.content.len().min(200)]
+                    safe_prefix(&result.content, 200)
                 ));
             }
 
@@ -464,17 +586,21 @@ pub async fn solve(
         // Spawn background curator after each non-final step
         let context = extract_step_context(&messages);
         if !context.is_empty() {
-            let tx = curator_tx.clone();
-            let curator_cfg = config.clone();
-            let curator_cancel = cancel.clone();
-            emitter.emit_trace(&format!("[curator] spawning for step {step}"));
-            curator_handles.push(tokio::spawn(async move {
-                let outcome = match run_curator(&context, &curator_cfg, curator_cancel).await {
-                    Ok(result) => CuratorOutcome::Done(result),
-                    Err(e) => CuratorOutcome::Error(e),
-                };
-                let _ = tx.send(outcome);
-            }));
+            if let Some(context_to_spawn) = schedule_curator_context(
+                running_curator.is_some(),
+                &mut queued_curator_context,
+                context,
+            ) {
+                emitter.emit_trace(&format!("[curator] spawning for step {step}"));
+                running_curator = Some(spawn_curator_task(
+                    context_to_spawn,
+                    curator_tx.clone(),
+                    config.clone(),
+                    cancel.clone(),
+                ));
+            } else {
+                emitter.emit_trace(&format!("[curator] queued latest refresh from step {step}"));
+            }
         }
 
         // Budget warnings
@@ -493,7 +619,11 @@ pub async fn solve(
     // Budget exhausted
     tools.cleanup();
     finish_curators(
-        &mut curator_handles,
+        &mut running_curator,
+        &mut queued_curator_context,
+        &curator_tx,
+        config,
+        &cancel,
         &mut curator_rx,
         &mut messages,
         emitter,
@@ -757,6 +887,47 @@ mod tests {
             })
             .unwrap();
         assert!(complete_text.contains("Spawned test"));
+    }
+
+    #[test]
+    fn test_schedule_curator_context_spawns_when_idle() {
+        let mut queued = None;
+        let spawn = schedule_curator_context(false, &mut queued, "ctx-1".to_string());
+        assert_eq!(spawn, Some("ctx-1".to_string()));
+        assert!(queued.is_none());
+    }
+
+    #[test]
+    fn test_schedule_curator_context_keeps_latest_when_busy() {
+        let mut queued = Some("older".to_string());
+        let spawn = schedule_curator_context(true, &mut queued, "newer".to_string());
+        assert!(spawn.is_none());
+        assert_eq!(queued, Some("newer".to_string()));
+    }
+
+    #[test]
+    fn test_take_queued_context_if_idle_only_releases_when_idle() {
+        let mut queued = Some("latest".to_string());
+        assert_eq!(take_queued_context_if_idle(true, &mut queued), None);
+        assert_eq!(queued, Some("latest".to_string()));
+        assert_eq!(
+            take_queued_context_if_idle(false, &mut queued),
+            Some("latest".to_string())
+        );
+        assert!(queued.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_abort_curators_clears_running_and_queue() {
+        let mut running = Some(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }));
+        let mut queued = Some("queued".to_string());
+
+        abort_curators(&mut running, &mut queued);
+
+        assert!(running.is_none());
+        assert!(queued.is_none());
     }
 
     #[test]

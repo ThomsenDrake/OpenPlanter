@@ -8,9 +8,12 @@ mod state;
 use state::AppState;
 
 fn main() {
+    let state = AppState::new();
+    eprintln!("[startup:info] {}", state.startup_trace());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState::new())
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::agent::solve,
             commands::agent::cancel,

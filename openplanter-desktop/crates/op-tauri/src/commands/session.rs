@@ -170,7 +170,8 @@ pub async fn update_session_metadata(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     info.turn_count += 1;
     info.last_objective = Some(if objective.len() > 100 {
-        format!("{}...", &objective[..97])
+        let end = objective.floor_char_boundary(97);
+        format!("{}...", &objective[..end])
     } else {
         objective.to_string()
     });
