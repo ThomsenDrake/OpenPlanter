@@ -1,5 +1,5 @@
 import { createApp } from "./components/App";
-import { getConfig } from "./api/invoke";
+import { getConfig, getInitStatus } from "./api/invoke";
 import {
   onAgentTrace,
   onAgentDelta,
@@ -8,6 +8,7 @@ import {
   onAgentStep,
   onWikiUpdated,
   onCuratorUpdate,
+  onMigrationProgress,
 } from "./api/events";
 import { appState } from "./state/store";
 
@@ -31,6 +32,7 @@ async function init() {
     const config = await getConfig();
     provider = config.provider;
     model = config.model;
+    const initStatus = await getInitStatus();
     appState.update((s) => ({
       ...s,
       provider: config.provider,
@@ -43,6 +45,9 @@ async function init() {
       workspace: config.workspace,
       maxDepth: config.max_depth,
       maxStepsPerCall: config.max_steps_per_call,
+      initStatus,
+      initGateState: initStatus.gate_state,
+      initGateVisible: initStatus.gate_state !== "ready",
     }));
   } catch (e) {
     console.error("Failed to load config:", e);
@@ -82,6 +87,17 @@ async function init() {
         content: "Type /help for commands. ESC to cancel a running task.",
         timestamp: Date.now(),
       },
+      ...(state.initGateState !== "ready"
+        ? [
+            {
+              id: crypto.randomUUID(),
+              role: "system" as const,
+              content:
+                "Workspace initialization is required before running the agent. Use the setup panel or /init.",
+              timestamp: Date.now(),
+            },
+          ]
+        : []),
     ],
   }));
 
@@ -174,6 +190,14 @@ async function init() {
 
     // Notify graph pane to refresh with curator's wiki changes
     window.dispatchEvent(new CustomEvent("curator-done"));
+  });
+
+  await onMigrationProgress((event) => {
+    appState.update((s) => ({
+      ...s,
+      migrationProgress: event,
+      isInitBusy: event.stage !== "done",
+    }));
   });
 }
 
