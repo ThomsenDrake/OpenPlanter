@@ -58,6 +58,8 @@ pub struct WorkspaceTools {
     exa_base_url: String,
     firecrawl_api_key: Option<String>,
     firecrawl_base_url: String,
+    brave_api_key: Option<String>,
+    brave_base_url: String,
     files_read: HashSet<PathBuf>,
     bg_jobs: shell::BgJobs,
 }
@@ -88,6 +90,8 @@ impl WorkspaceTools {
             exa_base_url: config.exa_base_url.clone(),
             firecrawl_api_key: config.firecrawl_api_key.clone(),
             firecrawl_base_url: config.firecrawl_base_url.clone(),
+            brave_api_key: config.brave_api_key.clone(),
+            brave_base_url: config.brave_base_url.clone(),
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
         }
@@ -114,6 +118,8 @@ impl WorkspaceTools {
             exa_base_url: config.exa_base_url.clone(),
             firecrawl_api_key: config.firecrawl_api_key.clone(),
             firecrawl_base_url: config.firecrawl_base_url.clone(),
+            brave_api_key: config.brave_api_key.clone(),
+            brave_base_url: config.brave_base_url.clone(),
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
         }
@@ -241,6 +247,8 @@ impl WorkspaceTools {
                     &self.exa_base_url,
                     self.firecrawl_api_key.as_deref(),
                     &self.firecrawl_base_url,
+                    self.brave_api_key.as_deref(),
+                    &self.brave_base_url,
                     query,
                     num_results,
                     include_text,

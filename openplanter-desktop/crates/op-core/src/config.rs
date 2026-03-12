@@ -14,6 +14,7 @@ pub const FOUNDRY_OPENAI_API_KEY_PLACEHOLDER: &str = "dont-worry-this-key-will-b
 pub const FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER: &str = "dont-worry-it-will-be-injected";
 pub const ZAI_PAYGO_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 pub const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+pub const BRAVE_BASE_URL: &str = "https://api.search.brave.com/res/v1";
 
 /// Default model for each supported provider.
 pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>> =
@@ -75,6 +76,7 @@ pub fn resolve_zai_base_url(plan: &str, paygo_base_url: &str, coding_base_url: &
 pub fn normalize_web_search_provider(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "firecrawl" => "firecrawl".to_string(),
+        "brave" => "brave".to_string(),
         _ => "exa".to_string(),
     }
 }
@@ -189,6 +191,7 @@ pub struct AgentConfig {
     pub ollama_base_url: String,
     pub exa_base_url: String,
     pub firecrawl_base_url: String,
+    pub brave_base_url: String,
 
     // API keys
     pub api_key: Option<String>,
@@ -200,6 +203,7 @@ pub struct AgentConfig {
     pub zai_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub firecrawl_api_key: Option<String>,
+    pub brave_api_key: Option<String>,
     pub web_search_provider: String,
     pub voyage_api_key: Option<String>,
 
@@ -248,6 +252,7 @@ impl Default for AgentConfig {
             ollama_base_url: "http://localhost:11434/v1".into(),
             exa_base_url: "https://api.exa.ai".into(),
             firecrawl_base_url: "https://api.firecrawl.dev/v1".into(),
+            brave_base_url: BRAVE_BASE_URL.into(),
             api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
             openai_api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
             openai_oauth_token: None,
@@ -257,6 +262,7 @@ impl Default for AgentConfig {
             zai_api_key: None,
             exa_api_key: None,
             firecrawl_api_key: None,
+            brave_api_key: None,
             web_search_provider: "exa".into(),
             voyage_api_key: None,
             max_depth: 4,
@@ -311,6 +317,8 @@ impl AgentConfig {
 
         let firecrawl_api_key =
             env_opt("OPENPLANTER_FIRECRAWL_API_KEY").or_else(|| env_opt("FIRECRAWL_API_KEY"));
+        let brave_api_key =
+            env_opt("OPENPLANTER_BRAVE_API_KEY").or_else(|| env_opt("BRAVE_API_KEY"));
 
         let voyage_api_key =
             env_opt("OPENPLANTER_VOYAGE_API_KEY").or_else(|| env_opt("VOYAGE_API_KEY"));
@@ -376,6 +384,7 @@ impl AgentConfig {
                 "OPENPLANTER_FIRECRAWL_BASE_URL",
                 "https://api.firecrawl.dev/v1",
             ),
+            brave_base_url: env_or("OPENPLANTER_BRAVE_BASE_URL", BRAVE_BASE_URL),
             openai_api_key,
             openai_oauth_token,
             anthropic_api_key,
@@ -384,6 +393,7 @@ impl AgentConfig {
             zai_api_key,
             exa_api_key,
             firecrawl_api_key,
+            brave_api_key,
             web_search_provider,
             voyage_api_key,
             max_depth: env_int("OPENPLANTER_MAX_DEPTH", 4),
@@ -463,6 +473,8 @@ mod tests {
         assert_eq!(cfg.zai_plan, "paygo");
         assert_eq!(cfg.zai_base_url, ZAI_PAYGO_BASE_URL);
         assert_eq!(cfg.web_search_provider, "exa");
+        assert_eq!(cfg.brave_base_url, BRAVE_BASE_URL);
+        assert!(cfg.brave_api_key.is_none());
         assert_eq!(cfg.rate_limit_max_retries, 12);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 1.0);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 60.0);
@@ -517,6 +529,9 @@ mod tests {
             "OPENPLANTER_RECURSIVE",
             "OPENPLANTER_DEMO",
             "OPENPLANTER_WEB_SEARCH_PROVIDER",
+            "OPENPLANTER_BRAVE_API_KEY",
+            "BRAVE_API_KEY",
+            "OPENPLANTER_BRAVE_BASE_URL",
             "OPENPLANTER_ZAI_PLAN",
             "OPENPLANTER_ZAI_BASE_URL",
             "OPENPLANTER_RATE_LIMIT_MAX_RETRIES",
@@ -552,6 +567,7 @@ mod tests {
             Some(FOUNDRY_ANTHROPIC_API_KEY_PLACEHOLDER)
         );
         assert!(cfg.zai_api_key.is_none());
+        assert!(cfg.brave_api_key.is_none());
         assert_eq!(cfg.openai_base_url, FOUNDRY_OPENAI_BASE_URL);
         assert_eq!(cfg.anthropic_base_url, FOUNDRY_ANTHROPIC_BASE_URL);
         assert_eq!(cfg.web_search_provider, "exa");
@@ -570,7 +586,8 @@ mod tests {
             env::set_var("OPENPLANTER_DEMO", "true");
             env::set_var("OPENAI_API_KEY", "sk-test123");
             env::set_var("ZAI_API_KEY", "zai-test123");
-            env::set_var("OPENPLANTER_WEB_SEARCH_PROVIDER", "firecrawl");
+            env::set_var("BRAVE_API_KEY", "brave-test123");
+            env::set_var("OPENPLANTER_WEB_SEARCH_PROVIDER", "brave");
             env::set_var("OPENPLANTER_RATE_LIMIT_MAX_RETRIES", "5");
             env::set_var("OPENPLANTER_RATE_LIMIT_BACKOFF_BASE_SEC", "2.5");
             env::set_var("OPENPLANTER_RATE_LIMIT_BACKOFF_MAX_SEC", "30.0");
@@ -588,10 +605,11 @@ mod tests {
         assert!(cfg.demo);
         assert_eq!(cfg.openai_api_key, Some("sk-test123".into()));
         assert_eq!(cfg.zai_api_key, Some("zai-test123".into()));
+        assert_eq!(cfg.brave_api_key, Some("brave-test123".into()));
         assert_eq!(cfg.zai_plan, "coding");
         assert_eq!(cfg.zai_base_url, ZAI_CODING_BASE_URL);
         assert_eq!(cfg.zai_stream_max_retries, 7);
-        assert_eq!(cfg.web_search_provider, "firecrawl");
+        assert_eq!(cfg.web_search_provider, "brave");
         assert_eq!(cfg.rate_limit_max_retries, 5);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 2.5);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 30.0);
@@ -639,6 +657,7 @@ mod tests {
             normalize_web_search_provider(Some("firecrawl")),
             "firecrawl"
         );
+        assert_eq!(normalize_web_search_provider(Some("brave")), "brave");
         assert_eq!(normalize_web_search_provider(Some("other")), "exa");
         assert!(is_foundry_openai_base_url(FOUNDRY_OPENAI_BASE_URL));
         assert!(is_foundry_anthropic_base_url(FOUNDRY_ANTHROPIC_BASE_URL));
