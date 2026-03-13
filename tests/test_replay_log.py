@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -284,6 +285,51 @@ class ReplayLoggerUnitTests(unittest.TestCase):
             self.assertEqual(calls[1]["seq"], 1)
             self.assertIn("messages_snapshot", calls[1])
             self.assertNotIn("messages_delta", calls[1])
+
+    def test_parallel_child_loggers_keep_seq_unique_and_contiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "replay.jsonl"
+            parent = ReplayLogger(path=p)
+            parent.log_call(
+                depth=0,
+                step=1,
+                messages=[{"role": "user", "content": "root"}],
+                response={"r": "root"},
+            )
+
+            barrier = threading.Barrier(3)
+            errors: list[BaseException] = []
+
+            def _worker(step: int) -> None:
+                try:
+                    child = parent.child(depth=0, step=step)
+                    barrier.wait(timeout=5.0)
+                    child.log_call(
+                        depth=1,
+                        step=1,
+                        messages=[{"role": "user", "content": f"child-{step}"}],
+                        response={"r": step},
+                    )
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=_worker, args=(1,)),
+                threading.Thread(target=_worker, args=(2,)),
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait(timeout=5.0)
+            for thread in threads:
+                thread.join(timeout=5.0)
+
+            if errors:
+                raise errors[0]
+
+            call_records = [r for r in self._read_records(p) if r.get("type") == "call"]
+            seqs = [record["seq"] for record in call_records]
+            self.assertEqual(seqs, sorted(seqs))
+            self.assertEqual(seqs, list(range(len(call_records))))
 
 
 class ReplayLoggerIntegrationTests(unittest.TestCase):

@@ -366,7 +366,7 @@ from prior turns in this session. Each entry has:
   - objective: the objective given to that turn
   - result_preview: first ~200 characters of the turn's result
   - timestamp: ISO 8601 UTC when the turn ran
-  - steps_used: how many engine steps were consumed
+  - steps_used: how many replayed model calls the turn produced, including delegated child conversations
   - replay_seq_start: starting sequence number in replay.jsonl
 
 Use turn history to:

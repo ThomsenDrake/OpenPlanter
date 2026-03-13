@@ -36,6 +36,7 @@ target/
 # Generated captures
 *.cast
 *.mp4
+git-apply-*.txt
 
 # Editor and OS cruft
 .DS_Store
