@@ -23,6 +23,7 @@ class ReplayLogger:
 
     path: Path
     conversation_id: str = "root"
+    force_snapshot_first_call: bool = False
     _seq: int = field(default=0, init=False)
     _last_msg_count: int = field(default=0, init=False)
     _has_call: bool = field(default=False, init=False)
@@ -31,6 +32,9 @@ class ReplayLogger:
     def __post_init__(self) -> None:
         self._seq = self._scan_next_seq()
         self._hydrate_conversation_state()
+        if self.force_snapshot_first_call:
+            self._has_call = False
+            self._last_msg_count = 0
 
     @property
     def needs_header(self) -> bool:
@@ -39,7 +43,11 @@ class ReplayLogger:
     def child(self, depth: int, step: int) -> "ReplayLogger":
         """Create a child logger for a subtask conversation."""
         child_id = f"{self.conversation_id}/d{depth}s{step}"
-        return ReplayLogger(path=self.path, conversation_id=child_id)
+        return ReplayLogger(
+            path=self.path,
+            conversation_id=child_id,
+            force_snapshot_first_call=self.force_snapshot_first_call,
+        )
 
     def write_header(
         self,

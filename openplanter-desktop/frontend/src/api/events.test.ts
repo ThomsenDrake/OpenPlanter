@@ -49,7 +49,6 @@ describe("event listeners", () => {
 
     const handler = listeners.get("agent:step")!;
     const payload = {
-      type: "step",
       step: 1,
       depth: 0,
       tokens: { input_tokens: 100, output_tokens: 50 },
@@ -65,7 +64,7 @@ describe("event listeners", () => {
     await onAgentDelta(callback);
 
     const handler = listeners.get("agent:delta")!;
-    const payload = { type: "delta", kind: "text", text: "hello" };
+    const payload = { kind: "text", text: "hello" };
     handler({ payload });
     expect(callback).toHaveBeenCalledWith(payload);
   });

@@ -318,6 +318,47 @@ class TurnSummaryPersistenceTests(unittest.TestCase):
             self.assertEqual(state_after_second["loop_metrics"]["turns"], 2)
             self.assertIn("last_turn", state_after_second["loop_metrics"])
 
+    def test_replay_seq_start_stays_monotonic_and_second_turn_starts_with_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = self._make_config(root)
+
+            model1 = ScriptedModel(
+                scripted_turns=[ModelTurn(text="done-1", stop_reason="end_turn")]
+            )
+            engine1 = RLMEngine(model=model1, tools=WorkspaceTools(root=root), config=cfg)
+            rt1 = SessionRuntime.bootstrap(
+                engine=engine1, config=cfg, session_id="sess-replay-boundary", resume=False,
+            )
+            rt1.solve("first turn")
+
+            model2 = ScriptedModel(
+                scripted_turns=[ModelTurn(text="done-2", stop_reason="end_turn")]
+            )
+            engine2 = RLMEngine(model=model2, tools=WorkspaceTools(root=root), config=cfg)
+            rt2 = SessionRuntime.bootstrap(
+                engine=engine2, config=cfg, session_id="sess-replay-boundary", resume=True,
+            )
+            rt2.solve("second turn")
+
+            state_path = root / ".openplanter" / "sessions" / "sess-replay-boundary" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            history = state["turn_history"]
+            self.assertEqual(len(history), 2)
+            self.assertLess(history[0]["replay_seq_start"], history[1]["replay_seq_start"])
+
+            replay_path = root / ".openplanter" / "sessions" / "sess-replay-boundary" / "replay.jsonl"
+            records = [
+                json.loads(line)
+                for line in replay_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            calls = [r for r in records if r.get("type") == "call" and r.get("conversation_id") == "root"]
+            self.assertEqual(len(calls), 2)
+            self.assertIn("messages_snapshot", calls[0])
+            self.assertIn("messages_snapshot", calls[1])
+            self.assertNotIn("messages_delta", calls[1])
+
     def test_backward_compat_old_state_no_loop_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

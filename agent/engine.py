@@ -41,10 +41,16 @@ _ARTIFACT_TOOL_NAMES = {
     "edit_file",
     "hashline_edit",
 }
-_META_FINAL_PATTERNS = (
+_WEAK_STRUCTURAL_META_PATTERNS = (
     re.compile(r"^\s*(here(?:'s| is)\s+(?:my|the)\s+(?:plan|approach|analysis))\b", re.I),
+)
+_STRONG_PROCESS_META_PATTERNS = (
     re.compile(r"\b(i\s+(?:will|can|should|need to|want to|am going to|plan to))\b", re.I),
     re.compile(r"\b(let me|next,?\s+i\s+will|i\s+should\s+start\s+by)\b", re.I),
+)
+_META_DELIVERABLE_OBJECTIVE_PATTERN = re.compile(
+    r"\b(plan(?:ning)?|approach|strategy|outline|spec(?:ification)?|design|roadmap|proposal|review|audit|analysis|analyze|brainstorm)\b",
+    re.I,
 )
 
 
@@ -325,13 +331,18 @@ class RLMEngine:
         except Exception as exc:
             return f"PASS\n(judge error: {exc})"
 
-    def _is_meta_final_text(self, text: str) -> bool:
+    def _objective_allows_meta_final(self, objective: str) -> bool:
+        return bool(_META_DELIVERABLE_OBJECTIVE_PATTERN.search(objective))
+
+    def _is_meta_final_text(self, text: str, objective: str = "") -> bool:
         stripped = text.strip()
         if not stripped:
             return True
-        if len(stripped.split()) < 5:
-            return False
-        return any(pattern.search(stripped) for pattern in _META_FINAL_PATTERNS)
+        if any(pattern.search(stripped) for pattern in _STRONG_PROCESS_META_PATTERNS):
+            return True
+        if any(pattern.search(stripped) for pattern in _WEAK_STRUCTURAL_META_PATTERNS):
+            return not self._objective_allows_meta_final(objective)
+        return False
 
     def _solve_recursive(
         self,
@@ -532,7 +543,7 @@ class RLMEngine:
 
             # No tool calls + text present = final answer
             if not turn.tool_calls and turn.text:
-                if self._is_meta_final_text(turn.text):
+                if self._is_meta_final_text(turn.text, objective):
                     loop_metrics["final_rejections"] += 1
                     self._emit(
                         f"[d{depth}/s{step}] rejected meta final-answer text; requesting concrete completion",
@@ -595,9 +606,11 @@ class RLMEngine:
                 loop_metrics["phase_counts"]["investigate"] += 1
             elif has_artifact:
                 loop_metrics["recon_streak"] = 0
+                loop_metrics["last_guardrail_streak"] = 0
                 loop_metrics["phase_counts"]["build"] += 1
             else:
                 loop_metrics["recon_streak"] = 0
+                loop_metrics["last_guardrail_streak"] = 0
                 loop_metrics["phase_counts"]["iterate"] += 1
             loop_metrics["max_recon_streak"] = max(
                 int(loop_metrics["max_recon_streak"]), int(loop_metrics["recon_streak"])
@@ -715,7 +728,7 @@ class RLMEngine:
                 and results
                 and int(loop_metrics["recon_streak"]) >= 3
                 and not has_artifact
-                and int(loop_metrics.get("last_guardrail_streak", 0)) != int(loop_metrics["recon_streak"])
+                and int(loop_metrics.get("last_guardrail_streak", 0)) == 0
             ):
                 loop_metrics["guardrail_warnings"] += 1
                 loop_metrics["last_guardrail_streak"] = int(loop_metrics["recon_streak"])

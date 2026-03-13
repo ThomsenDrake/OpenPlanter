@@ -1285,6 +1285,14 @@ event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":11}}\n\n\
 event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
+const ANTHROPIC_SSE_META_FINAL_WITH_PROCESS: &str = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meta_3\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":45}}}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Here is my plan: I will inspect files and then implement the fix.\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
 #[tokio::test]
 async fn test_solve_rejects_meta_final_until_concrete_completion() {
     use op_core::config::AgentConfig;
@@ -1397,6 +1405,196 @@ async fn test_solve_rejects_meta_final_until_concrete_completion() {
     );
     assert!(
         !recorded.iter().any(|event| matches!(event, Ev4::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_allows_structural_meta_for_plan_objectives() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{solve, SolveEmitter};
+    use op_core::events::{LoopMetrics, StepEvent};
+
+    let addr = start_stateful_mock_server(vec![ANTHROPIC_SSE_META_FINAL]).await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev5 {
+        Trace(String),
+        Step(StepEvent),
+        Complete {
+            result: String,
+            loop_metrics: Option<LoopMetrics>,
+        },
+        Error(String),
+    }
+
+    struct TestEmitter5 {
+        events: Arc<Mutex<Vec<Ev5>>>,
+    }
+
+    impl SolveEmitter for TestEmitter5 {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev5::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, event: StepEvent) {
+            self.events.lock().unwrap().push(Ev5::Step(event));
+        }
+
+        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+            self.events.lock().unwrap().push(Ev5::Complete {
+                result: result.to_string(),
+                loop_metrics,
+            });
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev5::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter5 {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Write a plan for finishing the task", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        !recorded.iter().any(|event| matches!(
+            event,
+            Ev5::Trace(message) if message.contains("rejected meta final answer")
+        )),
+        "did not expect a meta-final rejection trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev5::Complete { result, loop_metrics }
+                if result.contains("Here is my plan")
+                    && loop_metrics.as_ref().map(|metrics| metrics.final_rejections) == Some(0)
+        )),
+        "expected structural plan response to complete cleanly, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev5::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{solve, SolveEmitter};
+    use op_core::events::{LoopMetrics, StepEvent};
+
+    let addr = start_stateful_mock_server(vec![
+        ANTHROPIC_SSE_META_FINAL_WITH_PROCESS,
+        ANTHROPIC_SSE_CONCRETE_FINAL,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev6 {
+        Trace(String),
+        Step(StepEvent),
+        Complete {
+            result: String,
+            loop_metrics: Option<LoopMetrics>,
+        },
+        Error(String),
+    }
+
+    struct TestEmitter6 {
+        events: Arc<Mutex<Vec<Ev6>>>,
+    }
+
+    impl SolveEmitter for TestEmitter6 {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev6::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, event: StepEvent) {
+            self.events.lock().unwrap().push(Ev6::Step(event));
+        }
+
+        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+            self.events.lock().unwrap().push(Ev6::Complete {
+                result: result.to_string(),
+                loop_metrics,
+            });
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev6::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter6 {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Write a plan for finishing the task", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev6::Trace(message) if message.contains("rejected meta final answer")
+        )),
+        "expected a meta-final rejection trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev6::Complete { result, loop_metrics }
+                if result.contains("Completed the task")
+                    && loop_metrics.as_ref().map(|metrics| metrics.final_rejections) == Some(1)
+        )),
+        "expected completion after rejecting process-meta response, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev6::Error(_))),
         "did not expect errors, got: {recorded:?}"
     );
 }

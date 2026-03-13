@@ -422,13 +422,39 @@ async fn chat_stream_with_rate_limit_retries(
     }
 }
 
-fn is_meta_final_text(text: &str) -> bool {
+fn objective_allows_meta_final(objective: &str) -> bool {
+    objective
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "plan"
+                    | "planning"
+                    | "approach"
+                    | "strategy"
+                    | "outline"
+                    | "spec"
+                    | "specification"
+                    | "design"
+                    | "roadmap"
+                    | "proposal"
+                    | "review"
+                    | "audit"
+                    | "analysis"
+                    | "analyze"
+                    | "brainstorm"
+            )
+        })
+}
+
+fn is_meta_final_text(text: &str, objective: &str) -> bool {
     let stripped = text.trim();
     if stripped.is_empty() {
         return true;
     }
     let lower = stripped.to_ascii_lowercase();
-    let meta_starts = [
+    let weak_structural_meta = [
         "here is my plan",
         "here's my plan",
         "here is the plan",
@@ -441,18 +467,9 @@ fn is_meta_final_text(text: &str) -> bool {
         "here's my analysis",
         "here is the analysis",
         "here's the analysis",
-        "let me",
-        "next, i will",
-        "next i will",
     ];
-    if meta_starts.iter().any(|p| lower.starts_with(p)) {
-        return true;
-    }
-    if stripped.split_whitespace().count() < 5 {
-        return false;
-    }
     let padded = format!(" {lower} ");
-    [
+    let strong_process_meta = [
         " i will ",
         " i can ",
         " i should ",
@@ -464,9 +481,17 @@ fn is_meta_final_text(text: &str) -> bool {
         " next, i will ",
         " next i will ",
         " i should start by ",
-    ]
-    .iter()
-    .any(|needle| padded.contains(needle))
+    ];
+    if strong_process_meta
+        .iter()
+        .any(|needle| padded.contains(needle))
+    {
+        return true;
+    }
+    if weak_structural_meta.iter().any(|p| lower.starts_with(p)) {
+        return !objective_allows_meta_final(objective);
+    }
+    false
 }
 
 fn is_recon_tool(name: &str) -> bool {
@@ -516,6 +541,10 @@ fn increment_phase(metrics: &mut LoopMetrics, phase: &LoopPhase) {
         LoopPhase::Iterate => metrics.iterate_steps += 1,
         LoopPhase::Finalize => metrics.finalize_steps += 1,
     }
+}
+
+fn should_emit_recon_guardrail(recon_streak: u32, last_guardrail_streak: u32) -> bool {
+    recon_streak >= 3 && last_guardrail_streak == 0
 }
 
 /// Real solve flow with a multi-step agentic loop.
@@ -649,7 +678,7 @@ pub async fn solve(
                 });
                 continue;
             }
-            if is_meta_final_text(&turn.text) {
+            if is_meta_final_text(&turn.text, objective) {
                 loop_metrics.final_rejections += 1;
                 emitter.emit_trace(&format!(
                     "[d0/s{step}] rejected meta final answer; requesting concrete deliverable"
@@ -726,13 +755,13 @@ pub async fn solve(
             loop_metrics.recon_streak += 1;
         } else {
             loop_metrics.recon_streak = 0;
+            last_guardrail_streak = 0;
         }
         loop_metrics.max_recon_streak =
             loop_metrics.max_recon_streak.max(loop_metrics.recon_streak);
         increment_phase(&mut loop_metrics, &phase);
         if matches!(phase, LoopPhase::Investigate)
-            && loop_metrics.recon_streak >= 3
-            && loop_metrics.recon_streak != last_guardrail_streak
+            && should_emit_recon_guardrail(loop_metrics.recon_streak, last_guardrail_streak)
         {
             loop_metrics.guardrail_warnings += 1;
             last_guardrail_streak = loop_metrics.recon_streak;
@@ -1207,16 +1236,31 @@ mod tests {
     }
 
     #[test]
-    fn test_is_meta_final_text_rejects_empty_and_meta_prefixes() {
-        assert!(is_meta_final_text(""));
+    fn test_is_meta_final_text_rejects_empty_and_strong_process_meta() {
+        assert!(is_meta_final_text("", "Answer the question directly"));
         assert!(is_meta_final_text(
-            "Here is my plan for finishing the task."
-        ));
-        assert!(is_meta_final_text(
-            "I should start by checking the workspace layout."
+            "I should start by checking the workspace layout.",
+            "Answer the question directly"
         ));
         assert!(!is_meta_final_text(
-            "Completed the fix and updated the failing test."
+            "Completed the fix and updated the failing test.",
+            "Answer the question directly"
+        ));
+    }
+
+    #[test]
+    fn test_is_meta_final_text_respects_objective_policy_for_structural_meta() {
+        assert!(is_meta_final_text(
+            "Here is my plan for finishing the task.",
+            "Answer the question directly"
+        ));
+        assert!(!is_meta_final_text(
+            "Here is my plan for finishing the task.",
+            "Write a plan for finishing the task"
+        ));
+        assert!(is_meta_final_text(
+            "Here is my plan: I will inspect files and then implement.",
+            "Write a plan for finishing the task"
         ));
     }
 
@@ -1236,5 +1280,23 @@ mod tests {
     fn test_classify_loop_phase_mixed_recon_and_non_recon_is_iterate() {
         let phase = classify_loop_phase(&[tool_call("read_file"), tool_call("run_shell")], false);
         assert_eq!(phase, LoopPhase::Iterate);
+    }
+
+    #[test]
+    fn test_should_emit_recon_guardrail_once_per_episode() {
+        let mut last_guardrail_streak = 0;
+
+        assert!(!should_emit_recon_guardrail(1, last_guardrail_streak));
+        assert!(!should_emit_recon_guardrail(2, last_guardrail_streak));
+        assert!(should_emit_recon_guardrail(3, last_guardrail_streak));
+
+        last_guardrail_streak = 3;
+        assert!(!should_emit_recon_guardrail(4, last_guardrail_streak));
+        assert!(!should_emit_recon_guardrail(5, last_guardrail_streak));
+
+        last_guardrail_streak = 0;
+        assert!(!should_emit_recon_guardrail(1, last_guardrail_streak));
+        assert!(!should_emit_recon_guardrail(2, last_guardrail_streak));
+        assert!(should_emit_recon_guardrail(3, last_guardrail_streak));
     }
 }
