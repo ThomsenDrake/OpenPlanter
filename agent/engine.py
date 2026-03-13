@@ -230,6 +230,7 @@ class RLMEngine:
         on_content_delta: ContentDeltaCallback | None = None,
         replay_logger: ReplayLogger | None = None,
         turn_history: list[TurnSummary] | None = None,
+        question_reasoning_packet: dict[str, Any] | None = None,
     ) -> tuple[str, ExternalContext]:
         if not objective.strip():
             return "No objective provided.", context or ExternalContext()
@@ -249,6 +250,7 @@ class RLMEngine:
                 deadline=deadline,
                 replay_logger=replay_logger,
                 turn_history=turn_history,
+                question_reasoning_packet=question_reasoning_packet,
             )
         finally:
             cleanup = getattr(self.tools, "cleanup_bg_jobs", None)
@@ -356,6 +358,7 @@ class RLMEngine:
         model_override: BaseModel | None = None,
         replay_logger: ReplayLogger | None = None,
         turn_history: list[TurnSummary] | None = None,
+        question_reasoning_packet: dict[str, Any] | None = None,
     ) -> str:
         model = model_override or self.model
 
@@ -395,6 +398,8 @@ class RLMEngine:
                 f"{len(turn_history)} prior turn(s). "
                 f"Read replay.jsonl/events.jsonl in session_dir for full details."
             )
+        if depth == 0 and question_reasoning_packet is not None:
+            initial_msg_dict["question_reasoning_packet"] = question_reasoning_packet
         initial_message = json.dumps(initial_msg_dict, ensure_ascii=True)
 
         conversation = model.create_conversation(self.system_prompt, initial_message)

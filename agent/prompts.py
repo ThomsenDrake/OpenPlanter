@@ -379,6 +379,38 @@ For full details of any prior turn, read the session logs:
 """
 
 
+QUESTION_REASONING_SECTION = """
+== QUESTION-CENTRIC REASONING ==
+Your initial message may contain a "question_reasoning_packet" derived from
+{session_dir}/investigation_state.json. Use question-centric reasoning over
+document-centric "read more then synthesize" behavior.
+
+Run this loop until step budget is low or high-priority questions are resolved:
+1) Select the next unresolved question from question_reasoning_packet.focus_question_ids
+   or question_reasoning_packet.unresolved_questions.
+2) Gather discriminating evidence targeted at that question.
+3) Update related claims in investigation_state.claims with explicit status
+   (supported / contested / unresolved), confidence, and cited evidence IDs.
+4) Record contradictions explicitly, preserving both supporting and contradictory
+   evidence with provenance IDs instead of collapsing disagreement.
+5) Only then synthesize, and repeat for remaining unresolved questions.
+
+Rules:
+- Ground reasoning in typed state references, not raw transcript quotes. Prefer
+  question IDs, claim IDs, evidence IDs, and provenance IDs.
+- Do not mark a claim supported without support evidence IDs.
+- Do not resolve a question without explicit claim/evidence linkage.
+- Prefer provenance-backed evidence over uncited notes.
+
+Final deliverables MUST separate findings into three sections:
+- Supported Findings
+- Contested Findings
+- Unresolved Findings
+
+Each item should cite the relevant evidence/provenance IDs.
+"""
+
+
 WIKI_SECTION = """
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -417,6 +449,7 @@ def build_system_prompt(
     prompt = SYSTEM_PROMPT_BASE
     prompt += SESSION_LOGS_SECTION
     prompt += TURN_HISTORY_SECTION
+    prompt += QUESTION_REASONING_SECTION
     prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION

@@ -12,6 +12,8 @@ from typing import Any, Callable
 from .config import AgentConfig
 from .engine import ContentDeltaCallback, ExternalContext, RLMEngine, StepCallback, TurnSummary
 from .investigation_state import (
+    build_question_reasoning_packet,
+    default_state,
     load_investigation_state,
     migrate_legacy_state,
     normalize_legacy_state,
@@ -39,6 +41,17 @@ def _new_session_id() -> str:
 
 def _safe_component(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-") or "artifact"
+
+
+def _has_reasoning_content(packet: dict[str, Any]) -> bool:
+    findings = packet.get("findings", {})
+    if packet.get("focus_question_ids"):
+        return True
+    if packet.get("contradictions"):
+        return True
+    if not isinstance(findings, dict):
+        return False
+    return any(findings.get(key) for key in ("supported", "contested", "unresolved"))
 
 
 @dataclass
@@ -170,6 +183,27 @@ class SessionStore:
         if not isinstance(raw_state, dict):
             raise SessionError(f"Session state must be a JSON object: {state_path}")
         return normalize_legacy_state(session_id, raw_state)
+
+    def load_typed_state(self, session_id: str) -> dict[str, Any]:
+        investigation_path = self._investigation_state_path(session_id)
+        if investigation_path.exists():
+            try:
+                return load_investigation_state(investigation_path)
+            except json.JSONDecodeError as exc:
+                raise SessionError(
+                    f"Session investigation state is invalid JSON: {investigation_path}"
+                ) from exc
+
+        state_path = self._state_path(session_id)
+        if not state_path.exists():
+            return default_state(session_id=session_id)
+        try:
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SessionError(f"Session state is invalid JSON: {state_path}") from exc
+        if not isinstance(raw_state, dict):
+            raise SessionError(f"Session state must be a JSON object: {state_path}")
+        return migrate_legacy_state(session_id=session_id, legacy_state=raw_state)
 
     def save_state(self, session_id: str, state: dict[str, Any]) -> None:
         normalized_legacy = normalize_legacy_state(session_id, state)
@@ -436,6 +470,11 @@ class SessionRuntime:
         replay_logger = ReplayLogger(path=replay_path, force_snapshot_first_call=True)
         replay_seq_start = replay_logger.current_seq
 
+        typed_state = self.store.load_typed_state(self.session_id)
+        question_reasoning_packet = build_question_reasoning_packet(typed_state)
+        if not _has_reasoning_content(question_reasoning_packet):
+            question_reasoning_packet = None
+
         result, updated_context = self.engine.solve_with_context(
             objective=objective,
             context=self.context,
@@ -444,6 +483,7 @@ class SessionRuntime:
             on_content_delta=on_content_delta,
             replay_logger=replay_logger,
             turn_history=self.turn_history,
+            question_reasoning_packet=question_reasoning_packet,
         )
         self.context = updated_context
 

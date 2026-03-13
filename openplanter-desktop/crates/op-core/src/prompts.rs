@@ -232,7 +232,7 @@ from prior turns in this session. Each entry has:
   - objective: the objective given to that turn
   - result_preview: first ~200 characters of the turn's result
   - timestamp: ISO 8601 UTC when the turn ran
-  - steps_used: how many engine steps were consumed
+  - steps_used: how many replayed model calls the turn produced, including delegated child conversations
   - replay_seq_start: starting sequence number in replay.jsonl
 
 Use turn history to:
@@ -242,6 +242,36 @@ Use turn history to:
 
 For full details of any prior turn, read the session logs:
   replay.jsonl (full transcript) or events.jsonl (lightweight trace)."#;
+
+pub const QUESTION_REASONING_SECTION: &str = r#"
+== QUESTION-CENTRIC REASONING ==
+Your initial message may contain a "question_reasoning_packet" derived from
+{session_dir}/investigation_state.json. Use question-centric reasoning over
+document-centric "read more then synthesize" behavior.
+
+Run this loop until step budget is low or high-priority questions are resolved:
+1) Select the next unresolved question from question_reasoning_packet.focus_question_ids
+   or question_reasoning_packet.unresolved_questions.
+2) Gather discriminating evidence targeted at that question.
+3) Update related claims in investigation_state.claims with explicit status
+   (supported / contested / unresolved), confidence, and cited evidence IDs.
+4) Record contradictions explicitly, preserving both supporting and contradictory
+   evidence with provenance IDs instead of collapsing disagreement.
+5) Only then synthesize, and repeat for remaining unresolved questions.
+
+Rules:
+- Ground reasoning in typed state references, not raw transcript quotes. Prefer
+  question IDs, claim IDs, evidence IDs, and provenance IDs.
+- Do not mark a claim supported without support evidence IDs.
+- Do not resolve a question without explicit claim/evidence linkage.
+- Prefer provenance-backed evidence over uncited notes.
+
+Final deliverables MUST separate findings into three sections:
+- Supported Findings
+- Contested Findings
+- Unresolved Findings
+
+Each item should cite the relevant evidence/provenance IDs."#;
 
 pub const WIKI_SECTION: &str = r#"
 == DATA SOURCES WIKI ==
@@ -395,6 +425,7 @@ pub fn build_system_prompt(recursive: bool, acceptance_criteria: bool, demo: boo
     prompt.push_str(SYSTEM_PROMPT_BASE);
     prompt.push_str(SESSION_LOGS_SECTION);
     prompt.push_str(TURN_HISTORY_SECTION);
+    prompt.push_str(QUESTION_REASONING_SECTION);
     prompt.push_str(WIKI_SECTION);
     if recursive {
         prompt.push_str(RECURSIVE_SECTION);
@@ -418,6 +449,7 @@ mod tests {
         assert!(prompt.contains("You are OpenPlanter"));
         assert!(prompt.contains("SESSION LOGS AND TRANSCRIPTS"));
         assert!(prompt.contains("TURN HISTORY"));
+        assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
         assert!(prompt.contains("DATA SOURCES WIKI"));
         assert!(!prompt.contains("REPL STRUCTURE"));
         assert!(!prompt.contains("ACCEPTANCE CRITERIA"));
@@ -449,6 +481,7 @@ mod tests {
         let base_pos = prompt.find("You are OpenPlanter").unwrap();
         let session_pos = prompt.find("SESSION LOGS AND TRANSCRIPTS").unwrap();
         let turn_pos = prompt.find("TURN HISTORY").unwrap();
+        let question_pos = prompt.find("QUESTION-CENTRIC REASONING").unwrap();
         let wiki_pos = prompt.find("DATA SOURCES WIKI").unwrap();
         let repl_pos = prompt.find("REPL STRUCTURE").unwrap();
         let accept_pos = prompt.find("ACCEPTANCE CRITERIA").unwrap();
@@ -456,7 +489,8 @@ mod tests {
 
         assert!(base_pos < session_pos);
         assert!(session_pos < turn_pos);
-        assert!(turn_pos < wiki_pos);
+        assert!(turn_pos < question_pos);
+        assert!(question_pos < wiki_pos);
         assert!(wiki_pos < repl_pos);
         assert!(repl_pos < accept_pos);
         assert!(accept_pos < demo_pos);

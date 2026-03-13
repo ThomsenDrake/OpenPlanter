@@ -61,6 +61,73 @@ class SessionRuntimeTests(unittest.TestCase):
             result2 = runtime2.solve("finish")
             self.assertEqual(result2, "second done")
 
+    def test_runtime_solve_injects_question_reasoning_packet_from_typed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=2,
+                session_root_dir=".openplanter",
+                max_persisted_observations=50,
+            )
+
+            captured: list[str] = []
+
+            class CapturingModel(ScriptedModel):
+                def create_conversation(self, system_prompt: str, initial_user_message: str):
+                    captured.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingModel(scripted_turns=[ModelTurn(text="ok", stop_reason="end_turn")])
+            engine = RLMEngine(model=model, tools=WorkspaceTools(root=root), config=cfg)
+            runtime = SessionRuntime.bootstrap(
+                engine=engine,
+                config=cfg,
+                session_id="session-packet",
+                resume=False,
+            )
+
+            session_dir = root / ".openplanter" / "sessions" / "session-packet"
+            typed_state_path = session_dir / "investigation_state.json"
+            typed = json.loads(typed_state_path.read_text(encoding="utf-8"))
+            typed["questions"] = {
+                "q_1": {
+                    "id": "q_1",
+                    "question_text": "Open question",
+                    "status": "open",
+                    "priority": "high",
+                    "claim_ids": ["cl_1"],
+                }
+            }
+            typed["claims"] = {
+                "cl_1": {
+                    "id": "cl_1",
+                    "claim_text": "Needs support",
+                    "status": "unresolved",
+                    "evidence_ids": ["ev_1"],
+                }
+            }
+            typed["evidence"] = {
+                "ev_1": {
+                    "id": "ev_1",
+                    "evidence_type": "web_fetch",
+                    "source_uri": "https://example.test",
+                    "provenance_ids": ["pv_1"],
+                }
+            }
+            typed_state_path.write_text(json.dumps(typed), encoding="utf-8")
+
+            result = runtime.solve("continue")
+
+            self.assertEqual(result, "ok")
+            self.assertEqual(len(captured), 1)
+            parsed = json.loads(captured[0])
+            packet = parsed["question_reasoning_packet"]
+            self.assertEqual(packet["reasoning_mode"], "question_centric")
+            self.assertEqual(packet["focus_question_ids"], ["q_1"])
+            self.assertEqual(packet["findings"]["unresolved"][0]["id"], "cl_1")
+
     def test_patch_artifact_saved(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

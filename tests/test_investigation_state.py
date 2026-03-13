@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from agent.investigation_state import (
+    build_question_reasoning_packet,
     migrate_legacy_state,
     state_to_legacy_projection,
 )
@@ -200,6 +201,74 @@ class SessionStoreTypedStateTests(unittest.TestCase):
             projected = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(projected["external_observations"], ["fresh"])
             self.assertEqual(projected["custom_field"], "after")
+
+
+class QuestionReasoningPacketTests(unittest.TestCase):
+    def test_build_question_reasoning_packet_groups_findings_and_contradictions(self) -> None:
+        state = {
+            "questions": {
+                "q_2": {
+                    "id": "q_2",
+                    "question_text": "Is claim 2 true?",
+                    "status": "open",
+                    "priority": "high",
+                    "claim_ids": ["cl_2"],
+                    "evidence_ids": ["ev_2"],
+                },
+                "q_1": {
+                    "id": "q_1",
+                    "question_text": "Is claim 1 true?",
+                    "status": "open",
+                    "priority": "critical",
+                    "claim_ids": ["cl_1"],
+                    "evidence_ids": ["ev_1", "ev_3"],
+                },
+                "q_done": {
+                    "id": "q_done",
+                    "question_text": "Ignore",
+                    "status": "resolved",
+                },
+            },
+            "claims": {
+                "cl_1": {
+                    "claim_text": "Claim supported",
+                    "status": "supported",
+                    "support_evidence_ids": ["ev_1"],
+                    "confidence": 0.91,
+                },
+                "cl_2": {
+                    "claim_text": "Claim contested",
+                    "status": "contested",
+                    "support_evidence_ids": ["ev_2"],
+                    "contradiction_evidence_ids": ["ev_3"],
+                    "confidence_score": 0.4,
+                },
+                "cl_3": {
+                    "claim_text": "Claim unresolved",
+                    "status": "unresolved",
+                    "evidence_ids": ["ev_4"],
+                },
+            },
+            "evidence": {
+                "ev_1": {"evidence_type": "doc", "provenance_ids": ["pv_1"], "source_uri": "s1"},
+                "ev_2": {"evidence_type": "doc", "provenance_ids": ["pv_2"], "source_uri": "s2"},
+                "ev_3": {"evidence_type": "doc", "provenance_ids": ["pv_3"], "source_uri": "s3"},
+                "ev_4": {"evidence_type": "doc", "provenance_ids": ["pv_4"], "source_uri": "s4"},
+            },
+        }
+
+        packet = build_question_reasoning_packet(state)
+
+        self.assertEqual(packet["reasoning_mode"], "question_centric")
+        self.assertEqual(packet["focus_question_ids"], ["q_1", "q_2"])
+        self.assertEqual(len(packet["findings"]["supported"]), 1)
+        self.assertEqual(packet["findings"]["supported"][0]["id"], "cl_1")
+        self.assertEqual(len(packet["findings"]["contested"]), 1)
+        self.assertEqual(packet["findings"]["contested"][0]["id"], "cl_2")
+        self.assertEqual(len(packet["findings"]["unresolved"]), 1)
+        self.assertEqual(packet["findings"]["unresolved"][0]["id"], "cl_3")
+        self.assertEqual(packet["contradictions"][0]["claim_id"], "cl_2")
+        self.assertIn("ev_3", packet["evidence_index"])
 
 
 if __name__ == "__main__":

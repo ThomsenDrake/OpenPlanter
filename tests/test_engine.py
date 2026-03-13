@@ -264,6 +264,12 @@ class REPLPromptTests(unittest.TestCase):
         prompt = _build_system_prompt(recursive=False)
         self.assertNotIn("REPL STRUCTURE", prompt)
 
+    def test_prompt_includes_question_centric_reasoning_rules(self) -> None:
+        prompt = _build_system_prompt(recursive=False)
+        self.assertIn("QUESTION-CENTRIC REASONING", prompt)
+        self.assertIn("supported / contested / unresolved", prompt)
+        self.assertIn("Supported Findings", prompt)
+
     def test_recursive_initial_message_has_repl_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -310,6 +316,38 @@ class REPLPromptTests(unittest.TestCase):
             self.assertEqual(len(captured), 1)
             parsed = json.loads(captured[0])
             self.assertNotIn("repl_hint", parsed)
+
+    def test_initial_message_includes_question_reasoning_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=3, recursive=False)
+            tools = WorkspaceTools(root=root)
+
+            captured: list[str] = []
+
+            class CapturingModel(ScriptedModel):
+                def create_conversation(self, system_prompt: str, initial_user_message: str):
+                    captured.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingModel(scripted_turns=[
+                ModelTurn(text="done", stop_reason="end_turn"),
+            ])
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            packet = {
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "unresolved_questions": [{"id": "q_1", "question": "Open question"}],
+                "findings": {"supported": [], "contested": [], "unresolved": []},
+                "contradictions": [],
+                "evidence_index": {},
+            }
+
+            engine.solve_with_context("test objective", question_reasoning_packet=packet)
+
+            self.assertEqual(len(captured), 1)
+            parsed = json.loads(captured[0])
+            self.assertEqual(parsed["question_reasoning_packet"], packet)
 
 
 @dataclass

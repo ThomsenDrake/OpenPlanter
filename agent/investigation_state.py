@@ -223,6 +223,117 @@ def save_investigation_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def build_question_reasoning_packet(
+    state: dict[str, Any],
+    *,
+    max_questions: int = 8,
+    max_evidence_per_item: int = 6,
+) -> dict[str, Any]:
+    """Build a question-centric reasoning packet from canonical typed state."""
+
+    questions = state.get("questions") if isinstance(state.get("questions"), dict) else {}
+    claims = state.get("claims") if isinstance(state.get("claims"), dict) else {}
+    evidence = state.get("evidence") if isinstance(state.get("evidence"), dict) else {}
+
+    unresolved_questions: list[dict[str, Any]] = []
+    for question_id, raw_question in questions.items():
+        if not isinstance(raw_question, dict):
+            continue
+        status = str(raw_question.get("status") or "open").lower()
+        if status in {"resolved", "closed", "wont_fix", "won't_fix"}:
+            continue
+
+        unresolved_questions.append(
+            {
+                "id": str(raw_question.get("id") or question_id),
+                "question": str(raw_question.get("question_text") or raw_question.get("question") or ""),
+                "status": status,
+                "priority": str(raw_question.get("priority") or "medium").lower(),
+                "claim_ids": _id_list(raw_question.get("claim_ids") or raw_question.get("claims")),
+                "evidence_ids": _id_list(raw_question.get("evidence_ids"))[:max_evidence_per_item],
+                "triggers": _id_list(raw_question.get("trigger") or raw_question.get("triggers")),
+                "updated_at": str(raw_question.get("updated_at") or ""),
+            }
+        )
+
+    unresolved_questions.sort(key=_question_priority_sort_key)
+    focus_questions = unresolved_questions[: max(1, max_questions)]
+
+    supported: list[dict[str, Any]] = []
+    contested: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    contradictions: list[dict[str, Any]] = []
+
+    for claim_id, raw_claim in claims.items():
+        if not isinstance(raw_claim, dict):
+            continue
+        claim_status = str(raw_claim.get("status") or "unresolved").lower()
+        support_ids = _id_list(raw_claim.get("support_evidence_ids") or raw_claim.get("evidence_ids"))
+        contradiction_ids = _id_list(
+            raw_claim.get("contradiction_evidence_ids") or raw_claim.get("contradict_evidence_ids")
+        )
+        confidence = raw_claim.get("confidence")
+        if confidence is None:
+            confidence = raw_claim.get("confidence_score")
+
+        claim_summary = {
+            "id": str(raw_claim.get("id") or claim_id),
+            "claim": str(raw_claim.get("claim_text") or raw_claim.get("text") or ""),
+            "status": claim_status,
+            "confidence": confidence,
+            "support_evidence_ids": support_ids[:max_evidence_per_item],
+            "contradiction_evidence_ids": contradiction_ids[:max_evidence_per_item],
+        }
+
+        if contradiction_ids:
+            contradictions.append(
+                {
+                    "claim_id": str(raw_claim.get("id") or claim_id),
+                    "support_evidence_ids": support_ids[:max_evidence_per_item],
+                    "contradiction_evidence_ids": contradiction_ids[:max_evidence_per_item],
+                }
+            )
+
+        if claim_status == "supported":
+            supported.append(claim_summary)
+        elif claim_status == "contested" or contradiction_ids:
+            contested.append(claim_summary)
+        else:
+            unresolved.append(claim_summary)
+
+    evidence_index: dict[str, dict[str, Any]] = {}
+    for evidence_id in _collect_evidence_ids(focus_questions, supported, contested, unresolved):
+        record = evidence.get(evidence_id)
+        if not isinstance(record, dict):
+            continue
+        evidence_index[evidence_id] = {
+            "evidence_type": record.get("evidence_type"),
+            "provenance_ids": _id_list(record.get("provenance_ids")),
+            "source_uri": record.get("source_uri"),
+            "confidence_id": record.get("confidence_id"),
+        }
+
+    return {
+        "reasoning_mode": "question_centric",
+        "loop": [
+            "select_unresolved_question",
+            "gather_discriminating_evidence",
+            "update_claim_status_and_confidence",
+            "record_contradictions",
+            "synthesize_supported_contested_unresolved",
+        ],
+        "focus_question_ids": [item["id"] for item in focus_questions],
+        "unresolved_questions": focus_questions,
+        "findings": {
+            "supported": supported,
+            "contested": contested,
+            "unresolved": unresolved,
+        },
+        "contradictions": contradictions,
+        "evidence_index": evidence_index,
+    }
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -239,6 +350,39 @@ def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return copy.deepcopy(value)
+
+
+def _id_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _question_priority_sort_key(question: dict[str, Any]) -> tuple[int, str]:
+    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    priority = str(question.get("priority") or "medium").lower()
+    question_id = str(question.get("id") or "")
+    return (rank.get(priority, 9), question_id)
+
+
+def _collect_evidence_ids(*collections: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for collection in collections:
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            for key in ("evidence_ids", "support_evidence_ids", "contradiction_evidence_ids"):
+                values = item.get(key)
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    evidence_id = str(value)
+                    if evidence_id in seen:
+                        continue
+                    seen.add(evidence_id)
+                    out.append(evidence_id)
+    return out
 
 
 def _observations_from_rust_state(state: dict[str, Any]) -> list[str]:
