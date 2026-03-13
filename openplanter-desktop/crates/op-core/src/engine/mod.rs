@@ -5,6 +5,7 @@
 
 pub mod context;
 pub mod curator;
+pub mod investigation_state;
 pub mod judge;
 
 use std::time::Duration;

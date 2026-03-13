@@ -214,8 +214,10 @@ logs you can read with read_file to recall prior work:
 - {session_dir}/events.jsonl — Trace events log (JSONL). Each record has a
   timestamp, event type ("objective", "trace", "step", "result"), and payload.
   Use this for a lightweight overview of objectives and results without full messages.
-- {session_dir}/state.json — Persisted external context observations from prior turns.
-  This is what feeds the external_context_summary in your initial message.
+- {session_dir}/investigation_state.json — Canonical typed session state with
+  structured evidence plus a legacy projection of prior observations.
+- {session_dir}/state.json — Legacy compatibility projection of session state.
+  This still feeds the external_context_summary in your initial message.
 
 These files grow throughout the session. If you need to recall prior analysis,
 check what you did before, or pick up where you left off, read these logs.

@@ -11,6 +11,14 @@ from typing import Any, Callable
 
 from .config import AgentConfig
 from .engine import ContentDeltaCallback, ExternalContext, RLMEngine, StepCallback, TurnSummary
+from .investigation_state import (
+    load_investigation_state,
+    migrate_legacy_state,
+    normalize_legacy_state,
+    save_investigation_state,
+    state_to_legacy_projection,
+    upsert_legacy_observations,
+)
 from .replay_log import ReplayLogger
 
 EventCallback = Callable[[str], None]
@@ -52,6 +60,9 @@ class SessionStore:
 
     def _state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "state.json"
+
+    def _investigation_state_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "investigation_state.json"
 
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
@@ -135,20 +146,68 @@ class SessionStore:
         return sid, state, created_new
 
     def load_state(self, session_id: str) -> dict[str, Any]:
+        investigation_path = self._investigation_state_path(session_id)
+        if investigation_path.exists():
+            try:
+                typed_state = load_investigation_state(investigation_path)
+            except json.JSONDecodeError as exc:
+                raise SessionError(
+                    f"Session investigation state is invalid JSON: {investigation_path}"
+                ) from exc
+            return state_to_legacy_projection(typed_state, session_id=session_id)
+
         state_path = self._state_path(session_id)
         if not state_path.exists():
             return {
                 "session_id": session_id,
+                "saved_at": _utc_now(),
                 "external_observations": [],
             }
         try:
-            return json.loads(state_path.read_text(encoding="utf-8"))
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise SessionError(f"Session state is invalid JSON: {state_path}") from exc
+        if not isinstance(raw_state, dict):
+            raise SessionError(f"Session state must be a JSON object: {state_path}")
+        return normalize_legacy_state(session_id, raw_state)
 
     def save_state(self, session_id: str, state: dict[str, Any]) -> None:
+        normalized_legacy = normalize_legacy_state(session_id, state)
         state_path = self._state_path(session_id)
-        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        state_path.write_text(json.dumps(normalized_legacy, indent=2), encoding="utf-8")
+
+        investigation_path = self._investigation_state_path(session_id)
+        if investigation_path.exists():
+            try:
+                typed_state = load_investigation_state(investigation_path)
+            except json.JSONDecodeError as exc:
+                raise SessionError(
+                    f"Session investigation state is invalid JSON: {investigation_path}"
+                ) from exc
+        else:
+            typed_state = migrate_legacy_state(session_id=session_id, legacy_state=normalized_legacy)
+
+        typed_state = upsert_legacy_observations(
+            typed_state,
+            normalized_legacy["external_observations"],
+            now=normalized_legacy.get("saved_at"),
+        )
+        legacy = typed_state.setdefault("legacy", {})
+        if not isinstance(legacy, dict):
+            legacy = {}
+            typed_state["legacy"] = legacy
+        legacy["turn_history"] = normalized_legacy.get("turn_history", [])
+        legacy["loop_metrics"] = normalized_legacy.get("loop_metrics", {})
+        legacy["extra_fields"] = {
+            key: value
+            for key, value in normalized_legacy.items()
+            if key not in {"session_id", "saved_at", "external_observations", "turn_history", "loop_metrics"}
+        }
+
+        typed_state["session_id"] = session_id
+        typed_state["updated_at"] = normalized_legacy.get("saved_at", _utc_now())
+        typed_state.setdefault("created_at", typed_state["updated_at"])
+        save_investigation_state(investigation_path, typed_state)
         self._touch_metadata(session_id)
 
     def append_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
