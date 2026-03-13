@@ -286,8 +286,11 @@ cargo test
 ### CLI Agent
 
 ```bash
-# Install in editable mode
-pip install -e .
+# Install in editable mode with test dependencies
+pip install -e ".[dev]"
+
+# Optional: include Textual extras for UI-focused tests
+pip install -e ".[dev,textual]"
 
 # Run tests
 python -m pytest tests/
@@ -296,7 +299,7 @@ python -m pytest tests/
 python -m pytest tests/ --ignore=tests/test_live_models.py --ignore=tests/test_integration_live.py
 ```
 
-Requires Python 3.10+. Dependencies: `rich`, `prompt_toolkit`, `pyfiglet`.
+Requires Python 3.10+. Runtime dependencies: `rich`, `prompt_toolkit`, `pyfiglet`.
 
 ## License
 

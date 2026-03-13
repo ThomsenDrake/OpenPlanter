@@ -434,7 +434,7 @@ class SessionRuntime:
 
         replay_path = self.store._session_dir(self.session_id) / "replay.jsonl"
         replay_logger = ReplayLogger(path=replay_path, force_snapshot_first_call=True)
-        replay_seq_start = replay_logger._seq
+        replay_seq_start = replay_logger.current_seq
 
         result, updated_context = self.engine.solve_with_context(
             objective=objective,
@@ -480,7 +480,8 @@ class SessionRuntime:
             self.turn_history = []
         turn_number = (self.turn_history[-1].turn_number + 1) if self.turn_history else 1
         result_preview = result[:200] + "..." if len(result) > 200 else result
-        steps_used = replay_logger._seq - replay_seq_start
+        replay_seq_end = replay_logger.current_seq
+        steps_used = max(0, replay_seq_end - replay_seq_start)
         summary = TurnSummary(
             turn_number=turn_number,
             objective=objective,
