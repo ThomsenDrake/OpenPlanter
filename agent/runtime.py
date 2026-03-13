@@ -374,7 +374,7 @@ class SessionRuntime:
                     pass
 
         replay_path = self.store._session_dir(self.session_id) / "replay.jsonl"
-        replay_logger = ReplayLogger(path=replay_path)
+        replay_logger = ReplayLogger(path=replay_path, force_snapshot_first_call=True)
         replay_seq_start = replay_logger._seq
 
         result, updated_context = self.engine.solve_with_context(

@@ -226,6 +226,65 @@ class ReplayLoggerUnitTests(unittest.TestCase):
             self.assertIn("messages_delta", calls[-1])
             self.assertEqual(calls[-1]["messages_delta"], [{"role": "assistant", "content": "hello"}])
 
+    def test_force_snapshot_first_call_resets_root_message_latch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "replay.jsonl"
+            first = ReplayLogger(path=p, force_snapshot_first_call=True)
+            first.log_call(
+                depth=0,
+                step=1,
+                messages=[{"role": "user", "content": "turn one"}],
+                response={"r": 1},
+            )
+
+            second = ReplayLogger(path=p, force_snapshot_first_call=True)
+            second.log_call(
+                depth=0,
+                step=1,
+                messages=[{"role": "user", "content": "turn two"}],
+                response={"r": 2},
+            )
+
+            calls = [r for r in self._read_records(p) if r.get("type") == "call" and r.get("conversation_id") == "root"]
+            self.assertEqual(calls[0]["seq"], 0)
+            self.assertIn("messages_snapshot", calls[0])
+            self.assertEqual(calls[1]["seq"], 1)
+            self.assertIn("messages_snapshot", calls[1])
+            self.assertNotIn("messages_delta", calls[1])
+
+    def test_force_snapshot_first_call_propagates_to_child_logger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "replay.jsonl"
+
+            first = ReplayLogger(path=p, force_snapshot_first_call=True)
+            child_first = first.child(depth=0, step=1)
+            child_first.log_call(
+                depth=1,
+                step=1,
+                messages=[{"role": "user", "content": "child turn one"}],
+                response={"r": 1},
+            )
+
+            second = ReplayLogger(path=p, force_snapshot_first_call=True)
+            child_second = second.child(depth=0, step=1)
+            child_second.log_call(
+                depth=1,
+                step=1,
+                messages=[{"role": "user", "content": "child turn two"}],
+                response={"r": 2},
+            )
+
+            calls = [
+                r
+                for r in self._read_records(p)
+                if r.get("type") == "call" and r.get("conversation_id") == "root/d0s1"
+            ]
+            self.assertEqual(calls[0]["seq"], 0)
+            self.assertIn("messages_snapshot", calls[0])
+            self.assertEqual(calls[1]["seq"], 1)
+            self.assertIn("messages_snapshot", calls[1])
+            self.assertNotIn("messages_delta", calls[1])
+
 
 class ReplayLoggerIntegrationTests(unittest.TestCase):
     def _read_records(self, path: Path) -> list[dict]:
@@ -342,6 +401,37 @@ class ReplayLoggerIntegrationTests(unittest.TestCase):
             types = [r["type"] for r in records]
             self.assertIn("header", types)
             self.assertIn("call", types)
+
+    def test_runtime_second_solve_starts_with_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="first", stop_reason="end_turn"),
+                    ModelTurn(text="second", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+
+            from agent.runtime import SessionRuntime
+
+            runtime = SessionRuntime.bootstrap(engine=engine, config=cfg, session_id="sess-replay-two", resume=False)
+            self.assertEqual(runtime.solve("first objective"), "first")
+            self.assertEqual(runtime.solve("second objective"), "second")
+
+            replay_path = (
+                root / cfg.session_root_dir / "sessions" / runtime.session_id / "replay.jsonl"
+            )
+            records = self._read_records(replay_path)
+            calls = [r for r in records if r.get("type") == "call" and r.get("conversation_id") == "root"]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["seq"], 0)
+            self.assertIn("messages_snapshot", calls[0])
+            self.assertEqual(calls[1]["seq"], 1)
+            self.assertIn("messages_snapshot", calls[1])
+            self.assertNotIn("messages_delta", calls[1])
 
 
 if __name__ == "__main__":

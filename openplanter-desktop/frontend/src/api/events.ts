@@ -1,16 +1,14 @@
 /** Tauri event subscriptions. */
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  AgentEvent,
   CompleteEvent,
   CuratorUpdateEvent,
+  DeltaEvent,
   GraphData,
   LoopHealthEvent,
   MigrationProgressEvent,
+  StepEvent,
 } from "./types";
-
-type AgentStepEvent = Extract<AgentEvent, { type: "step" }>;
-type AgentDeltaEvent = Extract<AgentEvent, { type: "delta" }>;
 
 export function onAgentTrace(
   callback: (message: string) => void
@@ -21,15 +19,15 @@ export function onAgentTrace(
 }
 
 export function onAgentStep(
-  callback: (event: AgentStepEvent) => void
+  callback: (event: StepEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<AgentStepEvent>("agent:step", (e) => callback(e.payload));
+  return listen<StepEvent>("agent:step", (e) => callback(e.payload));
 }
 
 export function onAgentDelta(
-  callback: (event: AgentDeltaEvent) => void
+  callback: (event: DeltaEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<AgentDeltaEvent>("agent:delta", (e) => callback(e.payload));
+  return listen<DeltaEvent>("agent:delta", (e) => callback(e.payload));
 }
 
 export function onAgentCompleteEvent(
