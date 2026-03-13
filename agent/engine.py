@@ -397,7 +397,10 @@ class RLMEngine:
             "max_recon_streak": 0,
             "guardrail_warnings": 0,
             "final_rejections": 0,
+            "last_guardrail_streak": 0,
         }
+
+        self.last_loop_metrics = loop_metrics
 
         if replay_logger and replay_logger.needs_header:
             replay_logger.write_header(
@@ -413,9 +416,11 @@ class RLMEngine:
         for step in range(1, self.config.max_steps_per_call + 1):
             if self._cancel.is_set():
                 self._emit(f"[d{depth}] cancelled by user", on_event)
+                self.last_loop_metrics = loop_metrics
                 return "Task cancelled."
             if deadline and time.monotonic() > deadline:
                 self._emit(f"[d{depth}] wall-clock limit reached", on_event)
+                self.last_loop_metrics = loop_metrics
                 return "Time limit exceeded. Try a more focused objective."
             self._emit(f"[d{depth}/s{step}] calling model...", on_event)
             t0 = time.monotonic()
@@ -427,6 +432,7 @@ class RLMEngine:
                 while True:
                     if self._cancel.is_set():
                         self._emit(f"[d{depth}] cancelled by user", on_event)
+                        self.last_loop_metrics = loop_metrics
                         return "Task cancelled."
                     try:
                         turn = model.complete(conversation)
@@ -434,6 +440,7 @@ class RLMEngine:
                     except RateLimitError as exc:
                         if rate_limit_retries >= self.config.rate_limit_max_retries:
                             self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                            self.last_loop_metrics = loop_metrics
                             return f"Model error at depth {depth}, step {step}: {exc}"
                         rate_limit_retries += 1
                         delay: float | None = None
@@ -448,6 +455,7 @@ class RLMEngine:
                         delay = min(delay, self.config.rate_limit_backoff_max_sec)
                         if deadline and (time.monotonic() + delay) > deadline:
                             self._emit(f"[d{depth}] wall-clock limit reached", on_event)
+                            self.last_loop_metrics = loop_metrics
                             return "Time limit exceeded. Try a more focused objective."
                         provider_code = f" ({exc.provider_code})" if exc.provider_code is not None else ""
                         self._emit(
@@ -459,6 +467,7 @@ class RLMEngine:
                             time.sleep(delay)
             except ModelError as exc:
                 self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                self.last_loop_metrics = loop_metrics
                 return f"Model error at depth {depth}, step {step}: {exc}"
             finally:
                 if hasattr(model, "on_content_delta"):
@@ -706,8 +715,10 @@ class RLMEngine:
                 and results
                 and int(loop_metrics["recon_streak"]) >= 3
                 and not has_artifact
+                and int(loop_metrics.get("last_guardrail_streak", 0)) != int(loop_metrics["recon_streak"])
             ):
                 loop_metrics["guardrail_warnings"] += 1
+                loop_metrics["last_guardrail_streak"] = int(loop_metrics["recon_streak"])
                 soft_warning = ToolResult(
                     "recon-guardrail",
                     "system",
@@ -757,6 +768,7 @@ class RLMEngine:
             for r in results:
                 context.add(f"[depth {depth} step {step}]\n{r.content}")
 
+        self.last_loop_metrics = loop_metrics
         return (
             f"Step budget exhausted at depth {depth} for objective: {objective}\n"
             "Please try with a more specific task, higher step budget, or deeper recursion."
