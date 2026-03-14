@@ -352,27 +352,12 @@ pub fn build_question_reasoning_packet(
                 return None;
             }
 
-            Some(serde_json::json!({
-                "id": question.get("id").and_then(Value::as_str).unwrap_or(question_id),
-                "question": question
-                    .get("question_text")
-                    .and_then(Value::as_str)
-                    .or_else(|| question.get("question").and_then(Value::as_str))
-                    .unwrap_or_default(),
-                "status": status,
-                "priority": question
-                    .get("priority")
-                    .and_then(Value::as_str)
-                    .unwrap_or("medium")
-                    .to_ascii_lowercase(),
-                "claim_ids": id_list(question.get("claim_ids").or_else(|| question.get("claims"))),
-                "evidence_ids": limit_ids(question.get("evidence_ids"), max_evidence_per_item),
-                "triggers": id_list(question.get("trigger").or_else(|| question.get("triggers"))),
-                "updated_at": question
-                    .get("updated_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            }))
+            Some(normalize_unresolved_question(
+                question_id,
+                question,
+                &status,
+                max_evidence_per_item,
+            ))
         })
         .collect();
     unresolved_questions.sort_by(question_priority_sort_key);
@@ -827,6 +812,17 @@ fn question_claim_ids(question: &Map<String, Value>) -> Vec<String> {
     )
 }
 
+fn question_trigger_ids(question: &Map<String, Value>) -> Vec<String> {
+    let origin = question.get("origin").and_then(Value::as_object);
+    id_list(
+        question
+            .get("trigger")
+            .or_else(|| question.get("triggers"))
+            .or_else(|| origin.and_then(|origin| origin.get("trigger")))
+            .or_else(|| origin.and_then(|origin| origin.get("triggers"))),
+    )
+}
+
 fn question_evidence_ids(
     question: &Map<String, Value>,
     max_evidence_per_item: usize,
@@ -840,6 +836,35 @@ fn question_evidence_ids(
         }),
         max_evidence_per_item,
     )
+}
+
+fn normalize_unresolved_question(
+    question_id: &str,
+    question: &Map<String, Value>,
+    status: &str,
+    max_evidence_per_item: usize,
+) -> Value {
+    serde_json::json!({
+        "id": question.get("id").and_then(Value::as_str).unwrap_or(question_id),
+        "question": question
+            .get("question_text")
+            .and_then(Value::as_str)
+            .or_else(|| question.get("question").and_then(Value::as_str))
+            .unwrap_or_default(),
+        "status": status,
+        "priority": question
+            .get("priority")
+            .and_then(Value::as_str)
+            .unwrap_or("medium")
+            .to_ascii_lowercase(),
+        "claim_ids": question_claim_ids(question),
+        "evidence_ids": question_evidence_ids(question, max_evidence_per_item),
+        "triggers": question_trigger_ids(question),
+        "updated_at": question
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    })
 }
 
 fn claim_evidence_ids(
@@ -1766,6 +1791,250 @@ mod tests {
                     .iter()
                     .any(|item| item.get("object_type")
                         == Some(&Value::String("entity".to_string()))))
+        );
+    }
+
+    #[test]
+    fn question_normalization_falls_back_to_origin_claims_and_evidence() {
+        let mut state = InvestigationState::new("sid");
+        state.questions.insert(
+            "q_origin".to_string(),
+            serde_json::json!({
+                "id": "q_origin",
+                "question_text": "Origin-backed question",
+                "status": "open",
+                "priority": "high",
+                "origin": {
+                    "claim_ids": ["cl_origin"],
+                    "evidence_ids": ["ev_origin_1", "ev_origin_2"],
+                },
+            }),
+        );
+        state.claims.insert(
+            "cl_origin".to_string(),
+            serde_json::json!({
+                "id": "cl_origin",
+                "claim_text": "Origin-backed claim",
+                "status": "supported",
+                "support_evidence_ids": ["ev_claim"],
+                "confidence": 0.8,
+            }),
+        );
+        state.evidence.insert(
+            "ev_origin_1".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://origin-question-1.test",
+            }),
+        );
+        state.evidence.insert(
+            "ev_origin_2".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://origin-question-2.test",
+            }),
+        );
+        state.evidence.insert(
+            "ev_claim".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://origin-claim.test",
+            }),
+        );
+
+        let packet = build_question_reasoning_packet(&state, 8, 1);
+        let normalized_question = packet["unresolved_questions"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("normalized question");
+        let question_action = packet["candidate_actions"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("id") == Some(&Value::String("ca_q_q_origin".to_string()))
+                })
+            })
+            .expect("question action");
+
+        assert_eq!(
+            packet["focus_question_ids"],
+            serde_json::json!(["q_origin"])
+        );
+        assert_eq!(
+            normalized_question["claim_ids"],
+            serde_json::json!(["cl_origin"])
+        );
+        assert_eq!(
+            normalized_question["evidence_ids"],
+            serde_json::json!(["ev_origin_1"])
+        );
+        assert_eq!(
+            question_action["target_claim_ids"],
+            serde_json::json!(["cl_origin"])
+        );
+        assert_eq!(
+            question_action["required_inputs"]["evidence_ids"],
+            serde_json::json!(["ev_origin_1", "ev_claim"])
+        );
+        assert!(packet["evidence_index"].get("ev_origin_1").is_some());
+        assert!(packet["evidence_index"].get("ev_claim").is_some());
+        assert!(packet["evidence_index"].get("ev_origin_2").is_none());
+    }
+
+    #[test]
+    fn question_normalization_uses_origin_trigger_aliases() {
+        let mut state = InvestigationState::new("sid");
+        state.questions.insert(
+            "q_origin_trigger".to_string(),
+            serde_json::json!({
+                "id": "q_origin_trigger",
+                "question_text": "Origin trigger question",
+                "status": "open",
+                "priority": "high",
+                "origin": {
+                    "trigger": ["trigger_a"],
+                },
+            }),
+        );
+        state.questions.insert(
+            "q_origin_triggers".to_string(),
+            serde_json::json!({
+                "id": "q_origin_triggers",
+                "question_text": "Origin triggers question",
+                "status": "open",
+                "priority": "medium",
+                "origin": {
+                    "triggers": ["trigger_b", "trigger_c"],
+                },
+            }),
+        );
+
+        let packet = build_question_reasoning_packet(&state, 8, 6);
+        let questions = packet["unresolved_questions"]
+            .as_array()
+            .expect("unresolved questions");
+        let trigger_question = questions
+            .iter()
+            .find(|item| item.get("id") == Some(&Value::String("q_origin_trigger".to_string())))
+            .expect("origin trigger question");
+        let triggers_question = questions
+            .iter()
+            .find(|item| item.get("id") == Some(&Value::String("q_origin_triggers".to_string())))
+            .expect("origin triggers question");
+
+        assert_eq!(
+            trigger_question["triggers"],
+            serde_json::json!(["trigger_a"])
+        );
+        assert_eq!(
+            triggers_question["triggers"],
+            serde_json::json!(["trigger_b", "trigger_c"])
+        );
+    }
+
+    #[test]
+    fn question_normalization_prefers_top_level_values_over_origin() {
+        let mut state = InvestigationState::new("sid");
+        state.questions.insert(
+            "q_override".to_string(),
+            serde_json::json!({
+                "id": "q_override",
+                "question_text": "Override question",
+                "status": "open",
+                "priority": "high",
+                "claim_ids": ["cl_top"],
+                "evidence_ids": ["ev_top"],
+                "trigger": ["trigger_top"],
+                "origin": {
+                    "claim_ids": ["cl_origin"],
+                    "evidence_ids": ["ev_origin"],
+                    "trigger": ["trigger_origin"],
+                    "triggers": ["trigger_origin_fallback"],
+                },
+            }),
+        );
+        state.claims.insert(
+            "cl_top".to_string(),
+            serde_json::json!({
+                "id": "cl_top",
+                "claim_text": "Top-level claim",
+                "status": "supported",
+                "support_evidence_ids": ["ev_claim_top"],
+                "confidence": 0.9,
+            }),
+        );
+        state.claims.insert(
+            "cl_origin".to_string(),
+            serde_json::json!({
+                "id": "cl_origin",
+                "claim_text": "Origin claim",
+                "status": "supported",
+                "support_evidence_ids": ["ev_claim_origin"],
+                "confidence": 0.9,
+            }),
+        );
+        state.evidence.insert(
+            "ev_top".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://top-level-question.test",
+            }),
+        );
+        state.evidence.insert(
+            "ev_claim_top".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://top-level-claim.test",
+            }),
+        );
+        state.evidence.insert(
+            "ev_claim_origin".to_string(),
+            serde_json::json!({
+                "evidence_type": "doc",
+                "source_uri": "https://origin-claim.test",
+            }),
+        );
+
+        let packet = build_question_reasoning_packet(&state, 8, 6);
+        let normalized_question = packet["unresolved_questions"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("normalized question");
+        let question_action = packet["candidate_actions"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("id") == Some(&Value::String("ca_q_q_override".to_string()))
+                })
+            })
+            .expect("question action");
+
+        assert_eq!(
+            normalized_question["claim_ids"],
+            serde_json::json!(["cl_top"])
+        );
+        assert_eq!(
+            normalized_question["evidence_ids"],
+            serde_json::json!(["ev_top"])
+        );
+        assert_eq!(
+            normalized_question["triggers"],
+            serde_json::json!(["trigger_top"])
+        );
+        assert_eq!(
+            question_action["target_claim_ids"],
+            serde_json::json!(["cl_top"])
+        );
+        assert_eq!(
+            question_action["required_inputs"]["evidence_ids"],
+            serde_json::json!(["ev_top", "ev_claim_top"])
+        );
+        assert_eq!(
+            question_action["required_sources"],
+            serde_json::json!([
+                "https://top-level-claim.test",
+                "https://top-level-question.test"
+            ])
         );
     }
 
