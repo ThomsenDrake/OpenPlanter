@@ -1040,6 +1040,20 @@ event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":12}}\n\n\
 event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
+const ANTHROPIC_SSE_TWO_TOOL_LIST: &str = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_loop_multi\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":60}}}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me inspect that twice.\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_loop_multi_1\",\"name\":\"list_files\",\"input\":{}}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_loop_multi_2\",\"name\":\"list_files\",\"input\":{}}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":18}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
 /// SSE body for the follow-up Anthropic response (final text answer after tool result).
 const ANTHROPIC_SSE_FINAL_ANSWER: &str = "\
 event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_loop2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":80}}}\n\n\
@@ -1047,6 +1061,14 @@ event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,
 event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I found the files. Here is the answer.\"}}\n\n\
 event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":10}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+const ANTHROPIC_SSE_CURATOR_NOOP: &str = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_curator_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":20}}}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"No wiki updates needed\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n\
 event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 /// Start a stateful mock server that returns different SSE bodies on successive calls.
@@ -1266,6 +1288,351 @@ async fn test_solve_multi_step_agentic_loop() {
         errors.is_empty(),
         "should not have any errors, got: {:?}",
         errors
+    );
+}
+
+#[tokio::test]
+async fn test_solve_flushes_final_curator_checkpoint_before_complete() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::LoopMetrics;
+
+    let addr = start_stateful_mock_server(vec![
+        ANTHROPIC_SSE_TOOL_LIST,
+        ANTHROPIC_SSE_FINAL_ANSWER,
+        ANTHROPIC_SSE_CURATOR_NOOP,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev {
+        Trace(String),
+        Complete(String),
+        Error(String),
+    }
+
+    struct TestEmitter {
+        events: Arc<Mutex<Vec<Ev>>>,
+    }
+
+    impl SolveEmitter for TestEmitter {
+        fn emit_trace(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+
+        fn emit_complete(&self, result: &str, _: Option<LoopMetrics>) {
+            self.events.lock().unwrap().push(Ev::Complete(result.to_string()));
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter {
+        events: events.clone(),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    solve(
+        "List the files in this directory",
+        &cfg,
+        &emitter,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let recorded = events.lock().unwrap().clone();
+    let finalize_trace = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Trace(message) if message.contains("checkpoint at finalize")))
+        .expect("expected finalize curator trace");
+    let complete = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Complete(_)))
+        .expect("expected complete event");
+    assert!(
+        finalize_trace < complete,
+        "finalize checkpoint should be flushed before complete: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_flushes_cancelled_checkpoint_before_error() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::{LoopMetrics, StepEvent};
+
+    let addr =
+        start_stateful_mock_server(vec![ANTHROPIC_SSE_TOOL_LIST, ANTHROPIC_SSE_CURATOR_NOOP]).await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev {
+        Trace(String),
+        Error(String),
+    }
+
+    struct TestEmitter {
+        events: Arc<Mutex<Vec<Ev>>>,
+        cancel: CancellationToken,
+    }
+
+    impl SolveEmitter for TestEmitter {
+        fn emit_trace(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, event: StepEvent) {
+            if !event.is_final {
+                self.cancel.cancel();
+            }
+        }
+
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+
+        fn emit_error(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let cancel = CancellationToken::new();
+    let emitter = TestEmitter {
+        events: events.clone(),
+        cancel: cancel.clone(),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    solve("List the files in this directory", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    let cancelled_trace = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Trace(message) if message.contains("checkpoint at cancelled")))
+        .expect("expected cancelled curator trace");
+    let error = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Error(message) if message == "Cancelled"))
+        .expect("expected cancelled error");
+    assert!(
+        cancelled_trace < error,
+        "cancelled checkpoint should flush before error: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_flushes_model_error_checkpoint_before_error() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::LoopMetrics;
+
+    let addr = start_stateful_http_server(vec![
+        MockHttpResponse {
+            status: 200,
+            content_type: "text/event-stream",
+            body: ANTHROPIC_SSE_TOOL_LIST,
+            headers: vec![("cache-control", "no-cache")],
+        },
+        MockHttpResponse {
+            status: 500,
+            content_type: "application/json",
+            body: "{\"error\":{\"message\":\"boom\"}}",
+            headers: vec![],
+        },
+        MockHttpResponse {
+            status: 200,
+            content_type: "text/event-stream",
+            body: ANTHROPIC_SSE_CURATOR_NOOP,
+            headers: vec![("cache-control", "no-cache")],
+        },
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev {
+        Trace(String),
+        Error(String),
+    }
+
+    struct TestEmitter {
+        events: Arc<Mutex<Vec<Ev>>>,
+    }
+
+    impl SolveEmitter for TestEmitter {
+        fn emit_trace(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+
+        fn emit_error(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter {
+        events: events.clone(),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    solve(
+        "List the files in this directory",
+        &cfg,
+        &emitter,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let recorded = events.lock().unwrap().clone();
+    let model_error_trace = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Trace(message) if message.contains("checkpoint at model_error")))
+        .expect("expected model_error curator trace");
+    let error = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Error(_)))
+        .expect("expected error event");
+    assert!(
+        model_error_trace < error,
+        "model_error checkpoint should flush before error: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_flushes_tool_loop_cancel_checkpoint_before_error() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::LoopMetrics;
+
+    let addr = start_stateful_mock_server(vec![
+        ANTHROPIC_SSE_TOOL_LIST,
+        ANTHROPIC_SSE_TWO_TOOL_LIST,
+        ANTHROPIC_SSE_CURATOR_NOOP,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev {
+        Trace(String),
+        Error(String),
+    }
+
+    struct TestEmitter {
+        events: Arc<Mutex<Vec<Ev>>>,
+        cancel: CancellationToken,
+        tool_exec_traces: Arc<Mutex<u32>>,
+    }
+
+    impl SolveEmitter for TestEmitter {
+        fn emit_trace(&self, message: &str) {
+            if message.contains("Executing tool: list_files") {
+                let mut count = self.tool_exec_traces.lock().unwrap();
+                *count += 1;
+                if *count == 2 {
+                    self.cancel.cancel();
+                }
+            }
+            self.events.lock().unwrap().push(Ev::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+
+        fn emit_error(&self, message: &str) {
+            self.events.lock().unwrap().push(Ev::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let cancel = CancellationToken::new();
+    let emitter = TestEmitter {
+        events: events.clone(),
+        cancel: cancel.clone(),
+        tool_exec_traces: Arc::new(Mutex::new(0)),
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    solve("List the files in this directory", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    let cancelled_trace = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Trace(message) if message.contains("checkpoint at cancelled")))
+        .expect("expected cancelled curator trace");
+    let error = recorded
+        .iter()
+        .position(|event| matches!(event, Ev::Error(message) if message == "Cancelled"))
+        .expect("expected cancelled error");
+    assert!(
+        cancelled_trace < error,
+        "tool-loop cancel checkpoint should flush before error: {recorded:?}"
     );
 }
 

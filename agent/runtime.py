@@ -4,7 +4,7 @@ import json
 import re
 import secrets
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -58,6 +58,7 @@ def _has_reasoning_content(packet: dict[str, Any]) -> bool:
 class SessionStore:
     workspace: Path
     session_root_dir: str = ".openplanter"
+    _warnings: list[str] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.expanduser().resolve()
@@ -158,16 +159,37 @@ class SessionStore:
         state = self.load_state(sid)
         return sid, state, created_new
 
+    def _warn(self, message: str) -> None:
+        self._warnings.append(message)
+
+    def drain_warnings(self) -> list[str]:
+        warnings = list(self._warnings)
+        self._warnings.clear()
+        return warnings
+
+    def _try_load_investigation_state(
+        self,
+        investigation_path: Path,
+        *,
+        on_invalid: str,
+    ) -> dict[str, Any] | None:
+        try:
+            return load_investigation_state(investigation_path)
+        except json.JSONDecodeError:
+            self._warn(
+                f"Session investigation state is invalid JSON: {investigation_path}; {on_invalid}."
+            )
+            return None
+
     def load_state(self, session_id: str) -> dict[str, Any]:
         investigation_path = self._investigation_state_path(session_id)
         if investigation_path.exists():
-            try:
-                typed_state = load_investigation_state(investigation_path)
-            except json.JSONDecodeError as exc:
-                raise SessionError(
-                    f"Session investigation state is invalid JSON: {investigation_path}"
-                ) from exc
-            return state_to_legacy_projection(typed_state, session_id=session_id)
+            typed_state = self._try_load_investigation_state(
+                investigation_path,
+                on_invalid="falling back to legacy state",
+            )
+            if typed_state is not None:
+                return state_to_legacy_projection(typed_state, session_id=session_id)
 
         state_path = self._state_path(session_id)
         if not state_path.exists():
@@ -187,12 +209,12 @@ class SessionStore:
     def load_typed_state(self, session_id: str) -> dict[str, Any]:
         investigation_path = self._investigation_state_path(session_id)
         if investigation_path.exists():
-            try:
-                return load_investigation_state(investigation_path)
-            except json.JSONDecodeError as exc:
-                raise SessionError(
-                    f"Session investigation state is invalid JSON: {investigation_path}"
-                ) from exc
+            typed_state = self._try_load_investigation_state(
+                investigation_path,
+                on_invalid="continuing without typed reasoning state",
+            )
+            if typed_state is not None:
+                return typed_state
 
         state_path = self._state_path(session_id)
         if not state_path.exists():
@@ -212,12 +234,13 @@ class SessionStore:
 
         investigation_path = self._investigation_state_path(session_id)
         if investigation_path.exists():
-            try:
-                typed_state = load_investigation_state(investigation_path)
-            except json.JSONDecodeError as exc:
-                raise SessionError(
-                    f"Session investigation state is invalid JSON: {investigation_path}"
-                ) from exc
+            typed_state = self._try_load_investigation_state(
+                investigation_path,
+                on_invalid="preserving the corrupt typed state file and writing legacy state only",
+            )
+            if typed_state is None:
+                self._touch_metadata(session_id)
+                return
         else:
             typed_state = migrate_legacy_state(session_id=session_id, legacy_state=normalized_legacy)
 
@@ -323,6 +346,20 @@ class SessionRuntime:
     max_turn_summaries: int = 50
     loop_metrics: dict[str, Any] | None = None
 
+    def _flush_store_warnings(self, emit: EventCallback | None = None) -> None:
+        for message in self.store.drain_warnings():
+            if emit is not None:
+                emit(message)
+                continue
+            try:
+                self.store.append_event(
+                    self.session_id,
+                    "trace",
+                    {"message": message},
+                )
+            except OSError:
+                pass
+
     @classmethod
     def bootstrap(
         cls,
@@ -391,10 +428,12 @@ class SessionRuntime:
             )
         except OSError:
             pass
+        runtime._flush_store_warnings()
         try:
             runtime._persist_state()
         except OSError:
             pass
+        runtime._flush_store_warnings()
         return runtime
 
     def solve(
@@ -471,6 +510,7 @@ class SessionRuntime:
         replay_seq_start = replay_logger.current_seq
 
         typed_state = self.store.load_typed_state(self.session_id)
+        self._flush_store_warnings(_on_event)
         question_reasoning_packet = build_question_reasoning_packet(typed_state)
         if not _has_reasoning_content(question_reasoning_packet):
             question_reasoning_packet = None
@@ -545,6 +585,7 @@ class SessionRuntime:
             self._persist_state()
         except OSError:
             pass
+        self._flush_store_warnings(_on_event)
         return result
 
     def _persist_state(self) -> None:

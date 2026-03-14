@@ -102,6 +102,18 @@ async fn emit_curator_checkpoint(
     }
 }
 
+async fn flush_pending_curator_checkpoint(
+    pending_deltas: &mut Vec<CuratorStateDelta>,
+    boundary: &str,
+    config: &AgentConfig,
+    emitter: &dyn SolveEmitter,
+) {
+    if let Some(checkpoint) = take_pending_curator_checkpoint(pending_deltas, boundary) {
+        let checkpoint_cancel = CancellationToken::new();
+        emit_curator_checkpoint(checkpoint, config, &checkpoint_cancel, emitter).await;
+    }
+}
+
 // Abstraction for emitting solve events.
 //
 // Implemented by TauriEmitter (op-tauri) for real event emission
@@ -576,8 +588,15 @@ pub async fn solve_with_initial_context(
     // 4. Agentic loop
     for step in 1..=max_steps {
         if cancel.is_cancelled() {
-            emitter.emit_error("Cancelled");
             tools.cleanup();
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "cancelled",
+                config,
+                emitter,
+            )
+            .await;
+            emitter.emit_error("Cancelled");
             return;
         }
 
@@ -603,6 +622,17 @@ pub async fn solve_with_initial_context(
             Err(e) => {
                 let msg = e.to_string();
                 tools.cleanup();
+                flush_pending_curator_checkpoint(
+                    &mut pending_curator_deltas,
+                    if msg == "Cancelled" {
+                        "cancelled"
+                    } else {
+                        "model_error"
+                    },
+                    config,
+                    emitter,
+                )
+                .await;
                 if msg == "Cancelled" {
                     emitter.emit_error("Cancelled");
                 } else {
@@ -664,12 +694,14 @@ pub async fn solve_with_initial_context(
                 loop_phase: Some(phase),
                 loop_metrics: Some(loop_metrics.clone()),
             });
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "finalize",
+                config,
+                emitter,
+            )
+            .await;
             emitter.emit_complete(&turn.text, Some(loop_metrics.clone()));
-            if let Some(checkpoint) =
-                take_pending_curator_checkpoint(&mut pending_curator_deltas, "finalize")
-            {
-                emit_curator_checkpoint(checkpoint, config, &cancel, emitter).await;
-            }
             tools.cleanup();
             return;
         }
@@ -680,8 +712,15 @@ pub async fn solve_with_initial_context(
         let mut tool_observations: Vec<(String, String, String, String, bool)> = Vec::new();
         for tc in &turn.tool_calls {
             if cancel.is_cancelled() {
-                emitter.emit_error("Cancelled");
                 tools.cleanup();
+                flush_pending_curator_checkpoint(
+                    &mut pending_curator_deltas,
+                    "cancelled",
+                    config,
+                    emitter,
+                )
+                .await;
+                emitter.emit_error("Cancelled");
                 return;
             }
 
@@ -780,11 +819,13 @@ pub async fn solve_with_initial_context(
 
     // Budget exhausted
     tools.cleanup();
-    if let Some(checkpoint) =
-        take_pending_curator_checkpoint(&mut pending_curator_deltas, "budget_exhausted")
-    {
-        emit_curator_checkpoint(checkpoint, config, &cancel, emitter).await;
-    }
+    flush_pending_curator_checkpoint(
+        &mut pending_curator_deltas,
+        "budget_exhausted",
+        config,
+        emitter,
+    )
+    .await;
     emitter.emit_error(&format!(
         "Step budget exhausted after {max_steps} steps. \
          The model did not produce a final answer within the allowed steps."
