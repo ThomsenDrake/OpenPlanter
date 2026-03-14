@@ -194,6 +194,10 @@ mod tests {
             .question_reasoning_packet
             .expect("packet should be present");
         assert_eq!(packet["focus_question_ids"], serde_json::json!(["q_1"]));
+        assert_eq!(
+            packet["candidate_actions"][0]["id"],
+            serde_json::json!("ca_q_q_1")
+        );
         assert_eq!(context.session_id, Some("sid".to_string()));
         assert_eq!(context.session_dir, Some(tmp.path().display().to_string()));
     }

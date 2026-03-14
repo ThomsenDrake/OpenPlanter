@@ -9,7 +9,7 @@ from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
 from agent.model import ModelTurn, ScriptedModel
-from agent.runtime import SessionRuntime
+from agent.runtime import SessionRuntime, _has_reasoning_content
 from agent.tools import WorkspaceTools
 
 
@@ -127,6 +127,19 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertEqual(packet["reasoning_mode"], "question_centric")
             self.assertEqual(packet["focus_question_ids"], ["q_1"])
             self.assertEqual(packet["findings"]["unresolved"][0]["id"], "cl_1")
+            self.assertEqual(packet["candidate_actions"][0]["id"], "ca_q_q_1")
+            self.assertEqual(packet["candidate_actions"][1]["id"], "ca_c_cl_1")
+            self.assertEqual(packet["candidate_actions"][1]["required_sources"], ["https://example.test"])
+
+    def test_runtime_reasoning_gate_accepts_candidate_actions_only(self) -> None:
+        packet = {
+            "focus_question_ids": [],
+            "findings": {"supported": [], "contested": [], "unresolved": []},
+            "contradictions": [],
+            "candidate_actions": [{"id": "ca_q_q_1"}],
+        }
+
+        self.assertTrue(_has_reasoning_content(packet))
 
     def test_runtime_resume_falls_back_to_legacy_state_when_typed_state_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

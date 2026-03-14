@@ -397,7 +397,12 @@ Run this loop until step budget is low or high-priority questions are resolved:
 
 Rules:
 - Ground reasoning in typed state references, not raw transcript quotes. Prefer
-  question IDs, claim IDs, evidence IDs, and provenance IDs.
+  question IDs, claim IDs, evidence IDs, provenance IDs, and candidate action IDs.
+- Treat question_reasoning_packet.candidate_actions as machine-readable, read-only
+  planner suggestions. Use them to prioritize next steps, but do not assume they
+  were persisted as canonical tasks/actions.
+- Prefer the highest-priority, highest-payoff candidate actions when choosing what
+  to do next.
 - Do not mark a claim supported without support evidence IDs.
 - Do not resolve a question without explicit claim/evidence linkage.
 - Prefer provenance-backed evidence over uncited notes.

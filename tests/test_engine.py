@@ -269,6 +269,8 @@ class REPLPromptTests(unittest.TestCase):
         self.assertIn("QUESTION-CENTRIC REASONING", prompt)
         self.assertIn("supported / contested / unresolved", prompt)
         self.assertIn("Supported Findings", prompt)
+        self.assertIn("candidate_actions", prompt)
+        self.assertIn("machine-readable, read-only", prompt)
 
     def test_recursive_initial_message_has_repl_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -341,6 +343,14 @@ class REPLPromptTests(unittest.TestCase):
                 "findings": {"supported": [], "contested": [], "unresolved": []},
                 "contradictions": [],
                 "evidence_index": {},
+                "candidate_actions": [
+                    {
+                        "id": "ca_q_q_1",
+                        "action_type": "search",
+                        "status": "proposed",
+                        "priority": "high",
+                    }
+                ],
             }
 
             engine.solve_with_context("test objective", question_reasoning_packet=packet)

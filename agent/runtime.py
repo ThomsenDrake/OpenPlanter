@@ -49,6 +49,8 @@ def _has_reasoning_content(packet: dict[str, Any]) -> bool:
         return True
     if packet.get("contradictions"):
         return True
+    if packet.get("candidate_actions"):
+        return True
     if not isinstance(findings, dict):
         return False
     return any(findings.get(key) for key in ("supported", "contested", "unresolved"))

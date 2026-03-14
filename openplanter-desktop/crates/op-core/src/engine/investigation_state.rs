@@ -6,6 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 const SCHEMA_VERSION: &str = "1.0.0";
 const ONTOLOGY_NAMESPACE: &str = "openplanter.core";
 const ONTOLOGY_VERSION: &str = "2026-03";
+const LOW_CONFIDENCE_THRESHOLD: f64 = 0.60;
+const VERY_LOW_CONFIDENCE_THRESHOLD: f64 = 0.40;
+const MAX_CANDIDATE_ACTIONS: usize = 24;
+const REQUIRED_EVIDENCE_COUNT: usize = 1;
+const PLANNER_GENERATED_BY: &str = "question_reasoning_packet.v1";
 const LEGACY_KNOWN_KEYS: &[&str] = &[
     "session_id",
     "saved_at",
@@ -372,6 +377,14 @@ pub fn build_question_reasoning_packet(
         .collect();
     unresolved_questions.sort_by(question_priority_sort_key);
     unresolved_questions.truncate(std::cmp::max(1, max_questions));
+    let focus_question_ids = unresolved_questions
+        .iter()
+        .filter_map(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
 
     let mut supported = Vec::new();
     let mut contested = Vec::new();
@@ -452,6 +465,12 @@ pub fn build_question_reasoning_packet(
             }),
         );
     }
+    let candidate_actions = build_candidate_actions(
+        state,
+        &unresolved_questions,
+        &focus_question_ids,
+        max_evidence_per_item,
+    );
 
     serde_json::json!({
         "reasoning_mode": "question_centric",
@@ -462,10 +481,7 @@ pub fn build_question_reasoning_packet(
             "record_contradictions",
             "synthesize_supported_contested_unresolved",
         ],
-        "focus_question_ids": unresolved_questions
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(ToString::to_string))
-            .collect::<Vec<_>>(),
+        "focus_question_ids": focus_question_ids,
         "unresolved_questions": unresolved_questions,
         "findings": {
             "supported": supported,
@@ -474,6 +490,7 @@ pub fn build_question_reasoning_packet(
         },
         "contradictions": contradictions,
         "evidence_index": evidence_index,
+        "candidate_actions": candidate_actions,
     })
 }
 
@@ -481,6 +498,13 @@ pub fn has_reasoning_content(packet: &Value) -> bool {
     let Some(obj) = packet.as_object() else {
         return false;
     };
+    if obj
+        .get("candidate_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return true;
+    }
     if obj
         .get("focus_question_ids")
         .and_then(Value::as_array)
@@ -505,6 +529,857 @@ pub fn has_reasoning_content(packet: &Value) -> bool {
                     .is_some_and(|items| !items.is_empty())
             })
         })
+}
+
+fn build_candidate_actions(
+    state: &InvestigationState,
+    focus_questions: &[Value],
+    focus_question_ids: &[String],
+    max_evidence_per_item: usize,
+) -> Vec<Value> {
+    let mut actions = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for question in focus_questions {
+        let Some(question_obj) = question.as_object() else {
+            continue;
+        };
+        let question_id = question_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if question_id.is_empty() {
+            continue;
+        }
+        let question_record = find_question_record(state, question_id).unwrap_or(question_obj);
+        let claim_ids = question_claim_ids(question_obj);
+        let question_evidence_ids = question_evidence_ids(question_obj, max_evidence_per_item);
+        let linked_claim_evidence_ids = claim_ids
+            .iter()
+            .flat_map(|claim_id| claim_evidence_ids(state, claim_id, max_evidence_per_item))
+            .collect::<Vec<_>>();
+        let evidence_ids = dedupe_strings(
+            question_evidence_ids
+                .iter()
+                .chain(linked_claim_evidence_ids.iter())
+                .cloned()
+                .collect(),
+        );
+        let entity_ids = question_entity_ids(state, question_record, &claim_ids, &evidence_ids);
+        let mut reason_codes = vec!["question_unresolved".to_string()];
+        for claim_id in &claim_ids {
+            for code in claim_reason_codes(state, claim_id) {
+                if !reason_codes.contains(&code) {
+                    reason_codes.push(code);
+                }
+            }
+        }
+        let evidence_gap_refs = build_question_gap_refs(
+            state,
+            question_id,
+            question_record,
+            &claim_ids,
+            &question_evidence_ids,
+            max_evidence_per_item,
+        );
+        let dependency_refs = gap_ids(&evidence_gap_refs);
+        let ontology_object_refs = build_ontology_object_refs(
+            state,
+            Some(question_id),
+            &claim_ids,
+            &evidence_ids,
+            &entity_ids,
+            &dependency_refs,
+        );
+        let mut source_records = vec![question_record];
+        for claim_id in &claim_ids {
+            let Some(claim) = state.claims.get(claim_id).and_then(Value::as_object) else {
+                continue;
+            };
+            source_records.push(claim);
+        }
+        let required_sources = collect_required_sources(state, &source_records, &evidence_ids);
+        let action_type = if claim_ids.is_empty() {
+            "search"
+        } else {
+            "verify_claim"
+        };
+        let priority = normalize_priority(
+            question_obj
+                .get("priority")
+                .and_then(Value::as_str)
+                .unwrap_or("medium"),
+        );
+        let action_id = format!("ca_q_{question_id}");
+        if seen.insert(action_id.clone()) {
+            actions.push(serde_json::json!({
+                "id": action_id,
+                "action_type": action_type,
+                "status": "proposed",
+                "priority": priority,
+                "title": format!("Resolve question {question_id}"),
+                "description": format!("Advance question {question_id} using discriminating evidence tied to canonical state refs."),
+                "opened_by_question_id": question_id,
+                "target_question_ids": [question_id],
+                "target_claim_ids": claim_ids,
+                "reason_codes": reason_codes.clone(),
+                "rationale": {
+                    "summary": "question_unresolved",
+                    "reason_codes": reason_codes,
+                    "blocking_gap_ids": dependency_refs,
+                },
+                "required_sources": required_sources,
+                "required_inputs": {
+                    "question_ids": [question_id],
+                    "claim_ids": claim_ids,
+                    "evidence_ids": evidence_ids,
+                    "entity_ids": entity_ids,
+                    "external_dependencies": Vec::<String>::new(),
+                },
+                "expected_payoff": payoff_for_priority(priority, action_type),
+                "suggested_tools": suggested_tools(action_type),
+                "evidence_gap_refs": evidence_gap_refs,
+                "ontology_object_refs": ontology_object_refs,
+                "generated_by": PLANNER_GENERATED_BY,
+            }));
+        }
+    }
+
+    for (claim_id, raw_claim) in &state.claims {
+        let Some(claim) = raw_claim.as_object() else {
+            continue;
+        };
+        let claim_status = claim_status(claim);
+        if claim_status == "retracted" {
+            continue;
+        }
+        let confidence = claim_confidence(claim);
+        let reason_codes = claim_reason_codes(state, claim_id);
+        if reason_codes.is_empty() {
+            continue;
+        }
+        let evidence_ids = claim_evidence_ids(state, claim_id, max_evidence_per_item);
+        let entity_ids = claim_entity_ids(state, claim, &evidence_ids);
+        let evidence_gap_refs = build_claim_gap_refs(
+            state,
+            claim_id,
+            &claim_status,
+            confidence,
+            &evidence_ids,
+            max_evidence_per_item,
+        );
+        let dependency_refs = gap_ids(&evidence_gap_refs);
+        let opened_by_question_id = focus_questions
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|question| {
+                question_claim_ids(question)
+                    .iter()
+                    .any(|candidate| candidate == claim_id)
+            })
+            .and_then(|question| question.get("id").and_then(Value::as_str))
+            .map(ToString::to_string);
+        let target_question_ids = opened_by_question_id
+            .clone()
+            .into_iter()
+            .filter(|question_id| {
+                focus_question_ids
+                    .iter()
+                    .any(|candidate| candidate == question_id)
+            })
+            .collect::<Vec<_>>();
+        let ontology_object_refs = build_ontology_object_refs(
+            state,
+            opened_by_question_id.as_deref(),
+            &[claim_id.clone()],
+            &evidence_ids,
+            &entity_ids,
+            &dependency_refs,
+        );
+        let mut source_records = vec![claim];
+        if let Some(question_id) = opened_by_question_id.as_deref() {
+            if let Some(question) = find_question_record(state, question_id) {
+                source_records.push(question);
+            }
+        }
+        let required_sources = collect_required_sources(state, &source_records, &evidence_ids);
+        let priority = claim_candidate_priority(&claim_status, confidence);
+        let action_id = format!("ca_c_{claim_id}");
+        if seen.insert(action_id.clone()) {
+            actions.push(serde_json::json!({
+                "id": action_id,
+                "action_type": "verify_claim",
+                "status": "proposed",
+                "priority": priority,
+                "title": format!("Verify claim {claim_id}"),
+                "description": format!("Raise confidence for claim {claim_id} with additional cited evidence and contradiction tracking."),
+                "opened_by_question_id": opened_by_question_id,
+                "target_question_ids": target_question_ids,
+                "target_claim_ids": [claim_id],
+                "reason_codes": reason_codes.clone(),
+                "rationale": {
+                    "summary": "claim_requires_verification",
+                    "reason_codes": reason_codes,
+                    "blocking_gap_ids": dependency_refs,
+                },
+                "required_sources": required_sources,
+                "required_inputs": {
+                    "question_ids": target_question_ids,
+                    "claim_ids": [claim_id],
+                    "evidence_ids": evidence_ids,
+                    "entity_ids": entity_ids,
+                    "external_dependencies": Vec::<String>::new(),
+                },
+                "expected_payoff": payoff_for_priority(priority, "verify_claim"),
+                "suggested_tools": suggested_tools("verify_claim"),
+                "evidence_gap_refs": evidence_gap_refs,
+                "ontology_object_refs": ontology_object_refs,
+                "generated_by": PLANNER_GENERATED_BY,
+            }));
+        }
+    }
+
+    actions.sort_by(candidate_action_sort_key);
+    actions.truncate(MAX_CANDIDATE_ACTIONS);
+    actions
+}
+
+fn candidate_action_sort_key(left: &Value, right: &Value) -> std::cmp::Ordering {
+    let left_priority = question_priority_rank(left.get("priority").and_then(Value::as_str));
+    let right_priority = question_priority_rank(right.get("priority").and_then(Value::as_str));
+    left_priority
+        .cmp(&right_priority)
+        .then_with(|| candidate_action_origin_rank(left).cmp(&candidate_action_origin_rank(right)))
+        .then_with(|| {
+            left.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(right.get("id").and_then(Value::as_str).unwrap_or_default())
+        })
+}
+
+fn candidate_action_origin_rank(action: &Value) -> u8 {
+    match action
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .starts_with("ca_q_")
+    {
+        true => 0,
+        false => 1,
+    }
+}
+
+fn normalize_priority(priority: &str) -> &'static str {
+    match priority.to_ascii_lowercase().as_str() {
+        "critical" => "critical",
+        "high" => "high",
+        "medium" => "medium",
+        "low" => "low",
+        _ => "medium",
+    }
+}
+
+fn claim_candidate_priority(claim_status: &str, confidence: Option<f64>) -> &'static str {
+    if matches!(claim_status, "unresolved" | "proposed") {
+        "high"
+    } else if confidence.is_some_and(|value| value <= VERY_LOW_CONFIDENCE_THRESHOLD) {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
+fn claim_status(claim: &Map<String, Value>) -> String {
+    claim
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unresolved")
+        .to_ascii_lowercase()
+}
+
+fn claim_confidence(claim: &Map<String, Value>) -> Option<f64> {
+    parse_confidence(
+        claim
+            .get("confidence")
+            .or_else(|| claim.get("confidence_score")),
+    )
+}
+
+fn find_question_record<'a>(
+    state: &'a InvestigationState,
+    question_id: &str,
+) -> Option<&'a Map<String, Value>> {
+    state
+        .questions
+        .get(question_id)
+        .and_then(Value::as_object)
+        .or_else(|| {
+            state
+                .questions
+                .values()
+                .filter_map(Value::as_object)
+                .find(|record| record.get("id").and_then(Value::as_str) == Some(question_id))
+        })
+}
+
+fn question_claim_ids(question: &Map<String, Value>) -> Vec<String> {
+    id_list(
+        question
+            .get("claim_ids")
+            .or_else(|| question.get("claims"))
+            .or_else(|| {
+                question
+                    .get("origin")
+                    .and_then(Value::as_object)
+                    .and_then(|origin| origin.get("claim_ids"))
+            }),
+    )
+}
+
+fn question_evidence_ids(
+    question: &Map<String, Value>,
+    max_evidence_per_item: usize,
+) -> Vec<String> {
+    limit_ids(
+        question.get("evidence_ids").or_else(|| {
+            question
+                .get("origin")
+                .and_then(Value::as_object)
+                .and_then(|origin| origin.get("evidence_ids"))
+        }),
+        max_evidence_per_item,
+    )
+}
+
+fn claim_evidence_ids(
+    state: &InvestigationState,
+    claim_id: &str,
+    max_evidence_per_item: usize,
+) -> Vec<String> {
+    let Some(claim) = state.claims.get(claim_id).and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    dedupe_strings(
+        limit_ids(
+            claim
+                .get("support_evidence_ids")
+                .or_else(|| claim.get("evidence_support_ids"))
+                .or_else(|| claim.get("evidence_ids")),
+            max_evidence_per_item,
+        )
+        .into_iter()
+        .chain(limit_ids(
+            claim
+                .get("contradiction_evidence_ids")
+                .or_else(|| claim.get("evidence_contra_ids"))
+                .or_else(|| claim.get("contradict_evidence_ids")),
+            max_evidence_per_item,
+        ))
+        .collect(),
+    )
+}
+
+fn claim_reason_codes(state: &InvestigationState, claim_id: &str) -> Vec<String> {
+    let Some(claim) = state.claims.get(claim_id).and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let claim_status = claim_status(claim);
+    let confidence = claim_confidence(claim);
+    let mut reason_codes = Vec::new();
+    if matches!(claim_status.as_str(), "unresolved" | "proposed") {
+        reason_codes.push("claim_unresolved".to_string());
+    }
+    if confidence.is_none() {
+        reason_codes.push("claim_missing_confidence".to_string());
+    } else if confidence.is_some_and(|value| value < LOW_CONFIDENCE_THRESHOLD) {
+        reason_codes.push("claim_low_confidence".to_string());
+    }
+    reason_codes
+}
+
+fn build_question_gap_refs(
+    state: &InvestigationState,
+    question_id: &str,
+    question: &Map<String, Value>,
+    claim_ids: &[String],
+    question_evidence_ids: &[String],
+    max_evidence_per_item: usize,
+) -> Vec<Value> {
+    let mut refs = Vec::new();
+    if question_evidence_ids.is_empty() {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:question:{question_id}:missing_evidence"),
+            "kind": "missing_evidence",
+            "scope": "question",
+            "question_id": question_id,
+            "claim_id": Value::Null,
+            "current_evidence_ids": [],
+            "current_evidence_count": 0,
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    }
+    let related_entity_ids = id_list(question.get("related_entity_ids"));
+    if !related_entity_ids.is_empty() && question_evidence_ids.is_empty() {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:question:{question_id}:missing_entity_evidence"),
+            "kind": "missing_evidence",
+            "scope": "question",
+            "question_id": question_id,
+            "claim_id": Value::Null,
+            "current_evidence_ids": question_evidence_ids,
+            "current_evidence_count": question_evidence_ids.len(),
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    }
+    for claim_id in claim_ids {
+        refs.extend(build_claim_gap_refs(
+            state,
+            claim_id,
+            &state
+                .claims
+                .get(claim_id)
+                .and_then(Value::as_object)
+                .map(claim_status)
+                .unwrap_or_else(|| "unresolved".to_string()),
+            state
+                .claims
+                .get(claim_id)
+                .and_then(Value::as_object)
+                .and_then(claim_confidence),
+            &claim_evidence_ids(state, claim_id, max_evidence_per_item),
+            max_evidence_per_item,
+        ));
+    }
+    dedupe_objects_by_id(refs, "gap_id")
+}
+
+fn build_claim_gap_refs(
+    state: &InvestigationState,
+    claim_id: &str,
+    claim_status: &str,
+    confidence: Option<f64>,
+    evidence_ids: &[String],
+    max_evidence_per_item: usize,
+) -> Vec<Value> {
+    let Some(claim) = state.claims.get(claim_id).and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let support_ids = limit_ids(
+        claim
+            .get("support_evidence_ids")
+            .or_else(|| claim.get("evidence_support_ids"))
+            .or_else(|| claim.get("evidence_ids")),
+        max_evidence_per_item,
+    );
+    let contradiction_ids = limit_ids(
+        claim
+            .get("contradiction_evidence_ids")
+            .or_else(|| claim.get("evidence_contra_ids"))
+            .or_else(|| claim.get("contradict_evidence_ids")),
+        max_evidence_per_item,
+    );
+    let mut refs = Vec::new();
+    if evidence_ids.is_empty() {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:claim:{claim_id}:missing_evidence"),
+            "kind": "missing_evidence",
+            "scope": "claim",
+            "question_id": Value::Null,
+            "claim_id": claim_id,
+            "current_evidence_ids": [],
+            "current_evidence_count": 0,
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    }
+    if matches!(
+        claim_status.to_ascii_lowercase().as_str(),
+        "unresolved" | "contested"
+    ) && (!support_ids.is_empty() || !contradiction_ids.is_empty())
+        && (support_ids.is_empty() || contradiction_ids.is_empty())
+    {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:claim:{claim_id}:missing_counter_evidence"),
+            "kind": "missing_counter_evidence",
+            "scope": "claim",
+            "question_id": Value::Null,
+            "claim_id": claim_id,
+            "current_evidence_ids": evidence_ids,
+            "current_evidence_count": evidence_ids.len(),
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    }
+    if confidence.is_none() {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:claim:{claim_id}:missing_confidence"),
+            "kind": "missing_confidence",
+            "scope": "claim",
+            "question_id": Value::Null,
+            "claim_id": claim_id,
+            "current_evidence_ids": evidence_ids,
+            "current_evidence_count": evidence_ids.len(),
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    } else if confidence.is_some_and(|value| value < LOW_CONFIDENCE_THRESHOLD) {
+        refs.push(serde_json::json!({
+            "gap_id": format!("gap:claim:{claim_id}:low_confidence"),
+            "kind": "low_confidence",
+            "scope": "claim",
+            "question_id": Value::Null,
+            "claim_id": claim_id,
+            "current_evidence_ids": evidence_ids,
+            "current_evidence_count": evidence_ids.len(),
+            "required_evidence_count": REQUIRED_EVIDENCE_COUNT,
+            "blocking": true,
+        }));
+    }
+    refs
+}
+
+fn gap_ids(gap_refs: &[Value]) -> Vec<String> {
+    gap_refs
+        .iter()
+        .filter_map(|item| {
+            item.get("gap_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
+fn suggested_tools(action_type: &str) -> Vec<&'static str> {
+    match action_type {
+        "search" => vec!["web_search", "fetch_url", "search_files", "read_file"],
+        _ => vec!["web_search", "fetch_url", "read_file", "search_files"],
+    }
+}
+
+fn payoff_for_priority(priority: &str, action_type: &str) -> Value {
+    let base = match priority {
+        "critical" => 0.90,
+        "high" => 0.75,
+        "medium" => 0.55,
+        "low" => 0.35,
+        _ => 0.55,
+    };
+    let graph_expansion_value = if action_type == "search" { 0.40 } else { 0.30 };
+    let estimated_cost = 0.0;
+    let payoff_score =
+        (0.45 * base) + (0.35 * base) + (0.20 * graph_expansion_value) - estimated_cost;
+    serde_json::json!({
+        "uncertainty_reduction": base,
+        "decision_impact": base,
+        "graph_expansion_value": graph_expansion_value,
+        "estimated_cost": estimated_cost,
+        "payoff_score": payoff_score,
+    })
+}
+
+fn collect_required_sources(
+    state: &InvestigationState,
+    records: &[&Map<String, Value>],
+    evidence_ids: &[String],
+) -> Vec<String> {
+    let mut sources = BTreeSet::new();
+    for record in records {
+        for candidate in source_values_from_record(record) {
+            sources.insert(candidate);
+        }
+        for provenance_id in id_list(record.get("provenance_ids")) {
+            let Some(provenance) = state
+                .provenance_nodes
+                .get(&provenance_id)
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for candidate in source_values_from_record(provenance) {
+                sources.insert(candidate);
+            }
+        }
+    }
+    for evidence_id in evidence_ids {
+        let Some(record) = state.evidence.get(evidence_id).and_then(Value::as_object) else {
+            continue;
+        };
+        for candidate in source_values_from_record(record) {
+            sources.insert(candidate);
+        }
+        for provenance_id in id_list(record.get("provenance_ids")) {
+            let Some(provenance) = state
+                .provenance_nodes
+                .get(&provenance_id)
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for candidate in source_values_from_record(provenance) {
+                sources.insert(candidate);
+            }
+        }
+    }
+    sources.into_iter().collect()
+}
+
+fn source_values_from_record(record: &Map<String, Value>) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in ["source_uri", "canonical_source_uri", "url"] {
+        if let Some(source) = record.get(key).and_then(Value::as_str) {
+            if !source.trim().is_empty() {
+                values.push(source.to_string());
+            }
+        }
+    }
+    for key in ["source_uris", "required_sources", "sources", "urls"] {
+        values.extend(id_list(record.get(key)));
+    }
+    values
+}
+
+fn build_ontology_object_refs(
+    state: &InvestigationState,
+    question_id: Option<&str>,
+    claim_ids: &[String],
+    evidence_ids: &[String],
+    entity_ids: &[String],
+    dependency_refs: &[String],
+) -> Vec<Value> {
+    let mut refs = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(question_id) = question_id {
+        add_object_ref(
+            &mut refs,
+            &mut seen,
+            question_id,
+            "question",
+            "opened_by",
+            state.questions.get(question_id),
+        );
+    }
+    for claim_id in claim_ids {
+        add_object_ref(
+            &mut refs,
+            &mut seen,
+            claim_id,
+            "claim",
+            "targets",
+            state.claims.get(claim_id),
+        );
+    }
+    for evidence_id in evidence_ids {
+        add_object_ref(
+            &mut refs,
+            &mut seen,
+            evidence_id,
+            "evidence",
+            "depends_on",
+            state.evidence.get(evidence_id),
+        );
+        let Some(record) = state.evidence.get(evidence_id).and_then(Value::as_object) else {
+            continue;
+        };
+        for provenance_id in id_list(record.get("provenance_ids")) {
+            add_object_ref(
+                &mut refs,
+                &mut seen,
+                &provenance_id,
+                "provenance_node",
+                "supported_by",
+                state.provenance_nodes.get(&provenance_id),
+            );
+        }
+        if let Some(confidence_id) = record.get("confidence_id").and_then(Value::as_str) {
+            add_object_ref(
+                &mut refs,
+                &mut seen,
+                confidence_id,
+                "confidence_profile",
+                "scored_by",
+                state.confidence_profiles.get(confidence_id),
+            );
+        }
+    }
+    for entity_id in entity_ids {
+        add_object_ref(
+            &mut refs,
+            &mut seen,
+            entity_id,
+            "entity",
+            "about",
+            state.entities.get(entity_id),
+        );
+    }
+    for dependency_ref in dependency_refs {
+        add_object_ref(
+            &mut refs,
+            &mut seen,
+            dependency_ref,
+            "evidence_gap",
+            "blocked_by",
+            None,
+        );
+    }
+    refs
+}
+
+fn add_object_ref(
+    refs: &mut Vec<Value>,
+    seen: &mut BTreeSet<String>,
+    object_id: &str,
+    object_type: &str,
+    relation: &str,
+    record: Option<&Value>,
+) {
+    let key = format!("{object_type}:{object_id}:{relation}");
+    if !seen.insert(key) {
+        return;
+    }
+    refs.push(serde_json::json!({
+        "object_id": object_id,
+        "object_type": object_type,
+        "relation": relation,
+        "label": record.and_then(object_label),
+    }));
+}
+
+fn object_label(record: &Value) -> Option<String> {
+    let obj = record.as_object()?;
+    for key in [
+        "title",
+        "label",
+        "name",
+        "question_text",
+        "question",
+        "claim_text",
+        "text",
+        "content",
+    ] {
+        if let Some(value) = obj.get(key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                return Some(safe_label(value));
+            }
+        }
+    }
+    obj.get("source_uri")
+        .and_then(Value::as_str)
+        .map(safe_label)
+}
+
+fn safe_label(value: &str) -> String {
+    let trimmed = value.trim();
+    let end = trimmed.floor_char_boundary(trimmed.len().min(96));
+    trimmed[..end].to_string()
+}
+
+fn question_entity_ids(
+    state: &InvestigationState,
+    question: &Map<String, Value>,
+    claim_ids: &[String],
+    evidence_ids: &[String],
+) -> Vec<String> {
+    let mut ids = collect_related_object_ids(
+        question,
+        &[
+            "related_entity_ids",
+            "entity_ids",
+            "entities",
+            "target_entity_ids",
+        ],
+    );
+    for claim_id in claim_ids {
+        let Some(claim) = state.claims.get(claim_id).and_then(Value::as_object) else {
+            continue;
+        };
+        ids.extend(claim_entity_ids(state, claim, evidence_ids));
+    }
+    dedupe_strings(ids)
+}
+
+fn claim_entity_ids(
+    state: &InvestigationState,
+    claim: &Map<String, Value>,
+    evidence_ids: &[String],
+) -> Vec<String> {
+    let mut ids = collect_related_object_ids(
+        claim,
+        &[
+            "subject_refs",
+            "related_entity_ids",
+            "entity_ids",
+            "entities",
+            "subject_entity_ids",
+            "object_entity_ids",
+            "about_entity_ids",
+        ],
+    );
+    for evidence_id in evidence_ids {
+        let Some(evidence) = state.evidence.get(evidence_id).and_then(Value::as_object) else {
+            continue;
+        };
+        ids.extend(collect_related_object_ids(
+            evidence,
+            &[
+                "related_entity_ids",
+                "entity_ids",
+                "entities",
+                "subject_entity_ids",
+                "object_entity_ids",
+                "about_entity_ids",
+            ],
+        ));
+    }
+    dedupe_strings(ids)
+}
+
+fn collect_related_object_ids(record: &Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in keys {
+        ids.extend(id_list(record.get(*key)));
+    }
+    ids
+}
+
+fn dedupe_strings(items: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if item.trim().is_empty() || !seen.insert(item.clone()) {
+            continue;
+        }
+        out.push(item);
+    }
+    out
+}
+
+fn dedupe_objects_by_id(items: Vec<Value>, key: &str) -> Vec<Value> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let Some(id) = item.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if seen.insert(id.to_string()) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+fn parse_confidence(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    let parsed = if let Some(number) = value.as_f64() {
+        Some(number)
+    } else {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<f64>().ok())
+    }?;
+    Some(parsed.clamp(0.0, 1.0))
 }
 
 fn default_schema_version() -> String {
@@ -807,7 +1682,96 @@ mod tests {
             Value::String("cl_2".to_string())
         );
         assert!(packet["evidence_index"].get("ev_3").is_some());
+        assert_eq!(
+            packet["candidate_actions"][0]["id"],
+            Value::String("ca_q_q_1".to_string())
+        );
+        assert_eq!(
+            packet["candidate_actions"][0]["required_sources"],
+            serde_json::json!(["s1", "s3"])
+        );
+        assert_eq!(
+            packet["candidate_actions"][1]["id"],
+            Value::String("ca_q_q_2".to_string())
+        );
+        assert_eq!(
+            packet["candidate_actions"][2]["reason_codes"],
+            serde_json::json!(["claim_low_confidence"])
+        );
+        assert_eq!(
+            packet["candidate_actions"][2]["evidence_gap_refs"][0]["kind"],
+            Value::String("low_confidence".to_string())
+        );
+        assert_eq!(
+            packet["candidate_actions"][3]["id"],
+            Value::String("ca_c_cl_3".to_string())
+        );
+        assert_eq!(
+            packet["candidate_actions"][3]["evidence_gap_refs"][0]["kind"],
+            Value::String("missing_counter_evidence".to_string())
+        );
         assert!(has_reasoning_content(&packet));
+    }
+
+    #[test]
+    fn candidate_actions_keep_entity_inputs_entity_only_and_collect_question_sources() {
+        let mut state = InvestigationState::new("sid");
+        state.questions.insert(
+            "q_1".to_string(),
+            serde_json::json!({
+                "id": "q_1",
+                "question_text": "What source confirms the claim?",
+                "status": "open",
+                "priority": "high",
+                "claim_ids": ["cl_1"],
+                "resolution_claim_id": "cl_resolution",
+                "provenance_ids": ["pv_q_1"],
+            }),
+        );
+        state.claims.insert(
+            "cl_1".to_string(),
+            serde_json::json!({
+                "id": "cl_1",
+                "claim_text": "Needs evidence",
+                "status": "proposed",
+                "evidence_ids": [],
+                "confidence": 0.2,
+            }),
+        );
+        state.provenance_nodes.insert(
+            "pv_q_1".to_string(),
+            serde_json::json!({
+                "id": "pv_q_1",
+                "source_uri": "https://question-source.test",
+            }),
+        );
+
+        let packet = build_question_reasoning_packet(&state, 8, 6);
+        let action = packet["candidate_actions"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("id") == Some(&Value::String("ca_q_q_1".to_string())))
+            })
+            .expect("question action");
+
+        assert_eq!(
+            action["required_inputs"]["entity_ids"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            action["required_sources"],
+            serde_json::json!(["https://question-source.test"])
+        );
+        assert!(
+            !action["ontology_object_refs"]
+                .as_array()
+                .is_some_and(|refs| refs
+                    .iter()
+                    .any(|item| item.get("object_type")
+                        == Some(&Value::String("entity".to_string()))))
+        );
     }
 
     #[test]
@@ -822,5 +1786,22 @@ mod tests {
             "contradictions": [],
         });
         assert!(!has_reasoning_content(&packet));
+    }
+
+    #[test]
+    fn has_reasoning_content_returns_true_for_candidate_actions_only() {
+        let packet = serde_json::json!({
+            "focus_question_ids": [],
+            "findings": {
+                "supported": [],
+                "contested": [],
+                "unresolved": [],
+            },
+            "contradictions": [],
+            "candidate_actions": [
+                {"id": "ca_c_cl_9", "action_type": "verify_claim", "status": "proposed"}
+            ],
+        });
+        assert!(has_reasoning_content(&packet));
     }
 }

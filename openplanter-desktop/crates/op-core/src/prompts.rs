@@ -265,6 +265,12 @@ Rules:
 - Do not mark a claim supported without support evidence IDs.
 - Do not resolve a question without explicit claim/evidence linkage.
 - Prefer provenance-backed evidence over uncited notes.
+- `question_reasoning_packet.candidate_actions` is a machine-readable, read-only
+  planner surface. Use it to prioritize next steps, but do not assume those
+  actions were persisted as canonical tasks or executed actions yet.
+- Keep any use of `candidate_actions` structured: preserve rationale,
+  required_sources, expected_payoff, evidence_gap_refs, and ontology_object_refs
+  instead of turning them into prose recommendations.
 
 Final deliverables MUST separate findings into three sections:
 - Supported Findings
@@ -455,6 +461,7 @@ mod tests {
         assert!(prompt.contains("SESSION LOGS AND TRANSCRIPTS"));
         assert!(prompt.contains("TURN HISTORY"));
         assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
+        assert!(prompt.contains("candidate_actions"));
         assert!(prompt.contains("DATA SOURCES WIKI"));
         assert!(!prompt.contains("REPL STRUCTURE"));
         assert!(!prompt.contains("ACCEPTANCE CRITERIA"));

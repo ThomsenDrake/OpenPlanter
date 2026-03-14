@@ -1177,6 +1177,11 @@ mod tests {
                 question_reasoning_packet: Some(serde_json::json!({
                     "reasoning_mode": "question_centric",
                     "focus_question_ids": ["q_1"],
+                    "candidate_actions": [{
+                        "id": "ca_q_q_1",
+                        "action_type": "verify_claim",
+                        "status": "proposed",
+                    }],
                     "findings": {
                         "supported": [],
                         "contested": [],
@@ -1202,6 +1207,10 @@ mod tests {
         assert_eq!(
             parsed["question_reasoning_packet"]["focus_question_ids"],
             serde_json::json!(["q_1"])
+        );
+        assert_eq!(
+            parsed["question_reasoning_packet"]["candidate_actions"][0]["id"],
+            serde_json::json!("ca_q_q_1")
         );
         assert!(parsed.get("timestamp").is_some());
         assert_eq!(
