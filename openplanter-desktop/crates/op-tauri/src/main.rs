@@ -8,7 +8,13 @@ mod state;
 use state::AppState;
 
 fn main() {
-    let state = AppState::new();
+    let state = match AppState::try_new() {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("[startup:error] {err}");
+            std::process::exit(2);
+        }
+    };
     eprintln!("[startup:info] {}", state.startup_trace());
 
     tauri::Builder::default()
