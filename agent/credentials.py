@@ -114,13 +114,13 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def parse_env_file(path: Path) -> CredentialBundle:
+def parse_env_assignments(path: Path) -> dict[str, str]:
     if not path.exists() or not path.is_file():
-        return CredentialBundle()
+        return {}
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return CredentialBundle()
+        return {}
 
     env: dict[str, str] = {}
     for raw in lines:
@@ -135,7 +135,11 @@ def parse_env_file(path: Path) -> CredentialBundle:
         key = key.strip()
         value = _strip_quotes(value.strip())
         env[key] = value
+    return env
 
+
+def parse_env_file(path: Path) -> CredentialBundle:
+    env = parse_env_assignments(path)
     return CredentialBundle(
         openai_api_key=(env.get("OPENAI_API_KEY") or env.get("OPENPLANTER_OPENAI_API_KEY") or "").strip() or None,
         openai_oauth_token=(
@@ -199,18 +203,13 @@ def credentials_from_env() -> CredentialBundle:
 
 def discover_env_candidates(workspace: Path) -> list[Path]:
     ws = workspace.expanduser().resolve()
-    candidates: list[Path] = [
-        ws / ".env",
-    ]
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for path in candidates:
-        key = str(path.resolve()) if path.exists() else str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
+    current: Path | None = ws
+    while current is not None:
+        env_path = current / ".env"
+        if env_path.exists():
+            return [env_path]
+        current = current.parent if current.parent != current else None
+    return []
 
 
 @dataclass(slots=True)
