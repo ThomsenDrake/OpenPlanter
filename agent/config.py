@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+MISTRAL_TRANSCRIPTION_BASE_URL = "https://api.mistral.ai"
+MISTRAL_TRANSCRIPTION_DEFAULT_MODEL = "voxtral-mini-latest"
+MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS = 900
+MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS = 2.0
+MISTRAL_TRANSCRIPTION_MAX_CHUNKS = 48
+MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC = 180
+
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.2",
     "anthropic": "claude-opus-4-6",
@@ -27,12 +34,24 @@ class AgentConfig:
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
     ollama_base_url: str = "http://localhost:11434/v1"
     exa_base_url: str = "https://api.exa.ai"
+    mistral_transcription_base_url: str = MISTRAL_TRANSCRIPTION_BASE_URL
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
     cerebras_api_key: str | None = None
     exa_api_key: str | None = None
     voyage_api_key: str | None = None
+    mistral_transcription_api_key: str | None = None
+    mistral_transcription_model: str = MISTRAL_TRANSCRIPTION_DEFAULT_MODEL
+    mistral_transcription_max_bytes: int = 100 * 1024 * 1024
+    mistral_transcription_chunk_max_seconds: int = MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS
+    mistral_transcription_chunk_overlap_seconds: float = (
+        MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS
+    )
+    mistral_transcription_max_chunks: int = MISTRAL_TRANSCRIPTION_MAX_CHUNKS
+    mistral_transcription_request_timeout_sec: int = (
+        MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC
+    )
     max_depth: int = 4
     max_steps_per_call: int = 100
     budget_extension_enabled: bool = True
@@ -71,6 +90,11 @@ class AgentConfig:
         cerebras_api_key = os.getenv("OPENPLANTER_CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
         exa_api_key = os.getenv("OPENPLANTER_EXA_API_KEY") or os.getenv("EXA_API_KEY")
         voyage_api_key = os.getenv("OPENPLANTER_VOYAGE_API_KEY") or os.getenv("VOYAGE_API_KEY")
+        mistral_transcription_api_key = (
+            os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
+            or os.getenv("MISTRAL_TRANSCRIPTION_API_KEY")
+            or os.getenv("MISTRAL_API_KEY")
+        )
         openai_base_url = os.getenv("OPENPLANTER_OPENAI_BASE_URL") or os.getenv(
             "OPENPLANTER_BASE_URL",
             "https://api.openai.com/v1",
@@ -100,12 +124,51 @@ class AgentConfig:
             cerebras_base_url=os.getenv("OPENPLANTER_CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
             ollama_base_url=os.getenv("OPENPLANTER_OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             exa_base_url=os.getenv("OPENPLANTER_EXA_BASE_URL", "https://api.exa.ai"),
+            mistral_transcription_base_url=os.getenv(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL",
+                os.getenv("MISTRAL_TRANSCRIPTION_BASE_URL")
+                or os.getenv("MISTRAL_BASE_URL")
+                or MISTRAL_TRANSCRIPTION_BASE_URL,
+            ),
             openai_api_key=openai_api_key,
             anthropic_api_key=anthropic_api_key,
             openrouter_api_key=openrouter_api_key,
             cerebras_api_key=cerebras_api_key,
             exa_api_key=exa_api_key,
             voyage_api_key=voyage_api_key,
+            mistral_transcription_api_key=(mistral_transcription_api_key or "").strip() or None,
+            mistral_transcription_model=(
+                os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")
+                or os.getenv("MISTRAL_TRANSCRIPTION_MODEL")
+                or MISTRAL_TRANSCRIPTION_DEFAULT_MODEL
+            ),
+            mistral_transcription_max_bytes=int(
+                os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES", "104857600")
+            ),
+            mistral_transcription_chunk_max_seconds=int(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS",
+                    str(MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS),
+                )
+            ),
+            mistral_transcription_chunk_overlap_seconds=float(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS",
+                    str(MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS),
+                )
+            ),
+            mistral_transcription_max_chunks=int(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_CHUNKS",
+                    str(MISTRAL_TRANSCRIPTION_MAX_CHUNKS),
+                )
+            ),
+            mistral_transcription_request_timeout_sec=int(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC",
+                    str(MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC),
+                )
+            ),
             max_depth=int(os.getenv("OPENPLANTER_MAX_DEPTH", "4")),
             max_steps_per_call=int(os.getenv("OPENPLANTER_MAX_STEPS", "100")),
             budget_extension_enabled=budget_extension_enabled,

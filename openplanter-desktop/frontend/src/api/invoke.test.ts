@@ -108,10 +108,12 @@ describe("invoke wrappers", () => {
       cerebras: false,
       ollama: true,
       exa: false,
+      mistral_transcription: true,
     }));
     const status = await getCredentialsStatus();
     expect(status.openai).toBe(true);
     expect(status.openrouter).toBe(false);
+    expect(status.mistral_transcription).toBe(true);
   });
 
   it("listSessions sends limit", async () => {

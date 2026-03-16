@@ -24,6 +24,7 @@ class CredentialTests(unittest.TestCase):
                         "ANTHROPIC_API_KEY=an-key",
                         "OPENROUTER_API_KEY=or-key",
                         "EXA_API_KEY=exa-key",
+                        "MISTRAL_API_KEY=mistral-key",
                     ]
                 ),
                 encoding="utf-8",
@@ -33,6 +34,7 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(creds.anthropic_api_key, "an-key")
             self.assertEqual(creds.openrouter_api_key, "or-key")
             self.assertEqual(creds.exa_api_key, "exa-key")
+            self.assertEqual(creds.mistral_transcription_api_key, "mistral-key")
 
     def test_parse_env_assignments_preserves_generic_workspace_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -59,6 +61,7 @@ class CredentialTests(unittest.TestCase):
                 anthropic_api_key="an",
                 openrouter_api_key="or",
                 exa_api_key="exa",
+                mistral_transcription_api_key="mistral",
             )
             store.save(creds)
             loaded = store.load()

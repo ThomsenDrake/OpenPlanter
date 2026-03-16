@@ -5,6 +5,13 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+pub const MISTRAL_TRANSCRIPTION_BASE_URL: &str = "https://api.mistral.ai";
+pub const MISTRAL_TRANSCRIPTION_DEFAULT_MODEL: &str = "voxtral-mini-latest";
+pub const MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS: i64 = 900;
+pub const MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS: f64 = 2.0;
+pub const MISTRAL_TRANSCRIPTION_MAX_CHUNKS: i64 = 48;
+pub const MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC: i64 = 180;
+
 /// Default model for each supported provider.
 pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>> =
     LazyLock::new(|| {
@@ -64,6 +71,7 @@ pub struct AgentConfig {
     pub cerebras_base_url: String,
     pub ollama_base_url: String,
     pub exa_base_url: String,
+    pub mistral_transcription_base_url: String,
 
     // API keys
     pub api_key: Option<String>,
@@ -73,6 +81,13 @@ pub struct AgentConfig {
     pub cerebras_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
+    pub mistral_transcription_api_key: Option<String>,
+    pub mistral_transcription_model: String,
+    pub mistral_transcription_max_bytes: i64,
+    pub mistral_transcription_chunk_max_seconds: i64,
+    pub mistral_transcription_chunk_overlap_seconds: f64,
+    pub mistral_transcription_max_chunks: i64,
+    pub mistral_transcription_request_timeout_sec: i64,
 
     // Limits
     pub max_depth: i64,
@@ -116,6 +131,7 @@ impl Default for AgentConfig {
             cerebras_base_url: "https://api.cerebras.ai/v1".into(),
             ollama_base_url: "http://localhost:11434/v1".into(),
             exa_base_url: "https://api.exa.ai".into(),
+            mistral_transcription_base_url: MISTRAL_TRANSCRIPTION_BASE_URL.into(),
             api_key: None,
             openai_api_key: None,
             anthropic_api_key: None,
@@ -123,6 +139,14 @@ impl Default for AgentConfig {
             cerebras_api_key: None,
             exa_api_key: None,
             voyage_api_key: None,
+            mistral_transcription_api_key: None,
+            mistral_transcription_model: MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into(),
+            mistral_transcription_max_bytes: 100 * 1024 * 1024,
+            mistral_transcription_chunk_max_seconds: MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS,
+            mistral_transcription_chunk_overlap_seconds:
+                MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS,
+            mistral_transcription_max_chunks: MISTRAL_TRANSCRIPTION_MAX_CHUNKS,
+            mistral_transcription_request_timeout_sec: MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC,
             max_depth: 4,
             max_steps_per_call: 100,
             budget_extension_enabled: true,
@@ -175,6 +199,10 @@ impl AgentConfig {
         let voyage_api_key = env_opt("OPENPLANTER_VOYAGE_API_KEY")
             .or_else(|| env_opt("VOYAGE_API_KEY"));
 
+        let mistral_transcription_api_key = env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
+            .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_API_KEY"))
+            .or_else(|| env_opt("MISTRAL_API_KEY"));
+
         let openai_base_url = env_opt("OPENPLANTER_OPENAI_BASE_URL")
             .or_else(|| env_opt("OPENPLANTER_BASE_URL"))
             .unwrap_or_else(|| "https://api.openai.com/v1".into());
@@ -222,12 +250,40 @@ impl AgentConfig {
                 "http://localhost:11434/v1",
             ),
             exa_base_url: env_or("OPENPLANTER_EXA_BASE_URL", "https://api.exa.ai"),
+            mistral_transcription_base_url: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL")
+                .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_BASE_URL"))
+                .or_else(|| env_opt("MISTRAL_BASE_URL"))
+                .unwrap_or_else(|| MISTRAL_TRANSCRIPTION_BASE_URL.into()),
             openai_api_key,
             anthropic_api_key,
             openrouter_api_key,
             cerebras_api_key,
             exa_api_key,
             voyage_api_key,
+            mistral_transcription_api_key,
+            mistral_transcription_model: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")
+                .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_MODEL"))
+                .unwrap_or_else(|| MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into()),
+            mistral_transcription_max_bytes: env_int(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES",
+                100 * 1024 * 1024,
+            ),
+            mistral_transcription_chunk_max_seconds: env_int(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS",
+                MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS,
+            ),
+            mistral_transcription_chunk_overlap_seconds: env_float(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS",
+                MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS,
+            ),
+            mistral_transcription_max_chunks: env_int(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_CHUNKS",
+                MISTRAL_TRANSCRIPTION_MAX_CHUNKS,
+            ),
+            mistral_transcription_request_timeout_sec: env_int(
+                "OPENPLANTER_MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC",
+                MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC,
+            ),
             max_depth: env_int("OPENPLANTER_MAX_DEPTH", 4),
             max_steps_per_call: env_int("OPENPLANTER_MAX_STEPS", 100),
             budget_extension_enabled: env_bool("OPENPLANTER_BUDGET_EXTENSION_ENABLED", true),

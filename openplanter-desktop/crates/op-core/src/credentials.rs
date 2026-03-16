@@ -18,24 +18,23 @@ pub struct CredentialBundle {
     pub cerebras_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
+    pub mistral_transcription_api_key: Option<String>,
 }
 
 impl CredentialBundle {
     /// Returns `true` if any key has a non-empty value.
     pub fn has_any(&self) -> bool {
-        let keys: [&Option<String>; 6] = [
+        let keys = [
             &self.openai_api_key,
             &self.anthropic_api_key,
             &self.openrouter_api_key,
             &self.cerebras_api_key,
             &self.exa_api_key,
             &self.voyage_api_key,
+            &self.mistral_transcription_api_key,
         ];
-        keys.iter().any(|k| {
-            k.as_ref()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-        })
+        keys.iter()
+            .any(|k| k.as_ref().map(|v| !v.trim().is_empty()).unwrap_or(false))
     }
 
     /// Fill in missing keys from `other`.
@@ -53,6 +52,7 @@ impl CredentialBundle {
         fill!(cerebras_api_key);
         fill!(exa_api_key);
         fill!(voyage_api_key);
+        fill!(mistral_transcription_api_key);
     }
 
     /// Serialize to JSON map, omitting `None` values.
@@ -71,6 +71,10 @@ impl CredentialBundle {
         add!(cerebras_api_key, "cerebras_api_key");
         add!(exa_api_key, "exa_api_key");
         add!(voyage_api_key, "voyage_api_key");
+        add!(
+            mistral_transcription_api_key,
+            "mistral_transcription_api_key"
+        );
         out
     }
 
@@ -89,6 +93,7 @@ impl CredentialBundle {
             cerebras_api_key: get_str(payload, "cerebras_api_key"),
             exa_api_key: get_str(payload, "exa_api_key"),
             voyage_api_key: get_str(payload, "voyage_api_key"),
+            mistral_transcription_api_key: get_str(payload, "mistral_transcription_api_key"),
         }
     }
 }
@@ -152,13 +157,15 @@ pub fn parse_env_file(path: &Path) -> CredentialBundle {
             "OPENROUTER_API_KEY",
             "OPENPLANTER_OPENROUTER_API_KEY",
         ),
-        cerebras_api_key: get_key(
-            &env_map,
-            "CEREBRAS_API_KEY",
-            "OPENPLANTER_CEREBRAS_API_KEY",
-        ),
+        cerebras_api_key: get_key(&env_map, "CEREBRAS_API_KEY", "OPENPLANTER_CEREBRAS_API_KEY"),
         exa_api_key: get_key(&env_map, "EXA_API_KEY", "OPENPLANTER_EXA_API_KEY"),
         voyage_api_key: get_key(&env_map, "VOYAGE_API_KEY", "OPENPLANTER_VOYAGE_API_KEY"),
+        mistral_transcription_api_key: env_map
+            .get("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
+            .or_else(|| env_map.get("MISTRAL_TRANSCRIPTION_API_KEY"))
+            .or_else(|| env_map.get("MISTRAL_API_KEY"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -179,6 +186,12 @@ pub fn credentials_from_env() -> CredentialBundle {
         cerebras_api_key: env_key("OPENPLANTER_CEREBRAS_API_KEY", "CEREBRAS_API_KEY"),
         exa_api_key: env_key("OPENPLANTER_EXA_API_KEY", "EXA_API_KEY"),
         voyage_api_key: env_key("OPENPLANTER_VOYAGE_API_KEY", "VOYAGE_API_KEY"),
+        mistral_transcription_api_key: env::var("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
+            .ok()
+            .or_else(|| env::var("MISTRAL_TRANSCRIPTION_API_KEY").ok())
+            .or_else(|| env::var("MISTRAL_API_KEY").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -317,6 +330,33 @@ mod tests {
     }
 
     #[test]
+    fn test_credential_bundle_has_any_with_voyage_key() {
+        let bundle = CredentialBundle {
+            voyage_api_key: Some("voyage-test".into()),
+            ..Default::default()
+        };
+        assert!(bundle.has_any());
+    }
+
+    #[test]
+    fn test_credential_bundle_whitespace_only_values_do_not_count() {
+        let bundle = CredentialBundle {
+            voyage_api_key: Some("   ".into()),
+            ..Default::default()
+        };
+        assert!(!bundle.has_any());
+    }
+
+    #[test]
+    fn test_credential_bundle_has_any_with_mistral_transcription_key() {
+        let bundle = CredentialBundle {
+            mistral_transcription_api_key: Some("mistral-test".into()),
+            ..Default::default()
+        };
+        assert!(bundle.has_any());
+    }
+
+    #[test]
     fn test_credential_bundle_merge_missing() {
         let mut a = CredentialBundle {
             openai_api_key: Some("existing".into()),
@@ -325,11 +365,16 @@ mod tests {
         let b = CredentialBundle {
             openai_api_key: Some("should-not-overwrite".into()),
             anthropic_api_key: Some("new-key".into()),
+            mistral_transcription_api_key: Some("mistral-key".into()),
             ..Default::default()
         };
         a.merge_missing(&b);
         assert_eq!(a.openai_api_key, Some("existing".into()));
         assert_eq!(a.anthropic_api_key, Some("new-key".into()));
+        assert_eq!(
+            a.mistral_transcription_api_key,
+            Some("mistral-key".into())
+        );
     }
 
     #[test]
@@ -338,12 +383,17 @@ mod tests {
             openai_api_key: Some("sk-123".into()),
             anthropic_api_key: None,
             openrouter_api_key: Some("or-456".into()),
+            mistral_transcription_api_key: Some("mistral-789".into()),
             ..Default::default()
         };
         let json = bundle.to_json();
         assert_eq!(json.get("openai_api_key").unwrap(), "sk-123");
         assert!(!json.contains_key("anthropic_api_key"));
         assert_eq!(json.get("openrouter_api_key").unwrap(), "or-456");
+        assert_eq!(
+            json.get("mistral_transcription_api_key").unwrap(),
+            "mistral-789"
+        );
     }
 
     #[test]
@@ -357,6 +407,7 @@ mod tests {
 OPENAI_API_KEY=sk-from-env
 export ANTHROPIC_API_KEY='ant-key'
 EXA_API_KEY="exa-quoted"
+MISTRAL_API_KEY=mistral-from-env
 UNRELATED_VAR=foo
 "#,
         )
@@ -366,6 +417,10 @@ UNRELATED_VAR=foo
         assert_eq!(bundle.openai_api_key, Some("sk-from-env".into()));
         assert_eq!(bundle.anthropic_api_key, Some("ant-key".into()));
         assert_eq!(bundle.exa_api_key, Some("exa-quoted".into()));
+        assert_eq!(
+            bundle.mistral_transcription_api_key,
+            Some("mistral-from-env".into())
+        );
         assert!(bundle.cerebras_api_key.is_none());
     }
 
@@ -384,7 +439,10 @@ UNRELATED_VAR=foo
             env_map.get("OPENPLANTER_WORKSPACE"),
             Some(&"workspace".to_string())
         );
-        assert_eq!(env_map.get("OPENAI_API_KEY"), Some(&"sk-from-env".to_string()));
+        assert_eq!(
+            env_map.get("OPENAI_API_KEY"),
+            Some(&"sk-from-env".to_string())
+        );
     }
 
     #[test]
@@ -406,12 +464,17 @@ UNRELATED_VAR=foo
         let bundle = CredentialBundle {
             openai_api_key: Some("sk-test".into()),
             anthropic_api_key: Some("ant-test".into()),
+            mistral_transcription_api_key: Some("mistral-test".into()),
             ..Default::default()
         };
         store.save(&bundle).unwrap();
         let loaded = store.load();
         assert_eq!(loaded.openai_api_key, Some("sk-test".into()));
         assert_eq!(loaded.anthropic_api_key, Some("ant-test".into()));
+        assert_eq!(
+            loaded.mistral_transcription_api_key,
+            Some("mistral-test".into())
+        );
     }
 
     #[test]

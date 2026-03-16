@@ -102,19 +102,41 @@ openplanter-agent --provider ollama --list-models
 
 The base URL defaults to `http://localhost:11434/v1` and can be overridden with `OPENPLANTER_OLLAMA_BASE_URL` or `--base-url`. The first request may be slow while Ollama loads the model into memory; a 120-second first-byte timeout is used automatically.
 
-Additional service keys: `EXA_API_KEY` (web search), `VOYAGE_API_KEY` (embeddings).
+Additional service keys: `EXA_API_KEY` (web search), `VOYAGE_API_KEY` (embeddings), `MISTRAL_TRANSCRIPTION_API_KEY` or `MISTRAL_API_KEY` (audio transcription).
+
+### Audio Transcription
+
+OpenPlanter includes an `audio_transcribe` tool backed by Mistral's offline transcription API. It accepts local workspace audio or video files, returns transcript text plus any timestamps or diarization metadata Mistral provides, and automatically falls back to overlapping chunked transcription for long recordings when `chunking` is left at `auto`.
+
+Useful overrides:
+
+```bash
+export MISTRAL_API_KEY=...
+export OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL=voxtral-mini-latest
+export OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES=104857600
+export OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS=900
+export OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=2.0
+```
+
+Notes:
+- The tool only accepts local workspace files.
+- Long-form chunking requires `ffmpeg` and `ffprobe` to be available at runtime.
+- `chunking: "force"` always chunks, and `chunking: "off"` keeps the single-upload path.
+- Video inputs are audio-extracted with `ffmpeg` before transcription.
 
 All keys can also be set with an `OPENPLANTER_` prefix (e.g. `OPENPLANTER_OPENAI_API_KEY`), via `.env` files in the workspace, or via CLI flags.
 
 ## Agent Tools
 
-The agent has access to 19 tools, organized around its investigation workflow:
+The agent has access to 20 tools, organized around its investigation workflow:
 
 **Dataset ingestion & workspace** — `list_files`, `search_files`, `repo_map`, `read_file`, `write_file`, `edit_file`, `hashline_edit`, `apply_patch` — load, inspect, and transform source datasets; write structured findings.
 
 **Shell execution** — `run_shell`, `run_shell_bg`, `check_shell_bg`, `kill_shell_bg` — run analysis scripts, data pipelines, and validation checks.
 
 **Web** — `web_search` (Exa), `fetch_url` — pull public records, verify entities, and retrieve supplementary data.
+
+**Audio** — `audio_transcribe` — transcribe local audio or video with Mistral, including optional timestamps, diarization, and automatic chunking for long recordings.
 
 **Planning & delegation** — `think`, `subtask`, `execute`, `list_artifacts`, `read_artifact` — decompose investigations into focused sub-tasks, each with acceptance criteria and independent verification.
 

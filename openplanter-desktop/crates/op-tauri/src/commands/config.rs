@@ -142,6 +142,10 @@ pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<St
     status.insert("cerebras".to_string(), cfg.cerebras_api_key.is_some());
     status.insert("ollama".to_string(), true); // Ollama never needs a key
     status.insert("exa".to_string(), cfg.exa_api_key.is_some());
+    status.insert(
+        "mistral_transcription".to_string(),
+        cfg.mistral_transcription_api_key.is_some(),
+    );
     status
 }
 
@@ -174,6 +178,11 @@ pub async fn get_credentials_status(
     status.insert(
         "exa".to_string(),
         cfg.exa_api_key.is_some() || env_creds.exa_api_key.is_some(),
+    );
+    status.insert(
+        "mistral_transcription".to_string(),
+        cfg.mistral_transcription_api_key.is_some()
+            || env_creds.mistral_transcription_api_key.is_some(),
     );
     Ok(status)
 }
@@ -263,6 +272,7 @@ mod tests {
         assert_eq!(status["openrouter"], false);
         assert_eq!(status["cerebras"], false);
         assert_eq!(status["ollama"], true, "ollama always true");
+        assert_eq!(status["mistral_transcription"], false);
     }
 
     #[test]
@@ -296,6 +306,7 @@ mod tests {
         cfg.anthropic_api_key = None;
         cfg.openrouter_api_key = None;
         cfg.cerebras_api_key = None;
+        cfg.mistral_transcription_api_key = None;
         let status = build_credential_status(&cfg);
         assert_eq!(status["ollama"], true);
     }
@@ -308,6 +319,7 @@ mod tests {
         cfg.openrouter_api_key = Some("k3".to_string());
         cfg.cerebras_api_key = Some("k4".to_string());
         cfg.exa_api_key = Some("k5".to_string());
+        cfg.mistral_transcription_api_key = Some("k6".to_string());
         let status = build_credential_status(&cfg);
         for (provider, has_key) in &status {
             assert!(has_key, "{} should be true when key is set", provider);
@@ -315,9 +327,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_status_has_six_entries() {
+    fn test_cred_status_has_seven_entries() {
         let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
         let status = build_credential_status(&cfg);
-        assert_eq!(status.len(), 6, "should have 6 entries (5 providers + exa)");
+        assert_eq!(
+            status.len(),
+            7,
+            "should have 7 entries (5 providers + exa + mistral transcription)"
+        );
     }
 }
