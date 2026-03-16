@@ -14,9 +14,6 @@ export function createStatusBar(): HTMLElement {
   const reasoningEl = document.createElement("span");
   reasoningEl.className = "reasoning";
 
-  const zaiPlanEl = document.createElement("span");
-  zaiPlanEl.className = "zai-plan";
-
   const modeEl = document.createElement("span");
   modeEl.className = "mode";
 
@@ -29,7 +26,6 @@ export function createStatusBar(): HTMLElement {
   bar.appendChild(providerEl);
   bar.appendChild(modelEl);
   bar.appendChild(reasoningEl);
-  bar.appendChild(zaiPlanEl);
   bar.appendChild(modeEl);
   bar.appendChild(sessionEl);
   bar.appendChild(tokensEl);
@@ -41,25 +37,11 @@ export function createStatusBar(): HTMLElement {
     reasoningEl.textContent = s.reasoningEffort
       ? `reasoning:${s.reasoningEffort}`
       : "";
-    zaiPlanEl.textContent =
-      s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     modeEl.textContent = s.recursive ? "recursive" : "flat";
     sessionEl.textContent = s.sessionId ? `session ${s.sessionId.slice(0, 8)}` : "";
 
     if (s.isRunning && s.currentStep > 0) {
-      const health = s.loopHealth;
-      if (health) {
-        const guardrailText =
-          health.metrics.guardrail_warnings > 0
-            ? ` guard:${health.metrics.guardrail_warnings}`
-            : "";
-        sessionEl.textContent =
-          `step ${s.currentStep} depth ${s.currentDepth} ` +
-          `${health.phase} recon:${health.metrics.recon_streak} ` +
-          `reject:${health.metrics.final_rejections}${guardrailText}`;
-      } else {
-        sessionEl.textContent = `step ${s.currentStep} depth ${s.currentDepth}`;
-      }
+      sessionEl.textContent = `step ${s.currentStep} depth ${s.currentDepth}`;
     }
 
     const inK = (s.inputTokens / 1000).toFixed(1);

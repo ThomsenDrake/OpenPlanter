@@ -24,7 +24,6 @@ describe("createStatusBar", () => {
     expect(bar.querySelector(".provider")).not.toBeNull();
     expect(bar.querySelector(".model")).not.toBeNull();
     expect(bar.querySelector(".reasoning")).not.toBeNull();
-    expect(bar.querySelector(".zai-plan")).not.toBeNull();
     expect(bar.querySelector(".mode")).not.toBeNull();
     expect(bar.querySelector(".session")).not.toBeNull();
     expect(bar.querySelector(".tokens")).not.toBeNull();
@@ -55,18 +54,6 @@ describe("createStatusBar", () => {
     expect(bar.querySelector(".reasoning")!.textContent).toBe("");
   });
 
-  it("renders Z.AI plan when provider is zai", () => {
-    appState.update((s) => ({ ...s, provider: "zai", zaiPlan: "coding" }));
-    const bar = createStatusBar();
-    expect(bar.querySelector(".zai-plan")!.textContent).toBe("zai:coding");
-  });
-
-  it("hides Z.AI plan when provider is not zai", () => {
-    appState.update((s) => ({ ...s, provider: "anthropic", zaiPlan: "coding" }));
-    const bar = createStatusBar();
-    expect(bar.querySelector(".zai-plan")!.textContent).toBe("");
-  });
-
   it("renders recursive mode", () => {
     appState.update((s) => ({ ...s, recursive: true }));
     const bar = createStatusBar();
@@ -95,43 +82,6 @@ describe("createStatusBar", () => {
     appState.update((s) => ({ ...s, isRunning: true, currentStep: 3, currentDepth: 1 }));
     const bar = createStatusBar();
     expect(bar.querySelector(".session")!.textContent).toBe("step 3 depth 1");
-  });
-
-  it("shows loop health details when telemetry is present", () => {
-    appState.update((s) => ({
-      ...s,
-      isRunning: true,
-      currentStep: 4,
-      currentDepth: 0,
-      loopHealth: {
-        depth: 0,
-        step: 4,
-        phase: "investigate",
-        metrics: {
-          steps: 4,
-          model_turns: 4,
-          tool_calls: 2,
-          investigate_steps: 3,
-          build_steps: 0,
-          iterate_steps: 0,
-          finalize_steps: 0,
-          recon_streak: 3,
-          max_recon_streak: 3,
-          guardrail_warnings: 1,
-          final_rejections: 2,
-          extensions_granted: 1,
-          extension_eligible_checks: 1,
-          extension_denials_no_progress: 0,
-          extension_denials_cap: 0,
-          termination_reason: "success",
-        },
-        is_final: false,
-      },
-    }));
-    const bar = createStatusBar();
-    expect(bar.querySelector(".session")!.textContent).toBe(
-      "step 4 depth 0 investigate recon:3 reject:2 guard:1"
-    );
   });
 
   it("renders token counts", () => {

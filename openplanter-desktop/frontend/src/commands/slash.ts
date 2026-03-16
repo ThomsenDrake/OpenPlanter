@@ -3,8 +3,6 @@ import { appState } from "../state/store";
 import { openSession } from "../api/invoke";
 import { handleModelCommand, type CommandResult } from "./model";
 import { handleReasoningCommand } from "./reasoning";
-import { handleWebSearchCommand } from "./webSearch";
-import { handleZaiPlanCommand } from "./zaiPlan";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -30,12 +28,6 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /model <name>       Switch model (auto-detects provider)",
           "  /model <name> --save  Switch and persist",
           "  /model list [provider]  List available models",
-          "  /zai-plan          Show current Z.AI endpoint family",
-          "  /zai-plan <plan>   Set Z.AI endpoint family (paygo, coding)",
-          "  /zai-plan <plan> --save  Set and persist",
-          "  /web-search        Show current web search provider",
-          "  /web-search <provider>  Set web search provider (exa, firecrawl, brave, tavily)",
-          "  /web-search <provider> --save  Set and persist",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
         ],
@@ -52,9 +44,6 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           outputTokens: 0,
           currentStep: 0,
           currentDepth: 0,
-          loopHealth: null,
-          lastLoopMetrics: null,
-          lastCompletion: null,
           inputQueue: [],
         }));
         window.dispatchEvent(new CustomEvent("session-changed", { detail: { isNew: true } }));
@@ -86,8 +75,6 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
         lines: [
           `Provider:    ${s.provider || "auto"}`,
           `Model:       ${s.model || "—"}`,
-          `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
-          `Web search:  ${s.webSearchProvider || "exa"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
           `Max depth:   ${s.maxDepth}`,
@@ -103,12 +90,6 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/model":
       return handleModelCommand(args);
-
-    case "/zai-plan":
-      return handleZaiPlanCommand(args);
-
-    case "/web-search":
-      return handleWebSearchCommand(args);
 
     case "/reasoning":
       return handleReasoningCommand(args);
