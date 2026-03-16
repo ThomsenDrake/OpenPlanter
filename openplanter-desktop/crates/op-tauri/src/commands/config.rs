@@ -153,7 +153,6 @@ fn known_models_for_provider(provider: &str) -> Vec<ModelInfo> {
     let models: Vec<(&str, &str)> = match provider {
         "openai" => vec![
             ("azure-foundry/gpt-5.3-codex", "GPT-5.3 Codex (Foundry)"),
-            ("azure-foundry/gpt-5.4", "GPT-5.4 (Foundry)"),
             ("azure-foundry/Kimi-K2.5", "Kimi K2.5 (Foundry)"),
         ],
         "anthropic" => vec![
@@ -273,9 +272,7 @@ pub async fn get_credentials_status(
     let mut status = HashMap::new();
     status.insert(
         "openai".to_string(),
-        cfg.openai_api_key.is_some()
-            || env_creds.openai_api_key.is_some()
-            || env_creds.openai_oauth_token.is_some(),
+        cfg.openai_api_key.is_some() || env_creds.openai_api_key.is_some(),
     );
     status.insert(
         "anthropic".to_string(),
