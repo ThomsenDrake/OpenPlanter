@@ -10,6 +10,10 @@ MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS = 900
 MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS = 2.0
 MISTRAL_TRANSCRIPTION_MAX_CHUNKS = 48
 MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC = 180
+CHROME_MCP_DEFAULT_CHANNEL = "stable"
+CHROME_MCP_CONNECT_TIMEOUT_SEC = 15
+CHROME_MCP_RPC_TIMEOUT_SEC = 45
+VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
 
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.2",
@@ -18,6 +22,25 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "cerebras": "qwen-3-235b-a22b-instruct-2507",
     "ollama": "llama3.2",
 }
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_chrome_mcp_channel(value: str | None) -> str:
+    cleaned = (value or "").strip().lower()
+    if cleaned in VALID_CHROME_MCP_CHANNELS:
+        return cleaned
+    return CHROME_MCP_DEFAULT_CHANNEL
+
+
+def normalize_chrome_mcp_browser_url(value: str | None) -> str | None:
+    cleaned = (value or "").strip()
+    return cleaned or None
 
 
 @dataclass(slots=True)
@@ -52,6 +75,12 @@ class AgentConfig:
     mistral_transcription_request_timeout_sec: int = (
         MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC
     )
+    chrome_mcp_enabled: bool = False
+    chrome_mcp_auto_connect: bool = True
+    chrome_mcp_browser_url: str | None = None
+    chrome_mcp_channel: str = CHROME_MCP_DEFAULT_CHANNEL
+    chrome_mcp_connect_timeout_sec: int = CHROME_MCP_CONNECT_TIMEOUT_SEC
+    chrome_mcp_rpc_timeout_sec: int = CHROME_MCP_RPC_TIMEOUT_SEC
     max_depth: int = 4
     max_steps_per_call: int = 100
     budget_extension_enabled: bool = True
@@ -99,9 +128,9 @@ class AgentConfig:
             "OPENPLANTER_BASE_URL",
             "https://api.openai.com/v1",
         )
-        budget_extension_enabled = (
-            os.getenv("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "true").strip().lower()
-            in {"1", "true", "yes"}
+        budget_extension_enabled = _env_bool(
+            "OPENPLANTER_BUDGET_EXTENSION_ENABLED",
+            True,
         )
         budget_extension_block_steps = max(
             1,
@@ -169,6 +198,32 @@ class AgentConfig:
                     str(MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC),
                 )
             ),
+            chrome_mcp_enabled=_env_bool("OPENPLANTER_CHROME_MCP_ENABLED", False),
+            chrome_mcp_auto_connect=_env_bool("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", True),
+            chrome_mcp_browser_url=normalize_chrome_mcp_browser_url(
+                os.getenv("OPENPLANTER_CHROME_MCP_BROWSER_URL")
+            ),
+            chrome_mcp_channel=normalize_chrome_mcp_channel(
+                os.getenv("OPENPLANTER_CHROME_MCP_CHANNEL")
+            ),
+            chrome_mcp_connect_timeout_sec=max(
+                1,
+                int(
+                    os.getenv(
+                        "OPENPLANTER_CHROME_MCP_CONNECT_TIMEOUT_SEC",
+                        str(CHROME_MCP_CONNECT_TIMEOUT_SEC),
+                    )
+                ),
+            ),
+            chrome_mcp_rpc_timeout_sec=max(
+                1,
+                int(
+                    os.getenv(
+                        "OPENPLANTER_CHROME_MCP_RPC_TIMEOUT_SEC",
+                        str(CHROME_MCP_RPC_TIMEOUT_SEC),
+                    )
+                ),
+            ),
             max_depth=int(os.getenv("OPENPLANTER_MAX_DEPTH", "4")),
             max_steps_per_call=int(os.getenv("OPENPLANTER_MAX_STEPS", "100")),
             budget_extension_enabled=budget_extension_enabled,
@@ -194,10 +249,10 @@ class AgentConfig:
             rate_limit_retry_after_cap_sec=float(
                 os.getenv("OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC", "120.0")
             ),
-            recursive=os.getenv("OPENPLANTER_RECURSIVE", "true").strip().lower() in ("1", "true", "yes"),
+            recursive=_env_bool("OPENPLANTER_RECURSIVE", True),
             min_subtask_depth=int(os.getenv("OPENPLANTER_MIN_SUBTASK_DEPTH", "0")),
-            acceptance_criteria=os.getenv("OPENPLANTER_ACCEPTANCE_CRITERIA", "true").strip().lower() in ("1", "true", "yes"),
+            acceptance_criteria=_env_bool("OPENPLANTER_ACCEPTANCE_CRITERIA", True),
             max_plan_chars=int(os.getenv("OPENPLANTER_MAX_PLAN_CHARS", "40000")),
             max_turn_summaries=int(os.getenv("OPENPLANTER_MAX_TURN_SUMMARIES", "50")),
-            demo=os.getenv("OPENPLANTER_DEMO", "").strip().lower() in ("1", "true", "yes"),
+            demo=_env_bool("OPENPLANTER_DEMO", False),
         )

@@ -1,28 +1,78 @@
 use std::collections::HashMap;
-use tauri::State;
 use crate::state::AppState;
+use op_core::config::{normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel};
+use op_core::credentials::credentials_from_env;
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
 use op_core::settings::{PersistentSettings, SettingsStore};
-use op_core::credentials::credentials_from_env;
+use tauri::State;
 
-/// Get the current configuration.
-#[tauri::command]
-pub async fn get_config(
-    state: State<'_, AppState>,
-) -> Result<ConfigView, String> {
-    let cfg = state.config.lock().await;
-    let session_id = state.session_id.lock().await;
-    Ok(ConfigView {
+async fn make_config_view(
+    cfg: &op_core::config::AgentConfig,
+    session_id: Option<String>,
+    state: &AppState,
+) -> ConfigView {
+    let chrome_status = state.chrome_mcp_status(cfg).await;
+    ConfigView {
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         reasoning_effort: cfg.reasoning_effort.clone(),
+        chrome_mcp_enabled: cfg.chrome_mcp_enabled,
+        chrome_mcp_auto_connect: cfg.chrome_mcp_auto_connect,
+        chrome_mcp_browser_url: cfg.chrome_mcp_browser_url.clone(),
+        chrome_mcp_channel: cfg.chrome_mcp_channel.clone(),
+        chrome_mcp_connect_timeout_sec: cfg.chrome_mcp_connect_timeout_sec,
+        chrome_mcp_rpc_timeout_sec: cfg.chrome_mcp_rpc_timeout_sec,
+        chrome_mcp_status: chrome_status.status,
+        chrome_mcp_status_detail: chrome_status.detail,
         workspace: cfg.workspace.display().to_string(),
-        session_id: session_id.clone(),
+        session_id,
         recursive: cfg.recursive,
         max_depth: cfg.max_depth,
         max_steps_per_call: cfg.max_steps_per_call,
         demo: cfg.demo,
-    })
+    }
+}
+
+fn merge_settings(existing: PersistentSettings, incoming: PersistentSettings) -> PersistentSettings {
+    PersistentSettings {
+        default_model: incoming.default_model.or(existing.default_model),
+        default_reasoning_effort: incoming
+            .default_reasoning_effort
+            .or(existing.default_reasoning_effort),
+        default_model_openai: incoming.default_model_openai.or(existing.default_model_openai),
+        default_model_anthropic: incoming
+            .default_model_anthropic
+            .or(existing.default_model_anthropic),
+        default_model_openrouter: incoming
+            .default_model_openrouter
+            .or(existing.default_model_openrouter),
+        default_model_cerebras: incoming
+            .default_model_cerebras
+            .or(existing.default_model_cerebras),
+        default_model_ollama: incoming.default_model_ollama.or(existing.default_model_ollama),
+        chrome_mcp_enabled: incoming.chrome_mcp_enabled.or(existing.chrome_mcp_enabled),
+        chrome_mcp_auto_connect: incoming
+            .chrome_mcp_auto_connect
+            .or(existing.chrome_mcp_auto_connect),
+        chrome_mcp_browser_url: incoming
+            .chrome_mcp_browser_url
+            .or(existing.chrome_mcp_browser_url),
+        chrome_mcp_channel: incoming.chrome_mcp_channel.or(existing.chrome_mcp_channel),
+        chrome_mcp_connect_timeout_sec: incoming
+            .chrome_mcp_connect_timeout_sec
+            .or(existing.chrome_mcp_connect_timeout_sec),
+        chrome_mcp_rpc_timeout_sec: incoming
+            .chrome_mcp_rpc_timeout_sec
+            .or(existing.chrome_mcp_rpc_timeout_sec),
+    }
+}
+
+/// Get the current configuration.
+#[tauri::command]
+pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigView, String> {
+    let cfg = state.config.lock().await.clone();
+    let session_id = state.session_id.lock().await.clone();
+    Ok(make_config_view(&cfg, session_id, &state).await)
 }
 
 /// Update configuration fields.
@@ -45,18 +95,29 @@ pub async fn update_config(
             Some(effort)
         };
     }
-    let session_id = state.session_id.lock().await;
-    Ok(ConfigView {
-        provider: cfg.provider.clone(),
-        model: cfg.model.clone(),
-        reasoning_effort: cfg.reasoning_effort.clone(),
-        workspace: cfg.workspace.display().to_string(),
-        session_id: session_id.clone(),
-        recursive: cfg.recursive,
-        max_depth: cfg.max_depth,
-        max_steps_per_call: cfg.max_steps_per_call,
-        demo: cfg.demo,
-    })
+    if let Some(enabled) = partial.chrome_mcp_enabled {
+        cfg.chrome_mcp_enabled = enabled;
+    }
+    if let Some(auto_connect) = partial.chrome_mcp_auto_connect {
+        cfg.chrome_mcp_auto_connect = auto_connect;
+    }
+    if let Some(browser_url) = partial.chrome_mcp_browser_url {
+        cfg.chrome_mcp_browser_url = normalize_chrome_mcp_browser_url(Some(&browser_url));
+    }
+    if let Some(channel) = partial.chrome_mcp_channel {
+        cfg.chrome_mcp_channel = normalize_chrome_mcp_channel(Some(&channel));
+    }
+    if let Some(timeout) = partial.chrome_mcp_connect_timeout_sec {
+        cfg.chrome_mcp_connect_timeout_sec = timeout.max(1);
+    }
+    if let Some(timeout) = partial.chrome_mcp_rpc_timeout_sec {
+        cfg.chrome_mcp_rpc_timeout_sec = timeout.max(1);
+    }
+    let cfg_snapshot = cfg.clone();
+    drop(cfg);
+    state.sync_chrome_mcp_config(&cfg_snapshot).await;
+    let session_id = state.session_id.lock().await.clone();
+    Ok(make_config_view(&cfg_snapshot, session_id, &state).await)
 }
 
 /// Known models per provider for listing.
@@ -130,7 +191,8 @@ pub async fn save_settings(
 ) -> Result<(), String> {
     let cfg = state.config.lock().await;
     let store = SettingsStore::new(&cfg.workspace, &cfg.session_root_dir);
-    store.save(&settings).map_err(|e| e.to_string())
+    let merged = merge_settings(store.load(), settings);
+    store.save(&merged).map_err(|e| e.to_string())
 }
 
 /// Build credential status from config: which providers/services have API keys configured.

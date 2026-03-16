@@ -24,6 +24,7 @@ describe("completionRegistry", () => {
     expect(values).toContain("/status");
     expect(values).toContain("/model");
     expect(values).toContain("/reasoning");
+    expect(values).toContain("/chrome");
     expect(values).toContain("/init");
   });
 
@@ -85,6 +86,31 @@ describe("completionRegistry", () => {
       expect(level.children).toBeDefined();
       expect(level.children![0].value).toBe("--save");
     }
+  });
+
+  it("/chrome has expected subcommands", () => {
+    const chromeCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/chrome");
+    expect(chromeCmd).toBeDefined();
+    expect(chromeCmd!.children?.map((child) => child.value)).toEqual([
+      "status",
+      "on",
+      "off",
+      "auto",
+      "url",
+      "channel",
+    ]);
+  });
+
+  it("/chrome channel exposes supported channels and save flag", () => {
+    const chromeCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/chrome")!;
+    const channelCmd = chromeCmd.children!.find((c) => c.value === "channel")!;
+    expect(channelCmd.children?.map((child) => child.value)).toEqual([
+      "stable",
+      "beta",
+      "dev",
+      "canary",
+    ]);
+    expect(channelCmd.children?.[0].children?.[0].value).toBe("--save");
   });
 
   it("/help has no children", () => {
