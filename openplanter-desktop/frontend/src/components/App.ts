@@ -67,8 +67,6 @@ export function createApp(root: HTMLElement): void {
     settingsDisplay.innerHTML = [
       `<div><span class="label">provider:</span> <span class="value">${s.provider || "auto"}</span></div>`,
       `<div><span class="label">model:</span> <span class="value">${s.model || "\u2014"}</span></div>`,
-      `<div><span class="label">z.ai plan:</span> <span class="value">${s.zaiPlan || "paygo"}</span></div>`,
-      `<div><span class="label">web search:</span> <span class="value">${s.webSearchProvider || "exa"}</span></div>`,
       `<div><span class="label">reasoning:</span> <span class="value">${s.reasoningEffort ?? "off"}</span></div>`,
       `<div><span class="label">mode:</span> <span class="value">${s.recursive ? "recursive" : "flat"}</span></div>`,
     ].join("");
@@ -308,7 +306,7 @@ async function loadCredentials(container: HTMLElement): Promise<void> {
   try {
     const status = await getCredentialsStatus();
     container.innerHTML = "";
-    const providers = ["openai", "anthropic", "openrouter", "cerebras", "zai", "ollama", "exa", "firecrawl", "brave", "tavily", "voyage"];
+    const providers = ["openai", "anthropic", "openrouter", "cerebras", "ollama", "exa"];
     for (const p of providers) {
       const row = document.createElement("div");
       const hasKey = status[p] ?? false;
