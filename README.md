@@ -88,7 +88,7 @@ The container mounts `./workspace` as the agent's working directory.
 
 | Provider | Default Model | Env Var |
 |----------|---------------|---------|
-| OpenAI | `gpt-5.2` | `OPENAI_API_KEY` |
+| OpenAI | `gpt-5.2` | `OPENAI_API_KEY` or `OPENAI_OAUTH_TOKEN` |
 | Anthropic | `claude-opus-4-6` | `ANTHROPIC_API_KEY` |
 | OpenRouter | `anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` |
 | Cerebras | `qwen-3-235b-a22b-instruct-2507` | `CEREBRAS_API_KEY` |
@@ -128,7 +128,7 @@ Notes:
 - `chunking: "force"` always chunks, and `chunking: "off"` keeps the single-upload path.
 - Video inputs are audio-extracted with `ffmpeg` before transcription.
 
-All keys can also be set with an `OPENPLANTER_` prefix (e.g. `OPENPLANTER_OPENAI_API_KEY`), via `.env` files in the workspace, or via CLI flags.
+All keys can also be set with an `OPENPLANTER_` prefix (e.g. `OPENPLANTER_OPENAI_API_KEY` or `OPENPLANTER_OPENAI_OAUTH_TOKEN`), via `.env` files in the workspace, or via CLI flags.
 
 ## Agent Tools
 
@@ -231,6 +231,7 @@ OPENPLANTER_WORKSPACE=workspace
 |------|-------------|
 | `--provider NAME` | `auto`, `openai`, `anthropic`, `openrouter`, `cerebras`, `ollama` |
 | `--model NAME` | Model name or `newest` to auto-select |
+| `--openai-oauth-token TOKEN` | ChatGPT/OpenAI OAuth token override for OpenAI-compatible models |
 | `--reasoning-effort LEVEL` | `low`, `medium`, `high`, or `none` |
 | `--chrome-mcp` / `--no-chrome-mcp` | Enable or disable native Chrome DevTools MCP tools |
 | `--chrome-auto-connect` / `--no-chrome-auto-connect` | Use Chrome MCP auto-connect or require an explicit browser URL |
@@ -266,7 +267,7 @@ Use `--default-model`, `--default-reasoning-effort`, Chrome MCP slash commands w
 Keys are resolved in this priority order (highest wins):
 
 1. CLI flags (`--openai-api-key`, etc.)
-2. Environment variables (`OPENAI_API_KEY` or `OPENPLANTER_OPENAI_API_KEY`)
+2. Environment variables (`OPENAI_API_KEY`, `OPENPLANTER_OPENAI_API_KEY`, `OPENAI_OAUTH_TOKEN`, or `OPENPLANTER_OPENAI_OAUTH_TOKEN`)
 3. Nearest ancestor `.env` discovered from the resolved workspace path
 4. Workspace credential store (`.openplanter/credentials.json`)
 5. User credential store (`~/.openplanter/credentials.json`)

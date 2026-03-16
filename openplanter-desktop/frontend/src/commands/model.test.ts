@@ -63,6 +63,10 @@ describe("MODEL_ALIASES", () => {
   it("gpt5 alias", () => {
     expect(MODEL_ALIASES["gpt5"]).toBe("gpt-5.2");
   });
+
+  it("gpt54 alias", () => {
+    expect(MODEL_ALIASES["gpt54"]).toBe("gpt-5.4");
+  });
 });
 
 describe("handleModelCommand", () => {
