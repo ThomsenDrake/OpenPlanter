@@ -181,6 +181,9 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.reasoning_effort, "high")
         self.assertEqual(cfg.max_depth, 4)
         self.assertEqual(cfg.max_steps_per_call, 100)
+        self.assertTrue(cfg.budget_extension_enabled)
+        self.assertEqual(cfg.budget_extension_block_steps, 20)
+        self.assertEqual(cfg.budget_extension_max_blocks, 2)
         self.assertEqual(cfg.shell, "/bin/sh")
         self.assertEqual(
             cfg.openai_base_url,
@@ -200,6 +203,9 @@ class AgentConfigFromEnvTests(unittest.TestCase):
             "OPENPLANTER_REASONING_EFFORT": "low",
             "OPENPLANTER_MAX_DEPTH": "5",
             "OPENPLANTER_MAX_STEPS": "20",
+            "OPENPLANTER_BUDGET_EXTENSION_ENABLED": "false",
+            "OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS": "7",
+            "OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS": "1",
             "OPENPLANTER_SHELL": "/bin/bash",
             "OPENPLANTER_WEB_SEARCH_PROVIDER": "tavily",
             "OPENPLANTER_TAVILY_BASE_URL": "https://tavily.example",
@@ -211,6 +217,9 @@ class AgentConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.reasoning_effort, "low")
         self.assertEqual(cfg.max_depth, 5)
         self.assertEqual(cfg.max_steps_per_call, 20)
+        self.assertFalse(cfg.budget_extension_enabled)
+        self.assertEqual(cfg.budget_extension_block_steps, 7)
+        self.assertEqual(cfg.budget_extension_max_blocks, 1)
         self.assertEqual(cfg.shell, "/bin/bash")
         self.assertEqual(cfg.web_search_provider, "tavily")
         self.assertEqual(cfg.tavily_base_url, "https://tavily.example")

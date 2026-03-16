@@ -127,6 +127,9 @@ class AgentConfig:
     voyage_api_key: str | None = None
     max_depth: int = 4
     max_steps_per_call: int = 100
+    budget_extension_enabled: bool = True
+    budget_extension_block_steps: int = 20
+    budget_extension_max_blocks: int = 2
     max_observation_chars: int = 6000
     command_timeout_sec: int = 45
     shell: str = "/bin/sh"
@@ -213,6 +216,15 @@ class AgentConfig:
         web_search_provider = (os.getenv("OPENPLANTER_WEB_SEARCH_PROVIDER", "exa").strip().lower() or "exa")
         if web_search_provider not in {"exa", "firecrawl", "brave", "tavily"}:
             web_search_provider = "exa"
+        budget_extension_enabled = (os.getenv("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "true").strip().lower() in {"1", "true", "yes"})
+        budget_extension_block_steps = max(
+            1,
+            int(os.getenv("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", "20")),
+        )
+        budget_extension_max_blocks = max(
+            0,
+            int(os.getenv("OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS", "2")),
+        )
         return cls(
             workspace=ws,
             provider=os.getenv("OPENPLANTER_PROVIDER", "auto").strip().lower() or "auto",
@@ -247,6 +259,9 @@ class AgentConfig:
             voyage_api_key=voyage_api_key,
             max_depth=int(os.getenv("OPENPLANTER_MAX_DEPTH", "4")),
             max_steps_per_call=int(os.getenv("OPENPLANTER_MAX_STEPS", "100")),
+            budget_extension_enabled=budget_extension_enabled,
+            budget_extension_block_steps=budget_extension_block_steps,
+            budget_extension_max_blocks=budget_extension_max_blocks,
             max_observation_chars=int(os.getenv("OPENPLANTER_MAX_OBS_CHARS", "6000")),
             command_timeout_sec=int(os.getenv("OPENPLANTER_CMD_TIMEOUT", "45")),
             shell=os.getenv("OPENPLANTER_SHELL", "/bin/sh"),

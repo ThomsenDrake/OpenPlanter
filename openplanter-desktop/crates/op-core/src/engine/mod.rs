@@ -8,6 +8,7 @@ pub mod curator;
 pub mod investigation_state;
 pub mod judge;
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -17,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::builder::build_model;
 use crate::config::AgentConfig;
-use crate::events::{DeltaEvent, DeltaKind, LoopMetrics, LoopPhase, StepEvent, TokenUsage};
+use crate::events::{
+    CompletionMeta, DeltaEvent, DeltaKind, LoopMetrics, LoopPhase, StepEvent, TokenUsage,
+};
 use crate::model::{BaseModel, Message, ModelTurn, RateLimitError};
 use crate::prompts::build_system_prompt;
 use crate::tools::WorkspaceTools;
@@ -122,7 +125,12 @@ pub trait SolveEmitter: Send + Sync {
     fn emit_trace(&self, message: &str);
     fn emit_delta(&self, event: DeltaEvent);
     fn emit_step(&self, event: StepEvent);
-    fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>);
+    fn emit_complete(
+        &self,
+        result: &str,
+        loop_metrics: Option<LoopMetrics>,
+        completion: Option<CompletionMeta>,
+    );
     fn emit_error(&self, message: &str);
     fn emit_loop_health(
         &self,
@@ -191,6 +199,11 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
         max_recon_streak: 0,
         guardrail_warnings: 0,
         final_rejections: 0,
+        extensions_granted: 0,
+        extension_eligible_checks: 0,
+        extension_denials_no_progress: 0,
+        extension_denials_cap: 0,
+        termination_reason: "success".into(),
     };
     emitter.emit_loop_health(0, 1, LoopPhase::Finalize, loop_metrics.clone(), true);
 
@@ -209,7 +222,7 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
         loop_metrics: Some(loop_metrics.clone()),
     });
 
-    emitter.emit_complete(&response, Some(loop_metrics));
+    emitter.emit_complete(&response, Some(loop_metrics), None);
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -511,6 +524,253 @@ fn should_emit_recon_guardrail(recon_streak: u32, last_guardrail_streak: u32) ->
     recon_streak >= 3 && last_guardrail_streak == 0
 }
 
+const BUDGET_EXTENSION_WINDOW: usize = 12;
+const MIN_MEANINGFUL_RESULT_CHARS: usize = 24;
+const MIN_EXTENSION_PROGRESS_SIGNALS: usize = 2;
+
+#[derive(Debug, Clone)]
+struct StepProgressRecord {
+    phase: LoopPhase,
+    step_signature: String,
+    tool_count: usize,
+    failed_tool_step: bool,
+    successful_action_signatures: HashSet<String>,
+    state_delta_signatures: HashSet<String>,
+    completed_previews: Vec<String>,
+}
+
+fn normalize_progress_fragment(text: &str, max_len: usize) -> String {
+    let mut normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized = normalized.to_lowercase();
+    while normalized.starts_with('[') {
+        if let Some(idx) = normalized.find(']') {
+            normalized = normalized[idx + 1..].trim_start().to_string();
+        } else {
+            break;
+        }
+    }
+    if normalized.len() > max_len {
+        normalized = safe_prefix(&normalized, max_len).to_string();
+    }
+    normalized
+}
+
+fn summarize_observation(text: &str, max_len: usize) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.len() > max_len {
+        format!("{}...", safe_prefix(first, max_len.saturating_sub(3)))
+    } else {
+        first.to_string()
+    }
+}
+
+fn is_non_progress_tool(name: &str) -> bool {
+    is_recon_tool(name) || name == "think"
+}
+
+fn action_signature(name: &str, args: &str) -> String {
+    format!("{}|{}", name, normalize_progress_fragment(args, 160))
+}
+
+fn build_step_progress_record(
+    tool_calls: &[crate::model::ToolCall],
+    observations: &[(String, String, String, String, bool)],
+    phase: LoopPhase,
+) -> StepProgressRecord {
+    let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+    let has_artifact = tool_names.iter().any(|name| is_artifact_tool(name));
+    let has_error = observations.iter().any(|(_, _, _, _, is_error)| *is_error);
+    let mut record = StepProgressRecord {
+        phase,
+        step_signature: format!(
+            "{}|artifact={}|error={}",
+            tool_names.join(","),
+            if has_artifact { 1 } else { 0 },
+            if has_error { 1 } else { 0 }
+        ),
+        tool_count: tool_calls.len(),
+        failed_tool_step: has_error,
+        successful_action_signatures: HashSet::new(),
+        state_delta_signatures: HashSet::new(),
+        completed_previews: Vec::new(),
+    };
+    for (_, name, args, content, is_error) in observations {
+        if *is_error || is_non_progress_tool(name) {
+            continue;
+        }
+        let normalized = normalize_progress_fragment(content, 120);
+        if normalized.len() < MIN_MEANINGFUL_RESULT_CHARS {
+            continue;
+        }
+        record
+            .successful_action_signatures
+            .insert(action_signature(name, args));
+        record
+            .state_delta_signatures
+            .insert(format!("{}|{}", name, normalized));
+        let preview = summarize_observation(content, 120);
+        if !preview.is_empty() && !record.completed_previews.contains(&preview) {
+            record.completed_previews.push(preview);
+        }
+    }
+    record
+}
+
+fn evaluate_budget_extension(
+    records: &[StepProgressRecord],
+    recon_streak: u32,
+) -> (bool, Map<String, Value>) {
+    let start = records.len().saturating_sub(BUDGET_EXTENSION_WINDOW);
+    let window = &records[start..];
+
+    let tool_steps = window.iter().filter(|record| record.tool_count > 0).count();
+    let failed_steps = window.iter().filter(|record| record.failed_tool_step).count();
+    let failure_ratio = if tool_steps == 0 {
+        0.0
+    } else {
+        failed_steps as f64 / tool_steps as f64
+    };
+
+    let mut repeated_signature_streak = 1usize;
+    let mut current_streak = 1usize;
+    let mut previous_signature: Option<&str> = None;
+    for record in window {
+        match previous_signature {
+            Some(previous) if previous == record.step_signature => {
+                current_streak += 1;
+            }
+            _ => {
+                current_streak = 1;
+                previous_signature = Some(record.step_signature.as_str());
+            }
+        }
+        repeated_signature_streak = repeated_signature_streak.max(current_streak);
+    }
+
+    let mut prior_action_signatures = HashSet::new();
+    for record in &records[..start] {
+        prior_action_signatures.extend(record.successful_action_signatures.iter().cloned());
+    }
+
+    let mut recent_action_signatures = HashSet::new();
+    let mut recent_state_delta_signatures = HashSet::new();
+    let mut has_build_or_finalize = false;
+    for record in window {
+        recent_action_signatures.extend(record.successful_action_signatures.iter().cloned());
+        recent_state_delta_signatures.extend(record.state_delta_signatures.iter().cloned());
+        has_build_or_finalize |= matches!(record.phase, LoopPhase::Build | LoopPhase::Finalize);
+    }
+
+    let novel_action_count = recent_action_signatures
+        .difference(&prior_action_signatures)
+        .count();
+    let state_delta_count = recent_state_delta_signatures.len();
+    let positive_signals = usize::from(novel_action_count >= 2)
+        + usize::from(state_delta_count >= 2)
+        + usize::from(has_build_or_finalize);
+
+    let mut blockers = Vec::new();
+    if repeated_signature_streak >= 3 {
+        blockers.push("repeated_signatures");
+    }
+    if failure_ratio > 0.6 {
+        blockers.push("high_failure_ratio");
+    }
+    if recon_streak >= 4 {
+        blockers.push("recon_streak");
+    }
+
+    let mut payload = Map::new();
+    payload.insert("window_size".into(), Value::from(window.len() as u64));
+    payload.insert(
+        "repeated_signature_streak".into(),
+        Value::from(repeated_signature_streak as u64),
+    );
+    payload.insert("failure_ratio".into(), Value::from(failure_ratio));
+    payload.insert("novel_action_count".into(), Value::from(novel_action_count as u64));
+    payload.insert("state_delta_count".into(), Value::from(state_delta_count as u64));
+    payload.insert("has_build_or_finalize".into(), Value::from(has_build_or_finalize));
+    payload.insert("positive_signals".into(), Value::from(positive_signals as u64));
+    payload.insert(
+        "blockers".into(),
+        Value::Array(
+            blockers
+                .iter()
+                .map(|blocker| Value::from((*blocker).to_string()))
+                .collect(),
+        ),
+    );
+
+    (
+        blockers.is_empty() && positive_signals >= MIN_EXTENSION_PROGRESS_SIGNALS,
+        payload,
+    )
+}
+
+fn build_partial_completion_text(
+    objective: &str,
+    loop_metrics: &LoopMetrics,
+    records: &[StepProgressRecord],
+) -> String {
+    let mut completed_previews = Vec::new();
+    for record in records.iter().rev().take(BUDGET_EXTENSION_WINDOW) {
+        for preview in &record.completed_previews {
+            if !completed_previews.contains(preview) {
+                completed_previews.push(preview.clone());
+            }
+            if completed_previews.len() >= 3 {
+                break;
+            }
+        }
+        if completed_previews.len() >= 3 {
+            break;
+        }
+    }
+
+    let completed_block = if completed_previews.is_empty() {
+        "- The run gathered additional context but did not converge on a final artifact before the bounded limit.".to_string()
+    } else {
+        completed_previews
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut next_actions = Vec::new();
+    if loop_metrics.termination_reason == "budget_no_progress" {
+        next_actions.push(
+            "Stop repeating the stalled loop and resume with a narrower next slice or a different tactic."
+                .to_string(),
+        );
+    }
+    if loop_metrics.termination_reason == "budget_cap" {
+        next_actions.push(
+            "Resume from the saved state and focus on finishing the deliverable instead of reopening the full search space."
+                .to_string(),
+        );
+    }
+    next_actions.push(format!("Continue the objective with the strongest completed lead: {objective}"));
+    next_actions.push(
+        "Turn the completed work below into a concrete artifact or summary before doing more exploration."
+            .to_string(),
+    );
+
+    format!(
+        "Partial completion for objective: {objective}\nStopped after {} steps with {} budget extension(s). Termination reason: {}.\n\nCompleted work:\n{}\n\nRemaining work:\n- Finish the deliverable using the completed work below and avoid repeating the stalled loop.\n\nSuggested next actions:\n{}",
+        loop_metrics.steps,
+        loop_metrics.extensions_granted,
+        loop_metrics.termination_reason,
+        completed_block,
+        next_actions
+            .iter()
+            .take(4)
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 /// Real solve flow with a multi-step agentic loop.
 ///
 /// Calls the model with tool definitions. If the model returns tool calls,
@@ -579,16 +839,25 @@ pub async fn solve_with_initial_context(
         },
     ];
 
-    let max_steps = config.max_steps_per_call as usize;
     let mut loop_metrics = LoopMetrics::default();
     let mut last_guardrail_streak = 0u32;
     let mut active_curator_phase: Option<LoopPhase> = None;
     let mut pending_curator_deltas: Vec<CuratorStateDelta> = Vec::new();
+    let mut step_records: Vec<StepProgressRecord> = Vec::new();
+    let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
+    let max_total_steps = active_step_budget
+        + if config.budget_extension_enabled {
+            (config.budget_extension_block_steps.max(1) * config.budget_extension_max_blocks.max(0))
+                as usize
+        } else {
+            0
+        };
 
     // 4. Agentic loop
-    for step in 1..=max_steps {
+    for step in 1..=max_total_steps {
         if cancel.is_cancelled() {
             tools.cleanup();
+            loop_metrics.termination_reason = "cancelled".into();
             flush_pending_curator_checkpoint(
                 &mut pending_curator_deltas,
                 "cancelled",
@@ -623,6 +892,11 @@ pub async fn solve_with_initial_context(
             Err(e) => {
                 let msg = e.to_string();
                 tools.cleanup();
+                loop_metrics.termination_reason = if msg == "Cancelled" {
+                    "cancelled".into()
+                } else {
+                    "model_error".into()
+                };
                 flush_pending_curator_checkpoint(
                     &mut pending_curator_deltas,
                     if msg == "Cancelled" {
@@ -681,6 +955,7 @@ pub async fn solve_with_initial_context(
             }
             let phase = LoopPhase::Finalize;
             increment_phase(&mut loop_metrics, &phase);
+            loop_metrics.termination_reason = "success".into();
             emitter.emit_loop_health(0, step as u32, phase.clone(), loop_metrics.clone(), true);
             let tool_name = None;
             emitter.emit_step(StepEvent {
@@ -704,7 +979,7 @@ pub async fn solve_with_initial_context(
                 emitter,
             )
             .await;
-            emitter.emit_complete(&turn.text, Some(loop_metrics.clone()));
+            emitter.emit_complete(&turn.text, Some(loop_metrics.clone()), None);
             tools.cleanup();
             return;
         }
@@ -789,6 +1064,11 @@ pub async fn solve_with_initial_context(
                 content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs.".to_string(),
             });
         }
+        step_records.push(build_step_progress_record(
+            &turn.tool_calls,
+            &tool_observations,
+            phase.clone(),
+        ));
         emitter.emit_loop_health(0, step as u32, phase.clone(), loop_metrics.clone(), false);
 
         // Emit step (non-final) AFTER tools execute so the frontend
@@ -809,20 +1089,75 @@ pub async fn solve_with_initial_context(
         });
 
         // Budget warnings
-        let remaining = max_steps - step;
-        if remaining == max_steps / 2 {
+        let remaining = active_step_budget.saturating_sub(step);
+        if remaining == active_step_budget / 2 {
             emitter.emit_trace(&format!(
-                "Step budget: {remaining}/{max_steps} steps remaining (50%)"
+                "Step budget: {remaining}/{active_step_budget} steps remaining (50%)"
             ));
-        } else if remaining == max_steps / 4 {
+        } else if remaining == active_step_budget / 4 {
             emitter.emit_trace(&format!(
-                "Step budget: {remaining}/{max_steps} steps remaining (25%)"
+                "Step budget: {remaining}/{active_step_budget} steps remaining (25%)"
             ));
+        }
+
+        if step >= active_step_budget {
+            let (eligible, evaluation) =
+                evaluate_budget_extension(&step_records, loop_metrics.recon_streak);
+            loop_metrics.extension_eligible_checks += 1;
+            emitter.emit_trace(&format!(
+                "[d0/s{step}] budget boundary reached: eligible={} evaluation={}",
+                eligible,
+                Value::Object(evaluation.clone())
+            ));
+            let can_extend = config.budget_extension_enabled
+                && loop_metrics.extensions_granted < config.budget_extension_max_blocks as u32
+                && eligible;
+            if can_extend {
+                loop_metrics.extensions_granted += 1;
+                active_step_budget += config.budget_extension_block_steps.max(1) as usize;
+                messages.push(Message::User {
+                    content: "Progress-based budget extension granted. You have a small number of extra steps. Finish the deliverable now and avoid repeating the same loop.".to_string(),
+                });
+                continue;
+            }
+
+            if loop_metrics.extensions_granted >= config.budget_extension_max_blocks as u32 {
+                loop_metrics.extension_denials_cap += 1;
+                loop_metrics.termination_reason = "budget_cap".into();
+            } else {
+                loop_metrics.extension_denials_no_progress += 1;
+                loop_metrics.termination_reason = "budget_no_progress".into();
+            }
+
+            tools.cleanup();
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "budget_exhausted",
+                config,
+                &cancel,
+                emitter,
+            )
+            .await;
+            emitter.emit_complete(
+                &build_partial_completion_text(objective, &loop_metrics, &step_records),
+                Some(loop_metrics.clone()),
+                Some(CompletionMeta {
+                    kind: "partial".into(),
+                    reason: loop_metrics.termination_reason.clone(),
+                    steps_used: loop_metrics.steps,
+                    max_steps: active_step_budget as u32,
+                    extensions_granted: loop_metrics.extensions_granted,
+                    extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
+                    extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
+                }),
+            );
+            return;
         }
     }
 
     // Budget exhausted
     tools.cleanup();
+    loop_metrics.termination_reason = "budget_cap".into();
     flush_pending_curator_checkpoint(
         &mut pending_curator_deltas,
         "budget_exhausted",
@@ -831,10 +1166,19 @@ pub async fn solve_with_initial_context(
         emitter,
     )
     .await;
-    emitter.emit_error(&format!(
-        "Step budget exhausted after {max_steps} steps. \
-         The model did not produce a final answer within the allowed steps."
-    ));
+    emitter.emit_complete(
+        &build_partial_completion_text(objective, &loop_metrics, &step_records),
+        Some(loop_metrics.clone()),
+        Some(CompletionMeta {
+            kind: "partial".into(),
+            reason: loop_metrics.termination_reason.clone(),
+            steps_used: loop_metrics.steps,
+            max_steps: active_step_budget as u32,
+            extensions_granted: loop_metrics.extensions_granted,
+            extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
+            extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -847,6 +1191,25 @@ mod tests {
             id: format!("call-{name}"),
             name: name.to_string(),
             arguments: "{}".to_string(),
+        }
+    }
+
+    fn progress_record(
+        phase: LoopPhase,
+        step_signature: &str,
+        action_sigs: &[&str],
+        delta_sigs: &[&str],
+        previews: &[&str],
+        failed_tool_step: bool,
+    ) -> StepProgressRecord {
+        StepProgressRecord {
+            phase,
+            step_signature: step_signature.to_string(),
+            tool_count: 1,
+            failed_tool_step,
+            successful_action_signatures: action_sigs.iter().map(|s| (*s).to_string()).collect(),
+            state_delta_signatures: delta_sigs.iter().map(|s| (*s).to_string()).collect(),
+            completed_previews: previews.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
@@ -895,7 +1258,12 @@ mod tests {
             self.events.lock().unwrap().push(RecordedEvent::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<LoopMetrics>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<LoopMetrics>,
+            _completion: Option<CompletionMeta>,
+        ) {
             self.events
                 .lock()
                 .unwrap()
@@ -1058,6 +1426,140 @@ mod tests {
             !has_complete,
             "should not have Complete after mid-flight cancel"
         );
+    }
+
+    #[test]
+    fn test_evaluate_budget_extension_grants_on_real_progress() {
+        let records = vec![
+            progress_record(
+                LoopPhase::Build,
+                "write_file|artifact=1|error=0",
+                &["write_file|{\"path\":\"a.txt\"}"],
+                &["write_file|wrote a.txt"],
+                &["Wrote a.txt"],
+                false,
+            ),
+            progress_record(
+                LoopPhase::Build,
+                "write_file|artifact=1|error=0",
+                &["write_file|{\"path\":\"b.txt\"}"],
+                &["write_file|wrote b.txt"],
+                &["Wrote b.txt"],
+                false,
+            ),
+        ];
+
+        let (eligible, payload) = evaluate_budget_extension(&records, 0);
+        assert!(eligible, "expected progress window to earn an extension");
+        assert_eq!(payload.get("novel_action_count"), Some(&Value::from(2u64)));
+        assert_eq!(payload.get("state_delta_count"), Some(&Value::from(2u64)));
+        assert_eq!(
+            payload.get("blockers"),
+            Some(&Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn test_evaluate_budget_extension_blocks_repeated_signatures() {
+        let records = vec![
+            progress_record(
+                LoopPhase::Investigate,
+                "run_shell|artifact=0|error=0",
+                &["run_shell|{\"command\":\"echo a\"}"],
+                &["run_shell|echo a"],
+                &["echo a"],
+                false,
+            ),
+            progress_record(
+                LoopPhase::Investigate,
+                "run_shell|artifact=0|error=0",
+                &["run_shell|{\"command\":\"echo b\"}"],
+                &["run_shell|echo b"],
+                &["echo b"],
+                false,
+            ),
+            progress_record(
+                LoopPhase::Investigate,
+                "run_shell|artifact=0|error=0",
+                &["run_shell|{\"command\":\"echo c\"}"],
+                &["run_shell|echo c"],
+                &["echo c"],
+                false,
+            ),
+        ];
+
+        let (eligible, payload) = evaluate_budget_extension(&records, 0);
+        assert!(!eligible, "repeated signatures should block extension");
+        let blockers = payload
+            .get("blockers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(blockers.contains(&Value::from("repeated_signatures")));
+    }
+
+    #[test]
+    fn test_normalize_progress_fragment_truncates_on_utf8_boundary() {
+        let normalized =
+            normalize_progress_fragment("[Step 1/100] [Context 10/20] 日本語テスト", 7);
+
+        assert_eq!(normalized, "日本");
+        assert!(normalized.len() <= 7);
+    }
+
+    #[test]
+    fn test_summarize_observation_truncates_on_utf8_boundary() {
+        let summary = summarize_observation("abc日本語の長い説明\nsecond line", 8);
+
+        assert_eq!(summary, "abc...");
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn test_summarize_observation_small_limit_still_returns_ellipsis() {
+        let summary = summarize_observation("日本語の長い説明", 2);
+
+        assert_eq!(summary, "...");
+    }
+
+    #[test]
+    fn test_build_partial_completion_text_mentions_budget_reason_and_preview() {
+        let records = vec![progress_record(
+            LoopPhase::Build,
+            "write_file|artifact=1|error=0",
+            &["write_file|{\"path\":\"artifact.txt\"}"],
+            &["write_file|wrote artifact"],
+            &["Wrote 8 chars to artifact.txt"],
+            false,
+        )];
+        let loop_metrics = LoopMetrics {
+            steps: 4,
+            model_turns: 4,
+            tool_calls: 2,
+            investigate_steps: 0,
+            build_steps: 1,
+            iterate_steps: 0,
+            finalize_steps: 0,
+            recon_streak: 0,
+            max_recon_streak: 0,
+            guardrail_warnings: 0,
+            final_rejections: 0,
+            extensions_granted: 1,
+            extension_eligible_checks: 2,
+            extension_denials_no_progress: 0,
+            extension_denials_cap: 1,
+            termination_reason: "budget_cap".into(),
+        };
+
+        let text = build_partial_completion_text(
+            "finish the artifact",
+            &loop_metrics,
+            &records,
+        );
+
+        assert!(text.contains("Partial completion for objective: finish the artifact"));
+        assert!(text.contains("Termination reason: budget_cap"));
+        assert!(text.contains("Wrote 8 chars to artifact.txt"));
     }
 
     #[tokio::test]

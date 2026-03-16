@@ -1,5 +1,6 @@
 /** Simple observable state store. */
 import type {
+  CompletionMeta,
   InitStatusView,
   LoopMetrics,
   LoopHealthEvent,
@@ -85,6 +86,7 @@ export interface AppState {
   currentDepth: number;
   loopHealth: LoopHealthEvent | null;
   lastLoopMetrics: LoopMetrics | null;
+  lastCompletion: CompletionMeta | null;
   inputHistory: string[];
   inputQueue: string[];
   initGateState: "ready" | "requires_action" | "blocked";
@@ -115,6 +117,7 @@ export const appState = new Store<AppState>({
   currentDepth: 0,
   loopHealth: null,
   lastLoopMetrics: null,
+  lastCompletion: null,
   inputHistory: [],
   inputQueue: [],
   initGateState: "ready",

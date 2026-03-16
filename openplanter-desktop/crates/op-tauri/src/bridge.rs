@@ -11,8 +11,8 @@ use tauri::{AppHandle, Emitter};
 
 use op_core::engine::SolveEmitter;
 use op_core::events::{
-    CompleteEvent, CuratorUpdateEvent, DeltaEvent, DeltaKind, ErrorEvent, LoopHealthEvent,
-    LoopMetrics, LoopPhase, StepEvent, TraceEvent,
+    CompleteEvent, CompletionMeta, CuratorUpdateEvent, DeltaEvent, DeltaKind, ErrorEvent,
+    LoopHealthEvent, LoopMetrics, LoopPhase, StepEvent, TraceEvent,
 };
 use op_core::session::replay::{ReplayEntry, ReplayLogger, StepToolCallEntry};
 
@@ -108,13 +108,19 @@ impl SolveEmitter for TauriEmitter {
         let _ = self.handle.emit("agent:step", event);
     }
 
-    fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+    fn emit_complete(
+        &self,
+        result: &str,
+        loop_metrics: Option<LoopMetrics>,
+        completion: Option<CompletionMeta>,
+    ) {
         eprintln!("[bridge] complete: {result}");
         let _ = self.handle.emit(
             "agent:complete",
             CompleteEvent {
                 result: result.to_string(),
                 loop_metrics,
+                completion,
             },
         );
     }
@@ -330,7 +336,12 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         self.inner.emit_step(event);
     }
 
-    fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+    fn emit_complete(
+        &self,
+        result: &str,
+        loop_metrics: Option<LoopMetrics>,
+        completion: Option<CompletionMeta>,
+    ) {
         let entry = ReplayEntry {
             seq: 0,
             timestamp: String::new(),
@@ -356,7 +367,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             });
         });
 
-        self.inner.emit_complete(result, loop_metrics);
+        self.inner.emit_complete(result, loop_metrics, completion);
     }
 
     fn emit_error(&self, message: &str) {
@@ -420,7 +431,7 @@ mod tests {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<CompletionMeta>) {}
         fn emit_error(&self, _: &str) {}
     }
 
@@ -537,7 +548,7 @@ mod tests {
             self.deltas.lock().unwrap().push(event);
         }
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<CompletionMeta>) {}
         fn emit_error(&self, _: &str) {}
     }
 

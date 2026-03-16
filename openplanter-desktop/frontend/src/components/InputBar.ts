@@ -116,6 +116,7 @@ export function createInputBar(): HTMLElement {
       currentDepth: 0,
       loopHealth: null,
       lastLoopMetrics: null,
+      lastCompletion: null,
       messages: [
         ...s.messages,
         {
@@ -248,6 +249,7 @@ export function createInputBar(): HTMLElement {
       currentDepth: 0,
       loopHealth: null,
       lastLoopMetrics: null,
+      lastCompletion: null,
       messages: [
         ...s.messages,
         {

@@ -49,6 +49,11 @@ pub struct LoopMetrics {
     pub max_recon_streak: u32,
     pub guardrail_warnings: u32,
     pub final_rejections: u32,
+    pub extensions_granted: u32,
+    pub extension_eligible_checks: u32,
+    pub extension_denials_no_progress: u32,
+    pub extension_denials_cap: u32,
+    pub termination_reason: String,
 }
 
 /// Token usage counters.
@@ -76,11 +81,41 @@ pub enum DeltaKind {
 }
 
 /// Agent solve completed successfully.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionKind {
+    Final,
+    Partial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionReason {
+    FinalAnswer,
+    BudgetNoProgress,
+    BudgetCap,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CompletionMeta {
+    pub kind: String,
+    pub reason: String,
+    pub steps_used: u32,
+    pub max_steps: u32,
+    pub extensions_granted: u32,
+    pub extension_block_steps: u32,
+    pub extension_max_blocks: u32,
+}
+
+/// Agent solve completed successfully.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteEvent {
     pub result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_metrics: Option<LoopMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<CompletionMeta>,
 }
 
 /// Periodic loop health telemetry event.
@@ -451,6 +486,11 @@ mod tests {
                 max_recon_streak: 1,
                 guardrail_warnings: 0,
                 final_rejections: 1,
+                extensions_granted: 0,
+                extension_eligible_checks: 0,
+                extension_denials_no_progress: 0,
+                extension_denials_cap: 0,
+                termination_reason: String::new(),
             }
         );
     }
