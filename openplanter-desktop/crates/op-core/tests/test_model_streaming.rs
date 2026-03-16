@@ -549,7 +549,7 @@ async fn test_solve_with_mock_anthropic() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev::Step(event));
         }
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>) {
+        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events
                 .lock()
                 .unwrap()
@@ -657,7 +657,7 @@ async fn test_solve_with_mock_openai() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev2::Step(event));
         }
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>) {
+        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events
                 .lock()
                 .unwrap()
@@ -754,7 +754,7 @@ async fn test_solve_http_error_emits_error() {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
         fn emit_error(&self, msg: &str) {
             self.errors.lock().unwrap().push(msg.to_string());
         }
@@ -812,7 +812,7 @@ async fn test_solve_rate_limit_retry_eventually_completes() {
 
         fn emit_step(&self, _: StepEvent) {}
 
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>) {
+        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events
                 .lock()
                 .unwrap()
@@ -902,7 +902,7 @@ async fn test_solve_cancel_emits_cancelled() {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
         fn emit_error(&self, msg: &str) {
             self.events.lock().unwrap().push(msg.to_string());
         }
@@ -947,7 +947,7 @@ async fn test_solve_demo_mode_bypasses_llm() {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>) {
+        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events.lock().unwrap().push(result.to_string());
         }
         fn emit_error(&self, msg: &str) {
@@ -988,7 +988,7 @@ async fn test_solve_missing_key_emits_error() {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
         fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
         fn emit_error(&self, msg: &str) {
             self.errors.lock().unwrap().push(msg.to_string());
         }
@@ -1153,7 +1153,7 @@ async fn test_solve_multi_step_agentic_loop() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev3::Step(event));
         }
-        fn emit_complete(&self, result: &str, loop_metrics: Option<op_core::events::LoopMetrics>) {
+        fn emit_complete(&self, result: &str, loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events.lock().unwrap().push(Ev3::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1335,7 +1335,7 @@ async fn test_solve_flushes_final_curator_checkpoint_before_complete() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, result: &str, _: Option<LoopMetrics>) {
+        fn emit_complete(&self, result: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {
             self.events
                 .lock()
                 .unwrap()
@@ -1434,7 +1434,7 @@ async fn test_solve_flushes_cancelled_checkpoint_before_error() {
             }
         }
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1536,7 +1536,7 @@ async fn test_solve_flushes_model_error_checkpoint_before_error() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1631,7 +1631,7 @@ async fn test_solve_flushes_tool_loop_cancel_checkpoint_before_error() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>) {}
+        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1747,7 +1747,7 @@ async fn test_solve_rejects_meta_final_until_concrete_completion() {
             self.events.lock().unwrap().push(Ev4::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events.lock().unwrap().push(Ev4::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1861,7 +1861,7 @@ async fn test_solve_allows_structural_meta_for_plan_objectives() {
             self.events.lock().unwrap().push(Ev5::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events.lock().unwrap().push(Ev5::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1964,7 +1964,7 @@ async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
             self.events.lock().unwrap().push(Ev6::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>) {
+        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
             self.events.lock().unwrap().push(Ev6::Complete {
                 result: result.to_string(),
                 loop_metrics,

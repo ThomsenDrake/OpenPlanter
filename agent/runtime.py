@@ -406,6 +406,11 @@ class SessionRuntime:
         loop_metrics.setdefault("tool_calls", 0)
         loop_metrics.setdefault("guardrail_warnings", 0)
         loop_metrics.setdefault("final_rejections", 0)
+        loop_metrics.setdefault("extensions_granted", 0)
+        loop_metrics.setdefault("extension_eligible_checks", 0)
+        loop_metrics.setdefault("extension_denials_no_progress", 0)
+        loop_metrics.setdefault("extension_denials_cap", 0)
+        loop_metrics.setdefault("termination_reason", "")
         loop_metrics.setdefault("phase_counts", {})
         if not isinstance(loop_metrics["phase_counts"], dict):
             loop_metrics["phase_counts"] = {}
@@ -538,6 +543,11 @@ class SessionRuntime:
                 "tool_calls": 0,
                 "guardrail_warnings": 0,
                 "final_rejections": 0,
+                "extensions_granted": 0,
+                "extension_eligible_checks": 0,
+                "extension_denials_no_progress": 0,
+                "extension_denials_cap": 0,
+                "termination_reason": "",
                 "phase_counts": {"investigate": 0, "build": 0, "iterate": 0, "finalize": 0},
             }
         self.loop_metrics["turns"] = int(self.loop_metrics.get("turns", 0)) + 1
@@ -546,6 +556,11 @@ class SessionRuntime:
         self.loop_metrics["tool_calls"] = int(self.loop_metrics.get("tool_calls", 0)) + int(latest_loop_metrics.get("tool_calls", 0))
         self.loop_metrics["guardrail_warnings"] = int(self.loop_metrics.get("guardrail_warnings", 0)) + int(latest_loop_metrics.get("guardrail_warnings", 0))
         self.loop_metrics["final_rejections"] = int(self.loop_metrics.get("final_rejections", 0)) + int(latest_loop_metrics.get("final_rejections", 0))
+        self.loop_metrics["extensions_granted"] = int(self.loop_metrics.get("extensions_granted", 0)) + int(latest_loop_metrics.get("extensions_granted", 0))
+        self.loop_metrics["extension_eligible_checks"] = int(self.loop_metrics.get("extension_eligible_checks", 0)) + int(latest_loop_metrics.get("extension_eligible_checks", 0))
+        self.loop_metrics["extension_denials_no_progress"] = int(self.loop_metrics.get("extension_denials_no_progress", 0)) + int(latest_loop_metrics.get("extension_denials_no_progress", 0))
+        self.loop_metrics["extension_denials_cap"] = int(self.loop_metrics.get("extension_denials_cap", 0)) + int(latest_loop_metrics.get("extension_denials_cap", 0))
+        self.loop_metrics["termination_reason"] = str(latest_loop_metrics.get("termination_reason", ""))
         phase_counts = self.loop_metrics.setdefault("phase_counts", {})
         latest_phase_counts = latest_loop_metrics.get("phase_counts", {})
         if not isinstance(phase_counts, dict):

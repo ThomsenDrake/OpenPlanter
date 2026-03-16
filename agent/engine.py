@@ -94,6 +94,10 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _CONDENSATION_THRESHOLD = 0.75
+_BUDGET_EXTENSION_WINDOW = 12
+_MIN_EXTENSION_PROGRESS_SIGNALS = 2
+_MIN_MEANINGFUL_RESULT_CHARS = 24
+_NON_PROGRESS_TOOL_NAMES = _RECON_TOOL_NAMES | {"think"}
 
 
 def _model_tier(model_name: str, reasoning_effort: str | None = None) -> int:
@@ -182,6 +186,224 @@ class TurnSummary:
             steps_used=int(payload.get("steps_used", 0) or 0),
             replay_seq_start=int(payload.get("replay_seq_start", 0) or 0),
         )
+
+
+@dataclass
+class StepProgressRecord:
+    step: int
+    phase: str
+    step_signature: str
+    tool_count: int
+    failed_tool_step: bool
+    successful_action_signatures: set[str] = field(default_factory=set)
+    state_delta_signatures: set[str] = field(default_factory=set)
+    completed_previews: list[str] = field(default_factory=list)
+
+
+def _normalize_progress_fragment(text: str, max_len: int = 120) -> str:
+    collapsed = re.sub(r"\s+", " ", text.strip().lower())
+    collapsed = re.sub(r"^(?:\[[^\]]+\]\s*)+", "", collapsed)
+    if len(collapsed) > max_len:
+        collapsed = collapsed[: max_len - 3] + "..."
+    return collapsed
+
+
+def _action_signature(name: str, args: dict[str, Any]) -> str:
+    payload = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    payload = payload[:160]
+    return f"{name}|{payload}"
+
+
+def _looks_like_failed_tool_result(name: str, result: ToolResult) -> bool:
+    if result.is_error:
+        return True
+    content = result.content.strip()
+    normalized = _normalize_progress_fragment(content, max_len=200)
+    exit_match = re.search(r"\[exit_code=(-?\d+)\]", content)
+    if exit_match:
+        try:
+            if int(exit_match.group(1)) != 0:
+                return True
+        except ValueError:
+            pass
+    failure_prefixes = (
+        "file not found:",
+        "path is a directory, not a file:",
+        "failed to ",
+        "blocked:",
+        "blocked by policy:",
+        "unsupported image format:",
+        "image too large:",
+        "max recursion depth reached;",
+        "cannot delegate to higher-tier model",
+        "task cancelled.",
+        "tool ",
+    )
+    if normalized.startswith(failure_prefixes):
+        return True
+    if normalized.startswith("search_files requires ") or normalized.startswith("read_file requires "):
+        return True
+    if normalized.startswith("run_shell requires ") or normalized.startswith("apply_patch requires "):
+        return True
+    return " crashed:" in normalized
+
+
+def _build_step_progress_record(
+    step: int,
+    phase: str,
+    tool_calls: list[ToolCall],
+    results: list[ToolResult],
+) -> StepProgressRecord:
+    tool_names = [tc.name for tc in tool_calls]
+    has_artifact = any(name in _ARTIFACT_TOOL_NAMES for name in tool_names)
+    failed_results = [
+        _looks_like_failed_tool_result(tool_call.name, result)
+        for tool_call, result in zip(tool_calls, results)
+    ]
+    has_error = any(failed_results)
+    record = StepProgressRecord(
+        step=step,
+        phase=phase,
+        step_signature=f"{','.join(sorted(tool_names))}|artifact={int(has_artifact)}|error={int(has_error)}",
+        tool_count=len(tool_calls),
+        failed_tool_step=has_error,
+    )
+    for tool_call, result, failed_result in zip(tool_calls, results, failed_results):
+        if failed_result or tool_call.name in _NON_PROGRESS_TOOL_NAMES:
+            continue
+        normalized_result = _normalize_progress_fragment(result.content)
+        if len(normalized_result) < _MIN_MEANINGFUL_RESULT_CHARS:
+            continue
+        record.successful_action_signatures.add(_action_signature(tool_call.name, tool_call.arguments))
+        record.state_delta_signatures.add(f"{tool_call.name}|{normalized_result}")
+        preview = _summarize_observation(result.content)
+        if preview not in record.completed_previews:
+            record.completed_previews.append(preview)
+    return record
+
+
+def _evaluate_budget_extension(
+    records: list[StepProgressRecord],
+    *,
+    recon_streak: int,
+) -> dict[str, Any]:
+    window = records[-_BUDGET_EXTENSION_WINDOW:]
+    tool_steps = sum(1 for record in window if record.tool_count > 0)
+    failed_steps = sum(1 for record in window if record.failed_tool_step)
+    failure_ratio = (failed_steps / tool_steps) if tool_steps else 0.0
+
+    repeated_signature_streak = 1
+    current_streak = 1
+    previous_signature: str | None = None
+    for record in window:
+        if previous_signature is not None and record.step_signature == previous_signature:
+            current_streak += 1
+        else:
+            current_streak = 1
+            previous_signature = record.step_signature
+        repeated_signature_streak = max(repeated_signature_streak, current_streak)
+
+    prior_action_signatures: set[str] = set()
+    for record in records[: max(0, len(records) - len(window))]:
+        prior_action_signatures.update(record.successful_action_signatures)
+
+    recent_action_signatures: set[str] = set()
+    recent_state_delta_signatures: set[str] = set()
+    has_build_or_finalize = False
+    for record in window:
+        recent_action_signatures.update(record.successful_action_signatures)
+        recent_state_delta_signatures.update(record.state_delta_signatures)
+        has_build_or_finalize = has_build_or_finalize or record.phase in {"build", "finalize"}
+
+    novel_action_signatures = recent_action_signatures - prior_action_signatures
+    positive_signals = 0
+    if len(novel_action_signatures) >= 2:
+        positive_signals += 1
+    if len(recent_state_delta_signatures) >= 2:
+        positive_signals += 1
+    if has_build_or_finalize:
+        positive_signals += 1
+
+    blockers: list[str] = []
+    if repeated_signature_streak >= 3:
+        blockers.append("repeated_signatures")
+    if failure_ratio > 0.6:
+        blockers.append("high_failure_ratio")
+    if recon_streak >= 4:
+        blockers.append("recon_streak")
+
+    return {
+        "eligible": not blockers and positive_signals >= _MIN_EXTENSION_PROGRESS_SIGNALS,
+        "window_size": len(window),
+        "repeated_signature_streak": repeated_signature_streak,
+        "failure_ratio": failure_ratio,
+        "novel_action_count": len(novel_action_signatures),
+        "state_delta_count": len(recent_state_delta_signatures),
+        "has_build_or_finalize": has_build_or_finalize,
+        "positive_signals": positive_signals,
+        "blockers": blockers,
+    }
+
+
+def _suggest_next_actions(
+    objective: str,
+    evaluation: dict[str, Any],
+    recent_previews: list[str],
+) -> list[str]:
+    actions: list[str] = []
+    blockers = set(evaluation.get("blockers", []))
+    if "repeated_signatures" in blockers:
+        actions.append("Stop retrying the same command pattern and switch to a different source or tactic.")
+    if "high_failure_ratio" in blockers:
+        actions.append("Triage the failing tool calls first so the next run is not dominated by avoidable errors.")
+    if "recon_streak" in blockers:
+        actions.append("Move from exploration into artifact-building or synthesis before doing more reconnaissance.")
+    if recent_previews:
+        actions.append("Turn the completed findings below into a concrete artifact or summary before resuming deeper work.")
+    actions.append(f"Resume the objective with a narrower next slice: {objective}")
+    return actions[:4]
+
+
+def _render_partial_completion(
+    objective: str,
+    loop_metrics: dict[str, Any],
+    evaluation: dict[str, Any],
+    records: list[StepProgressRecord],
+) -> str:
+    recent_previews: list[str] = []
+    for record in reversed(records[-_BUDGET_EXTENSION_WINDOW:]):
+        for preview in record.completed_previews:
+            if preview not in recent_previews:
+                recent_previews.append(preview)
+            if len(recent_previews) >= 3:
+                break
+        if len(recent_previews) >= 3:
+            break
+    next_actions = _suggest_next_actions(objective, evaluation, recent_previews)
+    completed = recent_previews or ["The run gathered additional context but did not converge on a final artifact before the bounded limit."]
+    remaining = (
+        "Finish the deliverable using the completed work below and avoid repeating the stalled loop."
+        if recent_previews
+        else "Finish the deliverable with a narrower plan or a different tactic."
+    )
+    reason = str(loop_metrics.get("termination_reason", "budget_no_progress"))
+    header = (
+        f"Partial completion for objective: {objective}\n"
+        f"Stopped after {int(loop_metrics.get('steps', 0))} steps "
+        f"with {int(loop_metrics.get('extensions_granted', 0))} budget extension(s). "
+        f"Termination reason: {reason}."
+    )
+    completed_block = "\n".join(f"- {item}" for item in completed)
+    next_actions_block = "\n".join(f"- {item}" for item in next_actions)
+    return (
+        f"{header}\n\n"
+        "Completed work:\n"
+        f"{completed_block}\n\n"
+        "Remaining work:\n"
+        f"- {remaining}\n\n"
+        "Suggested next actions:\n"
+        f"{next_actions_block}"
+    )
 
 
 @dataclass
@@ -414,7 +636,22 @@ class RLMEngine:
             "guardrail_warnings": 0,
             "final_rejections": 0,
             "last_guardrail_streak": 0,
+            "budget_extension_enabled": bool(self.config.budget_extension_enabled),
+            "budget_extension_block_steps": int(self.config.budget_extension_block_steps),
+            "budget_extension_max_blocks": int(self.config.budget_extension_max_blocks),
+            "extensions_granted": 0,
+            "extension_eligible_checks": 0,
+            "extension_denials_no_progress": 0,
+            "extension_denials_cap": 0,
+            "termination_reason": "",
         }
+        step_records: list[StepProgressRecord] = []
+        active_step_budget = self.config.max_steps_per_call
+        max_total_steps = self.config.max_steps_per_call + (
+            self.config.budget_extension_block_steps * self.config.budget_extension_max_blocks
+            if self.config.budget_extension_enabled
+            else 0
+        )
 
         self.last_loop_metrics = loop_metrics
 
@@ -429,13 +666,15 @@ class RLMEngine:
                 temperature=getattr(model, "temperature", None),
             )
 
-        for step in range(1, self.config.max_steps_per_call + 1):
+        for step in range(1, max_total_steps + 1):
             if self._cancel.is_set():
                 self._emit(f"[d{depth}] cancelled by user", on_event)
+                loop_metrics["termination_reason"] = "cancelled"
                 self.last_loop_metrics = loop_metrics
                 return "Task cancelled."
             if deadline and time.monotonic() > deadline:
                 self._emit(f"[d{depth}] wall-clock limit reached", on_event)
+                loop_metrics["termination_reason"] = "time_limit"
                 self.last_loop_metrics = loop_metrics
                 return "Time limit exceeded. Try a more focused objective."
             self._emit(f"[d{depth}/s{step}] calling model...", on_event)
@@ -456,6 +695,7 @@ class RLMEngine:
                     except RateLimitError as exc:
                         if rate_limit_retries >= self.config.rate_limit_max_retries:
                             self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                            loop_metrics["termination_reason"] = "model_error"
                             self.last_loop_metrics = loop_metrics
                             return f"Model error at depth {depth}, step {step}: {exc}"
                         rate_limit_retries += 1
@@ -471,6 +711,7 @@ class RLMEngine:
                         delay = min(delay, self.config.rate_limit_backoff_max_sec)
                         if deadline and (time.monotonic() + delay) > deadline:
                             self._emit(f"[d{depth}] wall-clock limit reached", on_event)
+                            loop_metrics["termination_reason"] = "time_limit"
                             self.last_loop_metrics = loop_metrics
                             return "Time limit exceeded. Try a more focused objective."
                         provider_code = f" ({exc.provider_code})" if exc.provider_code is not None else ""
@@ -483,6 +724,7 @@ class RLMEngine:
                             time.sleep(delay)
             except ModelError as exc:
                 self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                loop_metrics["termination_reason"] = "model_error"
                 self.last_loop_metrics = loop_metrics
                 return f"Model error at depth {depth}, step {step}: {exc}"
             finally:
@@ -566,6 +808,7 @@ class RLMEngine:
                     model.append_tool_results(conversation, [rejection_result])
                     continue
                 loop_metrics["phase_counts"]["finalize"] += 1
+                loop_metrics["termination_reason"] = "success"
                 preview = turn.text[:200] + "..." if len(turn.text) > 200 else turn.text
                 self._emit(
                     f"[d{depth}/s{step}] final answer ({len(turn.text)} chars, {elapsed:.1f}s): {preview}",
@@ -692,7 +935,7 @@ class RLMEngine:
 
             # Timestamp + step budget + context usage awareness
             if final_answer is None and results:
-                budget_total = self.config.max_steps_per_call
+                budget_total = active_step_budget
                 remaining = budget_total - step
                 ts_tag = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}]"
                 budget_tag = f"[Step {step}/{budget_total}]"
@@ -728,6 +971,22 @@ class RLMEngine:
                         rl.content + warning, rl.is_error,
                         image=rl.image,
                     )
+
+            phase_name = (
+                "build"
+                if has_artifact
+                else "investigate"
+                if has_recon and all(name in _RECON_TOOL_NAMES for name in tc_names)
+                else "iterate"
+            )
+            step_records.append(
+                _build_step_progress_record(
+                    step=step,
+                    phase=phase_name,
+                    tool_calls=turn.tool_calls,
+                    results=results,
+                )
+            )
 
             if (
                 final_answer is None
@@ -781,16 +1040,69 @@ class RLMEngine:
 
             if final_answer is not None:
                 self._emit(f"[d{depth}] completed in {step} step(s)", on_event)
+                loop_metrics["termination_reason"] = "success"
                 self.last_loop_metrics = loop_metrics
                 return final_answer
 
             for r in results:
                 context.add(f"[depth {depth} step {step}]\n{r.content}")
 
+            if step >= active_step_budget:
+                evaluation = _evaluate_budget_extension(
+                    step_records,
+                    recon_streak=int(loop_metrics.get("recon_streak", 0)),
+                )
+                loop_metrics["extension_eligible_checks"] = int(
+                    loop_metrics.get("extension_eligible_checks", 0)
+                ) + 1
+                loop_metrics["last_budget_extension_eval"] = evaluation
+                can_extend = (
+                    self.config.budget_extension_enabled
+                    and int(loop_metrics.get("extensions_granted", 0)) < self.config.budget_extension_max_blocks
+                    and bool(evaluation.get("eligible"))
+                )
+                if can_extend:
+                    loop_metrics["extensions_granted"] = int(loop_metrics.get("extensions_granted", 0)) + 1
+                    active_step_budget += self.config.budget_extension_block_steps
+                    extension_notice = ToolResult(
+                        tool_call_id="budget-extension",
+                        name="system",
+                        content=(
+                            "Progress-based budget extension granted. You have a small number of extra steps. "
+                            "Finish the deliverable now and avoid repeating the same loop."
+                        ),
+                    )
+                    model.append_tool_results(conversation, [extension_notice])
+                    continue
+
+                if int(loop_metrics.get("extensions_granted", 0)) >= self.config.budget_extension_max_blocks:
+                    loop_metrics["extension_denials_cap"] = int(loop_metrics.get("extension_denials_cap", 0)) + 1
+                    loop_metrics["termination_reason"] = "budget_cap"
+                else:
+                    loop_metrics["extension_denials_no_progress"] = int(
+                        loop_metrics.get("extension_denials_no_progress", 0)
+                    ) + 1
+                    loop_metrics["termination_reason"] = "budget_no_progress"
+                self.last_loop_metrics = loop_metrics
+                return _render_partial_completion(objective, loop_metrics, evaluation, step_records)
+
+        loop_metrics["termination_reason"] = "budget_cap"
         self.last_loop_metrics = loop_metrics
-        return (
-            f"Step budget exhausted at depth {depth} for objective: {objective}\n"
-            "Please try with a more specific task, higher step budget, or deeper recursion."
+        return _render_partial_completion(
+            objective,
+            loop_metrics,
+            {
+                "eligible": False,
+                "window_size": 0,
+                "repeated_signature_streak": 0,
+                "failure_ratio": 0.0,
+                "novel_action_count": 0,
+                "state_delta_count": 0,
+                "has_build_or_finalize": False,
+                "positive_signals": 0,
+                "blockers": ["max_total_steps"],
+            },
+            step_records,
         )
 
     def _run_one_tool(

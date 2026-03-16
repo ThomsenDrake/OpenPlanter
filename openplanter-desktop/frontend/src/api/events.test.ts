@@ -102,6 +102,11 @@ describe("event listeners", () => {
         max_recon_streak: 1,
         guardrail_warnings: 0,
         final_rejections: 1,
+        extensions_granted: 0,
+        extension_eligible_checks: 0,
+        extension_denials_no_progress: 0,
+        extension_denials_cap: 0,
+        termination_reason: "success",
       },
     };
     handler({ payload });
@@ -166,6 +171,11 @@ describe("event listeners", () => {
         max_recon_streak: 2,
         guardrail_warnings: 1,
         final_rejections: 1,
+        extensions_granted: 0,
+        extension_eligible_checks: 1,
+        extension_denials_no_progress: 1,
+        extension_denials_cap: 0,
+        termination_reason: "budget_no_progress",
       },
       is_final: false,
     };

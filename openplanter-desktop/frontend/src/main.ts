@@ -134,6 +134,7 @@ async function init() {
       currentDepth: 0,
       loopHealth: null,
       lastLoopMetrics: event.loop_metrics ?? s.lastLoopMetrics,
+      lastCompletion: event.completion ?? null,
       messages: [
         ...s.messages,
         {
@@ -143,6 +144,17 @@ async function init() {
           timestamp: Date.now(),
           isRendered: true,
         },
+        ...(event.completion?.kind === "partial"
+          ? [
+              {
+                id: crypto.randomUUID(),
+                role: "system" as const,
+                content:
+                  "Partial completion: the run used its bounded step budget and stopped cleanly. Resume to continue from the saved state.",
+                timestamp: Date.now(),
+              },
+            ]
+          : []),
       ],
     }));
 
@@ -157,6 +169,7 @@ async function init() {
       currentStep: 0,
       currentDepth: 0,
       loopHealth: null,
+      lastCompletion: null,
       messages: [
         ...s.messages,
         {

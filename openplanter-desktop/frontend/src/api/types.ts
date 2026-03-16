@@ -23,6 +23,11 @@ export interface LoopMetrics {
   max_recon_streak: number;
   guardrail_warnings: number;
   final_rejections: number;
+  extensions_granted: number;
+  extension_eligible_checks: number;
+  extension_denials_no_progress: number;
+  extension_denials_cap: number;
+  termination_reason: string;
 }
 
 export interface StepEvent {
@@ -43,9 +48,20 @@ export interface DeltaEvent {
   text: string;
 }
 
+export interface CompletionMeta {
+  kind: string;
+  reason: string;
+  steps_used: number;
+  max_steps: number;
+  extensions_granted: number;
+  extension_block_steps: number;
+  extension_max_blocks: number;
+}
+
 export interface CompleteEvent {
   result: string;
   loop_metrics?: LoopMetrics;
+  completion?: CompletionMeta;
 }
 
 export interface LoopHealthEvent {
@@ -252,7 +268,7 @@ export type AgentEvent =
       loop_metrics?: LoopMetrics;
     }
   | { type: "delta"; kind: DeltaKind; text: string }
-  | { type: "complete"; result: string; loop_metrics?: LoopMetrics }
+  | { type: "complete"; result: string; loop_metrics?: LoopMetrics; completion?: CompletionMeta }
   | { type: "error"; message: string }
   | { type: "wiki_updated"; nodes: GraphNode[]; edges: GraphEdge[] }
   | { type: "loop_health"; depth: number; step: number; phase: LoopPhase; metrics: LoopMetrics; is_final: boolean };

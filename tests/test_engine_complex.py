@@ -33,7 +33,88 @@ class EngineComplexTests(unittest.TestCase):
             )
             engine = RLMEngine(model=model, tools=tools, config=cfg)
             result = engine.solve("infinite thinking")
-            self.assertIn("Step budget exhausted", result)
+            self.assertIn("Partial completion for objective", result)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "budget_no_progress")
+
+    def test_budget_extension_granted_on_real_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=2,
+                budget_extension_enabled=True,
+                budget_extension_block_steps=2,
+                budget_extension_max_blocks=1,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("run_shell", command="printf 'alpha\\n'")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="artifact.txt", content="artifact")]),
+                    ModelTurn(text="done after extension", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("real progress")
+            self.assertEqual(result, "done after extension")
+            self.assertEqual(engine.last_loop_metrics.get("extensions_granted"), 1)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+
+    def test_budget_extension_denied_on_high_failure_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=3,
+                budget_extension_enabled=True,
+                budget_extension_block_steps=2,
+                budget_extension_max_blocks=1,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("read_file", path="missing-a.txt")]),
+                    ModelTurn(tool_calls=[_tc("read_file", path="missing-b.txt")]),
+                    ModelTurn(tool_calls=[_tc("run_shell", command="printf 'ok\\n'")]),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("failure-heavy objective")
+            self.assertIn("Partial completion for objective", result)
+            blockers = engine.last_loop_metrics.get("last_budget_extension_eval", {}).get("blockers", [])
+            self.assertIn("high_failure_ratio", blockers)
+
+    def test_budget_extension_cap_produces_partial_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=2,
+                budget_extension_enabled=True,
+                budget_extension_block_steps=2,
+                budget_extension_max_blocks=1,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("write_file", path="one.txt", content="one")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="two.txt", content="two")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="three.txt", content="three")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="four.txt", content="four")]),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("cap objective")
+            self.assertIn("Partial completion for objective", result)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "budget_cap")
+            self.assertEqual(engine.last_loop_metrics.get("extensions_granted"), 1)
+            self.assertLessEqual(
+                int(engine.last_loop_metrics.get("steps", 0)),
+                cfg.max_steps_per_call + cfg.budget_extension_block_steps * cfg.budget_extension_max_blocks,
+            )
 
     # ------------------------------------------------------------------
     # 2. Nested subtasks at depth 2 (3-level recursion)
@@ -617,7 +698,7 @@ class EngineComplexTests(unittest.TestCase):
             )
             engine = RLMEngine(model=model, tools=tools, config=cfg)
             result = engine.solve("my specific objective")
-            self.assertIn("Step budget exhausted", result)
+            self.assertIn("Partial completion for objective", result)
             self.assertIn("my specific objective", result)
 
     # ------------------------------------------------------------------

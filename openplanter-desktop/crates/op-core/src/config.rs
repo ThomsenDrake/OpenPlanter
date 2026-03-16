@@ -214,6 +214,9 @@ pub struct AgentConfig {
     // Limits
     pub max_depth: i64,
     pub max_steps_per_call: i64,
+    pub budget_extension_enabled: bool,
+    pub budget_extension_block_steps: i64,
+    pub budget_extension_max_blocks: i64,
     pub max_observation_chars: i64,
     pub command_timeout_sec: i64,
     pub shell: String,
@@ -273,6 +276,9 @@ impl Default for AgentConfig {
             voyage_api_key: None,
             max_depth: 4,
             max_steps_per_call: 100,
+            budget_extension_enabled: true,
+            budget_extension_block_steps: 20,
+            budget_extension_max_blocks: 2,
             max_observation_chars: 6000,
             command_timeout_sec: 45,
             shell: "/bin/sh".into(),
@@ -408,6 +414,11 @@ impl AgentConfig {
             voyage_api_key,
             max_depth: env_int("OPENPLANTER_MAX_DEPTH", 4),
             max_steps_per_call: env_int("OPENPLANTER_MAX_STEPS", 100),
+            budget_extension_enabled: env_bool("OPENPLANTER_BUDGET_EXTENSION_ENABLED", true),
+            budget_extension_block_steps: env_int("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", 20)
+                .max(1),
+            budget_extension_max_blocks: env_int("OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS", 2)
+                .max(0),
             max_observation_chars: env_int("OPENPLANTER_MAX_OBS_CHARS", 6000),
             command_timeout_sec: env_int("OPENPLANTER_CMD_TIMEOUT", 45),
             shell: env_or("OPENPLANTER_SHELL", "/bin/sh"),
@@ -538,6 +549,9 @@ mod tests {
             "OPENPLANTER_ZAI_API_KEY",
             "ZAI_API_KEY",
             "OPENPLANTER_MAX_DEPTH",
+            "OPENPLANTER_BUDGET_EXTENSION_ENABLED",
+            "OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS",
+            "OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS",
             "OPENPLANTER_RECURSIVE",
             "OPENPLANTER_DEMO",
             "OPENPLANTER_WEB_SEARCH_PROVIDER",
@@ -571,6 +585,9 @@ mod tests {
         assert_eq!(cfg.model, "anthropic-foundry/claude-opus-4-6");
         assert_eq!(cfg.reasoning_effort, Some("high".into()));
         assert_eq!(cfg.max_depth, 4);
+        assert!(cfg.budget_extension_enabled);
+        assert_eq!(cfg.budget_extension_block_steps, 20);
+        assert_eq!(cfg.budget_extension_max_blocks, 2);
         assert!(cfg.recursive);
         assert!(!cfg.demo);
         assert_eq!(
@@ -598,6 +615,9 @@ mod tests {
             env::set_var("OPENPLANTER_MODEL", "azure-foundry/gpt-5.4");
             env::set_var("OPENPLANTER_REASONING_EFFORT", "low");
             env::set_var("OPENPLANTER_MAX_DEPTH", "8");
+            env::set_var("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "false");
+            env::set_var("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", "9");
+            env::set_var("OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS", "1");
             env::set_var("OPENPLANTER_RECURSIVE", "false");
             env::set_var("OPENPLANTER_DEMO", "true");
             env::set_var("OPENAI_API_KEY", "sk-test123");
@@ -619,6 +639,9 @@ mod tests {
         assert_eq!(cfg.model, "azure-foundry/gpt-5.4");
         assert_eq!(cfg.reasoning_effort, Some("low".into()));
         assert_eq!(cfg.max_depth, 8);
+        assert!(!cfg.budget_extension_enabled);
+        assert_eq!(cfg.budget_extension_block_steps, 9);
+        assert_eq!(cfg.budget_extension_max_blocks, 1);
         assert!(!cfg.recursive);
         assert!(cfg.demo);
         assert_eq!(cfg.openai_api_key, Some("sk-test123".into()));
