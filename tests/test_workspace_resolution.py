@@ -96,7 +96,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
             (repo / ".git").mkdir()
             workspace = repo / "workspace"
             workspace.mkdir()
-            (repo / ".env").write_text("OPENPLANTER_PROVIDER=zai\n", encoding="utf-8")
+            (repo / ".env").write_text("OPENPLANTER_PROVIDER=openai\n", encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
                 resolved = resolve_startup_workspace(".", False, repo)
@@ -110,7 +110,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
             repo = Path(tmpdir) / "repo"
             repo.mkdir()
             (repo / ".git").mkdir()
-            (repo / ".env").write_text("OPENPLANTER_PROVIDER=zai\n", encoding="utf-8")
+            (repo / ".env").write_text("OPENPLANTER_PROVIDER=openai\n", encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaises(WorkspaceResolutionError):
