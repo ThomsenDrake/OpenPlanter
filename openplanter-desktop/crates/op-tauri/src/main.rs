@@ -8,7 +8,13 @@ mod state;
 use state::AppState;
 
 fn main() {
-    let state = AppState::new();
+    let state = match AppState::try_new() {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("[startup:error] {err}");
+            std::process::exit(2);
+        }
+    };
     eprintln!("[startup:info] {}", state.startup_trace());
 
     tauri::Builder::default()
@@ -23,6 +29,11 @@ fn main() {
             commands::config::list_models,
             commands::config::save_settings,
             commands::config::get_credentials_status,
+            commands::init::get_init_status,
+            commands::init::run_standard_init,
+            commands::init::complete_first_run_gate,
+            commands::init::inspect_migration_source,
+            commands::init::run_migration_init,
             commands::session::list_sessions,
             commands::session::open_session,
             commands::session::delete_session,

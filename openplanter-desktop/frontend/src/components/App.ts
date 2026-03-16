@@ -2,6 +2,7 @@
 import { createStatusBar } from "./StatusBar";
 import { createChatPane } from "./ChatPane";
 import { createGraphPane } from "./GraphPane";
+import { createWorkspaceInitGate } from "./WorkspaceInitGate";
 import { appState } from "../state/store";
 import { listSessions, openSession, deleteSession, getCredentialsStatus, getSessionHistory } from "../api/invoke";
 import type { ChatMessage } from "../state/store";
@@ -60,6 +61,10 @@ export function createApp(root: HTMLElement): void {
   // Graph pane
   const graphPane = createGraphPane();
   root.appendChild(graphPane);
+
+  // Workspace init gate
+  const workspaceInitGate = createWorkspaceInitGate();
+  root.appendChild(workspaceInitGate);
 
   // Reactive settings display
   function renderSettings() {

@@ -3,6 +3,7 @@ import { appState } from "../state/store";
 import { openSession } from "../api/invoke";
 import { handleModelCommand, type CommandResult } from "./model";
 import { handleReasoningCommand } from "./reasoning";
+import { handleInitCommand } from "./init";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -30,6 +31,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /model list [provider]  List available models",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
+          "  /init status        Show workspace init status",
+          "  /init standard      Initialize the current workspace",
+          "  /init migrate       Open the migration init panel",
         ],
       };
 
@@ -93,6 +97,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/reasoning":
       return handleReasoningCommand(args);
+
+    case "/init":
+      return handleInitCommand(args);
 
     default:
       return {

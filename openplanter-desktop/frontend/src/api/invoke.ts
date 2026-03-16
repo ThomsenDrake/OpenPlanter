@@ -3,11 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ConfigView,
   GraphData,
+  InitStatusView,
+  MigrationInitRequest,
+  MigrationInitResultView,
+  MigrationSourceInspection,
   ModelInfo,
   PartialConfig,
   PersistentSettings,
   ReplayEntry,
   SessionInfo,
+  StandardInitReportView,
 } from "./types";
 
 export async function solve(objective: string, sessionId: string): Promise<void> {
@@ -67,4 +72,28 @@ export async function readWikiFile(path: string): Promise<string> {
 
 export async function debugLog(msg: string): Promise<void> {
   return invoke("debug_log", { msg });
+}
+
+export async function getInitStatus(): Promise<InitStatusView> {
+  return invoke("get_init_status");
+}
+
+export async function runStandardInit(): Promise<StandardInitReportView> {
+  return invoke("run_standard_init");
+}
+
+export async function completeFirstRunGate(): Promise<InitStatusView> {
+  return invoke("complete_first_run_gate");
+}
+
+export async function inspectMigrationSource(
+  path: string
+): Promise<MigrationSourceInspection> {
+  return invoke("inspect_migration_source", { path });
+}
+
+export async function runMigrationInit(
+  request: MigrationInitRequest
+): Promise<MigrationInitResultView> {
+  return invoke("run_migration_init", { request });
 }

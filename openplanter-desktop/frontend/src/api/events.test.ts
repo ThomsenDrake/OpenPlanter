@@ -19,6 +19,7 @@ import {
   onAgentCompleteEvent,
   onAgentError,
   onLoopHealth,
+  onMigrationProgress,
   onWikiUpdated,
 } from "./events";
 
@@ -134,6 +135,21 @@ describe("event listeners", () => {
     expect(callback).toHaveBeenCalledWith(graphData);
   });
 
+  it("onMigrationProgress registers listener and forwards progress payload", async () => {
+    const callback = vi.fn();
+    await onMigrationProgress(callback);
+
+    const handler = listeners.get("init:migration-progress")!;
+    const payload = {
+      stage: "copy",
+      message: "Copying raw content",
+      current: 1,
+      total: 3,
+    };
+    handler({ payload });
+    expect(callback).toHaveBeenCalledWith(payload);
+  });
+
   it("onLoopHealth registers listener and forwards payload", async () => {
     const callback = vi.fn();
     await onLoopHealth(callback);
@@ -166,6 +182,7 @@ describe("event listeners", () => {
     handler({ payload });
     expect(callback).toHaveBeenCalledWith(payload);
   });
+
   it("all listeners return unlisten function", async () => {
     const noop = vi.fn();
     const unlistens = await Promise.all([
@@ -176,6 +193,7 @@ describe("event listeners", () => {
       onAgentCompleteEvent(noop),
       onAgentError(noop),
       onLoopHealth(noop),
+      onMigrationProgress(noop),
       onWikiUpdated(noop),
     ]);
     for (const u of unlistens) {
