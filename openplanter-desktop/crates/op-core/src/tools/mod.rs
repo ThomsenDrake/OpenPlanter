@@ -3,14 +3,16 @@
 /// The `WorkspaceTools` struct is the central dispatcher that owns tool state
 /// (files-read set, background jobs) and routes tool calls to the appropriate module.
 pub mod audio;
+pub mod chrome_mcp;
 pub mod defs;
 pub mod filesystem;
+pub mod patching;
 pub mod shell;
 pub mod web;
-pub mod patching;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config::AgentConfig;
 
@@ -64,12 +66,25 @@ pub struct WorkspaceTools {
     mistral_transcription_chunk_overlap_seconds: f64,
     mistral_transcription_max_chunks: i64,
     mistral_transcription_request_timeout_sec: u64,
+    chrome_mcp: Option<Arc<chrome_mcp::ChromeMcpManager>>,
     files_read: HashSet<PathBuf>,
     bg_jobs: shell::BgJobs,
 }
 
+fn clip(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let end = text.floor_char_boundary(max_chars);
+    let omitted = text.len() - end;
+    format!("{}\n\n...[truncated {omitted} chars]...", &text[..end])
+}
+
 impl WorkspaceTools {
-    pub fn new(config: &AgentConfig) -> Self {
+    pub fn new(
+        config: &AgentConfig,
+        chrome_mcp: Option<Arc<chrome_mcp::ChromeMcpManager>>,
+    ) -> Self {
         Self {
             root: config.workspace.clone(),
             scope: ToolScope::FullWorkspace,
@@ -93,6 +108,7 @@ impl WorkspaceTools {
             mistral_transcription_request_timeout_sec: config
                 .mistral_transcription_request_timeout_sec
                 as u64,
+            chrome_mcp,
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
         }
@@ -127,6 +143,7 @@ impl WorkspaceTools {
             mistral_transcription_request_timeout_sec: config
                 .mistral_transcription_request_timeout_sec
                 as u64,
+            chrome_mcp: None,
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
         }
@@ -397,17 +414,32 @@ impl WorkspaceTools {
                 ToolResult::ok(format!("Noted: {note}"))
             }
 
-            _ => ToolResult::error(format!("Unknown tool: {name}")),
+            _ => {
+                if let Some(manager) = &self.chrome_mcp {
+                    match manager.list_tools(false).await {
+                        Ok(tools) if tools.iter().any(|tool| tool.name == name) => {
+                            match manager.call_tool(name, &args).await {
+                                Ok(content) => ToolResult::ok(content),
+                                Err(err) => {
+                                    ToolResult::error(format!("Chrome DevTools MCP unavailable: {err}"))
+                                }
+                            }
+                        }
+                        Ok(_) => ToolResult::error(format!("Unknown tool: {name}")),
+                        Err(err) => {
+                            ToolResult::error(format!("Chrome DevTools MCP unavailable: {err}"))
+                        }
+                    }
+                } else {
+                    ToolResult::error(format!("Unknown tool: {name}"))
+                }
+            }
         };
 
         // Clip observation to max_observation_chars
         if result.content.len() > self.max_observation_chars {
-            let omitted = result.content.len() - self.max_observation_chars;
             ToolResult {
-                content: format!(
-                    "{}\n\n...[truncated {omitted} chars]...",
-                    &result.content[..self.max_observation_chars]
-                ),
+                content: clip(&result.content, self.max_observation_chars),
                 is_error: result.is_error,
             }
         } else {

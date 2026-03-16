@@ -72,6 +72,7 @@ export function createApp(root: HTMLElement): void {
     settingsDisplay.innerHTML = [
       `<div><span class="label">provider:</span> <span class="value">${s.provider || "auto"}</span></div>`,
       `<div><span class="label">model:</span> <span class="value">${s.model || "\u2014"}</span></div>`,
+      `<div><span class="label">chrome mcp:</span> <span class="value">${s.chromeMcpStatus} (${s.chromeMcpChannel})</span></div>`,
       `<div><span class="label">reasoning:</span> <span class="value">${s.reasoningEffort ?? "off"}</span></div>`,
       `<div><span class="label">mode:</span> <span class="value">${s.recursive ? "recursive" : "flat"}</span></div>`,
     ].join("");

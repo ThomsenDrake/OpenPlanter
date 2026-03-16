@@ -70,6 +70,14 @@ export interface ChatMessage {
 export interface AppState {
   provider: string;
   model: string;
+  chromeMcpEnabled: boolean;
+  chromeMcpAutoConnect: boolean;
+  chromeMcpBrowserUrl: string | null;
+  chromeMcpChannel: string;
+  chromeMcpConnectTimeoutSec: number;
+  chromeMcpRpcTimeoutSec: number;
+  chromeMcpStatus: string;
+  chromeMcpStatusDetail: string;
   sessionId: string | null;
   inputTokens: number;
   outputTokens: number;
@@ -99,6 +107,14 @@ export interface AppState {
 export const appState = new Store<AppState>({
   provider: "",
   model: "",
+  chromeMcpEnabled: false,
+  chromeMcpAutoConnect: true,
+  chromeMcpBrowserUrl: null,
+  chromeMcpChannel: "stable",
+  chromeMcpConnectTimeoutSec: 15,
+  chromeMcpRpcTimeoutSec: 45,
+  chromeMcpStatus: "disabled",
+  chromeMcpStatusDetail: "Chrome DevTools MCP is disabled.",
   sessionId: null,
   inputTokens: 0,
   outputTokens: 0,

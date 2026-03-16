@@ -1,19 +1,5 @@
 /** Parse <tool_call> and <tool_result> XML blocks from agent content. */
-
-/** Key argument names for tool call display (mirrors ChatPane's KEY_ARGS). */
-const KEY_ARGS: Record<string, string> = {
-  read_file: "path",
-  write_file: "path",
-  edit_file: "path",
-  list_files: "directory",
-  run_shell: "command",
-  run_shell_bg: "command",
-  kill_shell_bg: "pid",
-  web_search: "query",
-  fetch_url: "url",
-  apply_patch: "path",
-  hashline_edit: "path",
-};
+import { getToolCallKeyArg } from "./toolArgs";
 
 export type ContentSegment =
   | { type: "text"; text: string }
@@ -67,8 +53,7 @@ function parseToolCall(json: string): ContentSegment {
     const obj = JSON.parse(json);
     const name: string = obj.name ?? "unknown";
     const args = obj.arguments ?? {};
-    const keyName = KEY_ARGS[name];
-    const keyArg = keyName && typeof args[keyName] === "string" ? args[keyName] : "";
+    const keyArg = getToolCallKeyArg(name, args);
     return { type: "tool_call", name, keyArg, rawArgs: JSON.stringify(args) };
   } catch {
     return { type: "tool_call", name: "unknown", keyArg: "", rawArgs: json };

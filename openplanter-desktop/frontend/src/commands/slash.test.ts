@@ -17,6 +17,12 @@ describe("dispatchSlashCommand", () => {
       ...originalState,
       provider: "anthropic",
       model: "claude-opus-4-6",
+      chromeMcpEnabled: true,
+      chromeMcpAutoConnect: true,
+      chromeMcpBrowserUrl: null,
+      chromeMcpChannel: "stable",
+      chromeMcpStatus: "ready",
+      chromeMcpStatusDetail: "Connected to Chrome.",
       sessionId: "20260101-120000-deadbeef",
       reasoningEffort: "medium",
       initGateState: "ready",
@@ -71,6 +77,13 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("Session:"))).toBe(true);
   });
 
+  it("status shows chrome mcp state", async () => {
+    const result = await dispatchSlashCommand("/status");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Chrome MCP:"))).toBe(true);
+    expect(result!.lines.some((l) => l.includes("Chrome runtime:"))).toBe(true);
+  });
+
   it("unknown command", async () => {
     const result = await dispatchSlashCommand("/foobar");
     expect(result).not.toBeNull();
@@ -111,6 +124,19 @@ describe("dispatchSlashCommand", () => {
     expect(
       result!.lines.some((l) => l.includes("Reasoning effort:"))
     ).toBe(true);
+  });
+
+  it("help includes chrome command", async () => {
+    const result = await dispatchSlashCommand("/help");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("/chrome"))).toBe(true);
+  });
+
+  it("chrome dispatches", async () => {
+    const result = await dispatchSlashCommand("/chrome");
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("handled");
+    expect(result!.lines.some((l) => l.includes("Chrome MCP:"))).toBe(true);
   });
 
   it("new creates session", async () => {

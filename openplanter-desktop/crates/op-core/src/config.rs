@@ -11,6 +11,9 @@ pub const MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS: i64 = 900;
 pub const MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS: f64 = 2.0;
 pub const MISTRAL_TRANSCRIPTION_MAX_CHUNKS: i64 = 48;
 pub const MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC: i64 = 180;
+pub const CHROME_MCP_DEFAULT_CHANNEL: &str = "stable";
+pub const CHROME_MCP_CONNECT_TIMEOUT_SEC: i64 = 15;
+pub const CHROME_MCP_RPC_TIMEOUT_SEC: i64 = 45;
 
 /// Default model for each supported provider.
 pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>> =
@@ -48,9 +51,25 @@ fn env_float(key: &str, default: f64) -> f64 {
 
 fn env_bool(key: &str, default: bool) -> bool {
     match env::var(key) {
-        Ok(v) => matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"),
+        Ok(v) => matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
         Err(_) => default,
     }
+}
+
+pub fn normalize_chrome_mcp_channel(value: Option<&str>) -> String {
+    match value.unwrap_or_default().trim().to_lowercase().as_str() {
+        "beta" => "beta".to_string(),
+        "dev" => "dev".to_string(),
+        "canary" => "canary".to_string(),
+        _ => CHROME_MCP_DEFAULT_CHANNEL.to_string(),
+    }
+}
+
+pub fn normalize_chrome_mcp_browser_url(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Central configuration for the OpenPlanter agent.
@@ -88,6 +107,12 @@ pub struct AgentConfig {
     pub mistral_transcription_chunk_overlap_seconds: f64,
     pub mistral_transcription_max_chunks: i64,
     pub mistral_transcription_request_timeout_sec: i64,
+    pub chrome_mcp_enabled: bool,
+    pub chrome_mcp_auto_connect: bool,
+    pub chrome_mcp_browser_url: Option<String>,
+    pub chrome_mcp_channel: String,
+    pub chrome_mcp_connect_timeout_sec: i64,
+    pub chrome_mcp_rpc_timeout_sec: i64,
 
     // Limits
     pub max_depth: i64,
@@ -147,6 +172,12 @@ impl Default for AgentConfig {
                 MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS,
             mistral_transcription_max_chunks: MISTRAL_TRANSCRIPTION_MAX_CHUNKS,
             mistral_transcription_request_timeout_sec: MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC,
+            chrome_mcp_enabled: false,
+            chrome_mcp_auto_connect: true,
+            chrome_mcp_browser_url: None,
+            chrome_mcp_channel: CHROME_MCP_DEFAULT_CHANNEL.into(),
+            chrome_mcp_connect_timeout_sec: CHROME_MCP_CONNECT_TIMEOUT_SEC,
+            chrome_mcp_rpc_timeout_sec: CHROME_MCP_RPC_TIMEOUT_SEC,
             max_depth: 4,
             max_steps_per_call: 100,
             budget_extension_enabled: true,
@@ -284,6 +315,24 @@ impl AgentConfig {
                 "OPENPLANTER_MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC",
                 MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC,
             ),
+            chrome_mcp_enabled: env_bool("OPENPLANTER_CHROME_MCP_ENABLED", false),
+            chrome_mcp_auto_connect: env_bool("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", true),
+            chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
+                env_opt("OPENPLANTER_CHROME_MCP_BROWSER_URL").as_deref(),
+            ),
+            chrome_mcp_channel: normalize_chrome_mcp_channel(
+                env_opt("OPENPLANTER_CHROME_MCP_CHANNEL").as_deref(),
+            ),
+            chrome_mcp_connect_timeout_sec: env_int(
+                "OPENPLANTER_CHROME_MCP_CONNECT_TIMEOUT_SEC",
+                CHROME_MCP_CONNECT_TIMEOUT_SEC,
+            )
+            .max(1),
+            chrome_mcp_rpc_timeout_sec: env_int(
+                "OPENPLANTER_CHROME_MCP_RPC_TIMEOUT_SEC",
+                CHROME_MCP_RPC_TIMEOUT_SEC,
+            )
+            .max(1),
             max_depth: env_int("OPENPLANTER_MAX_DEPTH", 4),
             max_steps_per_call: env_int("OPENPLANTER_MAX_STEPS", 100),
             budget_extension_enabled: env_bool("OPENPLANTER_BUDGET_EXTENSION_ENABLED", true),
@@ -350,6 +399,12 @@ mod tests {
         assert_eq!(cfg.provider, "auto");
         assert_eq!(cfg.model, "claude-opus-4-6");
         assert_eq!(cfg.reasoning_effort, Some("high".into()));
+        assert!(!cfg.chrome_mcp_enabled);
+        assert!(cfg.chrome_mcp_auto_connect);
+        assert_eq!(cfg.chrome_mcp_browser_url, None);
+        assert_eq!(cfg.chrome_mcp_channel, CHROME_MCP_DEFAULT_CHANNEL);
+        assert_eq!(cfg.chrome_mcp_connect_timeout_sec, CHROME_MCP_CONNECT_TIMEOUT_SEC);
+        assert_eq!(cfg.chrome_mcp_rpc_timeout_sec, CHROME_MCP_RPC_TIMEOUT_SEC);
         assert_eq!(cfg.max_depth, 4);
         assert_eq!(cfg.max_steps_per_call, 100);
         assert!(cfg.budget_extension_enabled);
@@ -382,6 +437,23 @@ mod tests {
         assert_eq!(PROVIDER_DEFAULT_MODELS.get("ollama"), Some(&"llama3.2"));
     }
 
+    #[test]
+    fn test_normalize_chrome_mcp_helpers() {
+        assert_eq!(
+            normalize_chrome_mcp_channel(Some("BETA")),
+            "beta".to_string()
+        );
+        assert_eq!(
+            normalize_chrome_mcp_channel(Some("unexpected")),
+            CHROME_MCP_DEFAULT_CHANNEL.to_string()
+        );
+        assert_eq!(
+            normalize_chrome_mcp_browser_url(Some("  http://127.0.0.1:9222  ")),
+            Some("http://127.0.0.1:9222".to_string())
+        );
+        assert_eq!(normalize_chrome_mcp_browser_url(Some("  ")), None);
+    }
+
     /// Combined env-based test to avoid race conditions from parallel test execution.
     /// Tests both default and custom env var loading in sequence.
     #[test]
@@ -398,6 +470,12 @@ mod tests {
             "OPENPLANTER_BUDGET_EXTENSION_ENABLED",
             "OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS",
             "OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS",
+            "OPENPLANTER_CHROME_MCP_ENABLED",
+            "OPENPLANTER_CHROME_MCP_AUTO_CONNECT",
+            "OPENPLANTER_CHROME_MCP_BROWSER_URL",
+            "OPENPLANTER_CHROME_MCP_CHANNEL",
+            "OPENPLANTER_CHROME_MCP_CONNECT_TIMEOUT_SEC",
+            "OPENPLANTER_CHROME_MCP_RPC_TIMEOUT_SEC",
             "OPENPLANTER_RECURSIVE",
             "OPENPLANTER_DEMO",
             "OPENPLANTER_RATE_LIMIT_MAX_RETRIES",
@@ -423,6 +501,12 @@ mod tests {
         assert_eq!(cfg.provider, "auto");
         assert_eq!(cfg.model, "claude-opus-4-6");
         assert_eq!(cfg.reasoning_effort, Some("high".into()));
+        assert!(!cfg.chrome_mcp_enabled);
+        assert!(cfg.chrome_mcp_auto_connect);
+        assert_eq!(cfg.chrome_mcp_browser_url, None);
+        assert_eq!(cfg.chrome_mcp_channel, CHROME_MCP_DEFAULT_CHANNEL);
+        assert_eq!(cfg.chrome_mcp_connect_timeout_sec, CHROME_MCP_CONNECT_TIMEOUT_SEC);
+        assert_eq!(cfg.chrome_mcp_rpc_timeout_sec, CHROME_MCP_RPC_TIMEOUT_SEC);
         assert_eq!(cfg.max_depth, 4);
         assert!(cfg.budget_extension_enabled);
         assert_eq!(cfg.budget_extension_block_steps, 20);
@@ -445,6 +529,12 @@ mod tests {
             env::set_var("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "false");
             env::set_var("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", "9");
             env::set_var("OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS", "1");
+            env::set_var("OPENPLANTER_CHROME_MCP_ENABLED", "true");
+            env::set_var("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", "false");
+            env::set_var("OPENPLANTER_CHROME_MCP_BROWSER_URL", "http://127.0.0.1:9222");
+            env::set_var("OPENPLANTER_CHROME_MCP_CHANNEL", "beta");
+            env::set_var("OPENPLANTER_CHROME_MCP_CONNECT_TIMEOUT_SEC", "17");
+            env::set_var("OPENPLANTER_CHROME_MCP_RPC_TIMEOUT_SEC", "52");
             env::set_var("OPENPLANTER_RECURSIVE", "false");
             env::set_var("OPENPLANTER_DEMO", "true");
             env::set_var("OPENAI_API_KEY", "sk-test123");
@@ -462,6 +552,15 @@ mod tests {
         assert!(!cfg.budget_extension_enabled);
         assert_eq!(cfg.budget_extension_block_steps, 9);
         assert_eq!(cfg.budget_extension_max_blocks, 1);
+        assert!(cfg.chrome_mcp_enabled);
+        assert!(!cfg.chrome_mcp_auto_connect);
+        assert_eq!(
+            cfg.chrome_mcp_browser_url,
+            Some("http://127.0.0.1:9222".to_string())
+        );
+        assert_eq!(cfg.chrome_mcp_channel, "beta");
+        assert_eq!(cfg.chrome_mcp_connect_timeout_sec, 17);
+        assert_eq!(cfg.chrome_mcp_rpc_timeout_sec, 52);
         assert_eq!(cfg.rate_limit_max_retries, 5);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 2.5);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 30.0);

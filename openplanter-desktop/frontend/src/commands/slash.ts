@@ -2,6 +2,7 @@
 import { appState } from "../state/store";
 import { openSession } from "../api/invoke";
 import { handleModelCommand, type CommandResult } from "./model";
+import { CHROME_USAGE, formatChromeStatusLines, handleChromeCommand } from "./chrome";
 import { handleReasoningCommand } from "./reasoning";
 import { handleInitCommand } from "./init";
 
@@ -31,6 +32,8 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /model list [provider]  List available models",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
+          "  /chrome             Show current Chrome DevTools MCP status",
+          `  ${CHROME_USAGE.slice(6)}`,
           "  /init status        Show workspace init status",
           "  /init standard      Initialize the current workspace",
           "  /init migrate       Open the migration init panel",
@@ -80,6 +83,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Provider:    ${s.provider || "auto"}`,
           `Model:       ${s.model || "—"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
+          ...formatChromeStatusLines(s),
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
           `Max depth:   ${s.maxDepth}`,
           `Max steps:   ${s.maxStepsPerCall}`,
@@ -97,6 +101,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/reasoning":
       return handleReasoningCommand(args);
+
+    case "/chrome":
+      return handleChromeCommand(args);
 
     case "/init":
       return handleInitCommand(args);
