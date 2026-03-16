@@ -201,7 +201,7 @@ def _resolve_provider(requested: str, creds: CredentialBundle) -> str:
         return "openrouter"
     if creds.cerebras_api_key:
         return "cerebras"
-    return "openai"
+    return "anthropic"
 
 
 def _print_models(cfg: AgentConfig, requested_provider: str) -> int:
