@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CredentialBundle {
     pub openai_api_key: Option<String>,
+    pub openai_oauth_token: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub cerebras_api_key: Option<String>,
@@ -26,6 +27,7 @@ impl CredentialBundle {
     pub fn has_any(&self) -> bool {
         let keys = [
             &self.openai_api_key,
+            &self.openai_oauth_token,
             &self.anthropic_api_key,
             &self.openrouter_api_key,
             &self.cerebras_api_key,
@@ -47,6 +49,7 @@ impl CredentialBundle {
             };
         }
         fill!(openai_api_key);
+        fill!(openai_oauth_token);
         fill!(anthropic_api_key);
         fill!(openrouter_api_key);
         fill!(cerebras_api_key);
@@ -66,6 +69,7 @@ impl CredentialBundle {
             };
         }
         add!(openai_api_key, "openai_api_key");
+        add!(openai_oauth_token, "openai_oauth_token");
         add!(anthropic_api_key, "anthropic_api_key");
         add!(openrouter_api_key, "openrouter_api_key");
         add!(cerebras_api_key, "cerebras_api_key");
@@ -88,6 +92,7 @@ impl CredentialBundle {
         }
         Self {
             openai_api_key: get_str(payload, "openai_api_key"),
+            openai_oauth_token: get_str(payload, "openai_oauth_token"),
             anthropic_api_key: get_str(payload, "anthropic_api_key"),
             openrouter_api_key: get_str(payload, "openrouter_api_key"),
             cerebras_api_key: get_str(payload, "cerebras_api_key"),
@@ -147,6 +152,11 @@ pub fn parse_env_file(path: &Path) -> CredentialBundle {
 
     CredentialBundle {
         openai_api_key: get_key(&env_map, "OPENAI_API_KEY", "OPENPLANTER_OPENAI_API_KEY"),
+        openai_oauth_token: get_key(
+            &env_map,
+            "OPENAI_OAUTH_TOKEN",
+            "OPENPLANTER_OPENAI_OAUTH_TOKEN",
+        ),
         anthropic_api_key: get_key(
             &env_map,
             "ANTHROPIC_API_KEY",
@@ -181,6 +191,7 @@ pub fn credentials_from_env() -> CredentialBundle {
 
     CredentialBundle {
         openai_api_key: env_key("OPENPLANTER_OPENAI_API_KEY", "OPENAI_API_KEY"),
+        openai_oauth_token: env_key("OPENPLANTER_OPENAI_OAUTH_TOKEN", "OPENAI_OAUTH_TOKEN"),
         anthropic_api_key: env_key("OPENPLANTER_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
         openrouter_api_key: env_key("OPENPLANTER_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
         cerebras_api_key: env_key("OPENPLANTER_CEREBRAS_API_KEY", "CEREBRAS_API_KEY"),
@@ -330,6 +341,15 @@ mod tests {
     }
 
     #[test]
+    fn test_credential_bundle_has_any_with_openai_oauth_token() {
+        let bundle = CredentialBundle {
+            openai_oauth_token: Some("oauth-token".into()),
+            ..Default::default()
+        };
+        assert!(bundle.has_any());
+    }
+
+    #[test]
     fn test_credential_bundle_has_any_with_voyage_key() {
         let bundle = CredentialBundle {
             voyage_api_key: Some("voyage-test".into()),
@@ -364,12 +384,14 @@ mod tests {
         };
         let b = CredentialBundle {
             openai_api_key: Some("should-not-overwrite".into()),
+            openai_oauth_token: Some("oauth-token".into()),
             anthropic_api_key: Some("new-key".into()),
             mistral_transcription_api_key: Some("mistral-key".into()),
             ..Default::default()
         };
         a.merge_missing(&b);
         assert_eq!(a.openai_api_key, Some("existing".into()));
+        assert_eq!(a.openai_oauth_token, Some("oauth-token".into()));
         assert_eq!(a.anthropic_api_key, Some("new-key".into()));
         assert_eq!(
             a.mistral_transcription_api_key,
@@ -381,6 +403,7 @@ mod tests {
     fn test_to_json_round_trip() {
         let bundle = CredentialBundle {
             openai_api_key: Some("sk-123".into()),
+            openai_oauth_token: Some("oauth-token".into()),
             anthropic_api_key: None,
             openrouter_api_key: Some("or-456".into()),
             mistral_transcription_api_key: Some("mistral-789".into()),
@@ -388,6 +411,7 @@ mod tests {
         };
         let json = bundle.to_json();
         assert_eq!(json.get("openai_api_key").unwrap(), "sk-123");
+        assert_eq!(json.get("openai_oauth_token").unwrap(), "oauth-token");
         assert!(!json.contains_key("anthropic_api_key"));
         assert_eq!(json.get("openrouter_api_key").unwrap(), "or-456");
         assert_eq!(
@@ -405,6 +429,7 @@ mod tests {
             r#"
 # Comment line
 OPENAI_API_KEY=sk-from-env
+OPENAI_OAUTH_TOKEN=oauth-from-env
 export ANTHROPIC_API_KEY='ant-key'
 EXA_API_KEY="exa-quoted"
 MISTRAL_API_KEY=mistral-from-env
@@ -415,6 +440,7 @@ UNRELATED_VAR=foo
 
         let bundle = parse_env_file(&env_path);
         assert_eq!(bundle.openai_api_key, Some("sk-from-env".into()));
+        assert_eq!(bundle.openai_oauth_token, Some("oauth-from-env".into()));
         assert_eq!(bundle.anthropic_api_key, Some("ant-key".into()));
         assert_eq!(bundle.exa_api_key, Some("exa-quoted".into()));
         assert_eq!(

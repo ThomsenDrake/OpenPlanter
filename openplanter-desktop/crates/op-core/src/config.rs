@@ -213,7 +213,9 @@ impl AgentConfig {
         let ws = dunce_canonicalize(workspace.as_ref());
 
         let openai_api_key = env_opt("OPENPLANTER_OPENAI_API_KEY")
-            .or_else(|| env_opt("OPENAI_API_KEY"));
+            .or_else(|| env_opt("OPENAI_API_KEY"))
+            .or_else(|| env_opt("OPENPLANTER_OPENAI_OAUTH_TOKEN"))
+            .or_else(|| env_opt("OPENAI_OAUTH_TOKEN"));
 
         let anthropic_api_key = env_opt("OPENPLANTER_ANTHROPIC_API_KEY")
             .or_else(|| env_opt("ANTHROPIC_API_KEY"));
@@ -464,6 +466,8 @@ mod tests {
             "OPENPLANTER_REASONING_EFFORT",
             "OPENPLANTER_OPENAI_API_KEY",
             "OPENAI_API_KEY",
+            "OPENPLANTER_OPENAI_OAUTH_TOKEN",
+            "OPENAI_OAUTH_TOKEN",
             "OPENPLANTER_ANTHROPIC_API_KEY",
             "ANTHROPIC_API_KEY",
             "OPENPLANTER_MAX_DEPTH",
@@ -568,6 +572,16 @@ mod tests {
         assert!(!cfg.recursive);
         assert!(cfg.demo);
         assert_eq!(cfg.openai_api_key, Some("sk-test123".into()));
+
+        unsafe {
+            // --- Phase 3: OAuth token also counts as OpenAI auth ---
+            env::remove_var("OPENPLANTER_OPENAI_API_KEY");
+            env::remove_var("OPENAI_API_KEY");
+            env::set_var("OPENAI_OAUTH_TOKEN", "oauth-token");
+        }
+
+        let cfg = AgentConfig::from_env("/tmp");
+        assert_eq!(cfg.openai_api_key, Some("oauth-token".into()));
 
         // Restore original values
         for (k, v) in saved {

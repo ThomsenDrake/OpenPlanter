@@ -259,6 +259,10 @@ class ResolveProviderTests(unittest.TestCase):
         creds = CredentialBundle(mistral_transcription_api_key="mistral-test")
         self.assertEqual(_resolve_provider("auto", creds), "anthropic")
 
+    def test_openai_oauth_token_selects_openai_provider(self) -> None:
+        creds = CredentialBundle(openai_oauth_token="oauth-token")
+        self.assertEqual(_resolve_provider("auto", creds), "openai")
+
 
 if __name__ == "__main__":
     unittest.main()

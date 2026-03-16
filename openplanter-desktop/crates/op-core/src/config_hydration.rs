@@ -17,7 +17,11 @@ pub fn merge_credentials_into_config(
         cfg.openai_api_key = env_creds
             .openai_api_key
             .clone()
+            .or_else(|| env_creds.openai_oauth_token.clone())
             .or_else(|| file_creds.openai_api_key.clone());
+        if cfg.openai_api_key.is_none() {
+            cfg.openai_api_key = file_creds.openai_oauth_token.clone();
+        }
     }
     if cfg.api_key.is_none() {
         cfg.api_key = cfg.openai_api_key.clone();

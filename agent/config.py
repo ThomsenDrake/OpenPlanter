@@ -113,6 +113,8 @@ class AgentConfig:
         openai_api_key = (
             os.getenv("OPENPLANTER_OPENAI_API_KEY")
             or os.getenv("OPENAI_API_KEY")
+            or os.getenv("OPENPLANTER_OPENAI_OAUTH_TOKEN")
+            or os.getenv("OPENAI_OAUTH_TOKEN")
         )
         anthropic_api_key = os.getenv("OPENPLANTER_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
         openrouter_api_key = os.getenv("OPENPLANTER_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")

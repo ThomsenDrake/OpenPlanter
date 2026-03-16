@@ -124,6 +124,7 @@ pub async fn update_config(
 fn known_models_for_provider(provider: &str) -> Vec<ModelInfo> {
     let models: Vec<(&str, &str)> = match provider {
         "openai" => vec![
+            ("gpt-5.4", "GPT-5.4"),
             ("gpt-5.2", "GPT-5.2"),
             ("gpt-4o", "GPT-4o"),
             ("gpt-4o-mini", "GPT-4o Mini"),
@@ -222,7 +223,9 @@ pub async fn get_credentials_status(
     let mut status = HashMap::new();
     status.insert(
         "openai".to_string(),
-        cfg.openai_api_key.is_some() || env_creds.openai_api_key.is_some(),
+        cfg.openai_api_key.is_some()
+            || env_creds.openai_api_key.is_some()
+            || env_creds.openai_oauth_token.is_some(),
     );
     status.insert(
         "anthropic".to_string(),
@@ -260,6 +263,7 @@ mod tests {
     fn test_openai_models_nonempty() {
         let models = known_models_for_provider("openai");
         assert!(!models.is_empty(), "openai should have known models");
+        assert!(models.iter().any(|m| m.id == "gpt-5.4"));
     }
 
     #[test]
