@@ -72,6 +72,14 @@ export interface AppState {
   model: string;
   zaiPlan: string;
   webSearchProvider: string;
+  chromeMcpEnabled: boolean;
+  chromeMcpAutoConnect: boolean;
+  chromeMcpBrowserUrl: string | null;
+  chromeMcpChannel: string;
+  chromeMcpConnectTimeoutSec: number;
+  chromeMcpRpcTimeoutSec: number;
+  chromeMcpStatus: string;
+  chromeMcpStatusDetail: string;
   sessionId: string | null;
   inputTokens: number;
   outputTokens: number;
@@ -103,6 +111,14 @@ export const appState = new Store<AppState>({
   model: "",
   zaiPlan: "paygo",
   webSearchProvider: "exa",
+  chromeMcpEnabled: false,
+  chromeMcpAutoConnect: true,
+  chromeMcpBrowserUrl: null,
+  chromeMcpChannel: "stable",
+  chromeMcpConnectTimeoutSec: 15,
+  chromeMcpRpcTimeoutSec: 45,
+  chromeMcpStatus: "disabled",
+  chromeMcpStatusDetail: "Chrome DevTools MCP is disabled.",
   sessionId: null,
   inputTokens: 0,
   outputTokens: 0,
