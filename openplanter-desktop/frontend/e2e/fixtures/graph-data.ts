@@ -89,3 +89,82 @@ export const MOCK_GRAPH_DATA_WITH_NEW_NODES = {
     { source: "new-entity-beta", target: "bank-of-west", label: "account at" },
   ],
 };
+
+export const MOCK_INVESTIGATION_OVERVIEW = {
+  session_id: "test-session-001",
+  generated_at: "2026-03-17T12:00:00Z",
+  snapshot: {
+    focus_question_count: 2,
+    supported_count: 1,
+    contested_count: 1,
+    outstanding_gap_count: 2,
+    candidate_action_count: 2,
+  },
+  focus_questions: [
+    {
+      id: "q1",
+      text: "Who controls Acme Corp?",
+      priority: "high",
+    },
+    {
+      id: "q2",
+      text: "How does PAC Fund Alpha connect to city contracts?",
+      priority: "medium",
+    },
+  ],
+  outstanding_gaps: [
+    {
+      gap_id: "gap:claim:c1:missing_evidence",
+      label: "Claim c1 needs more evidence",
+      status: "open",
+      kind: "missing_evidence",
+      scope: "claim",
+      related_action_ids: ["ca_1"],
+    },
+  ],
+  candidate_actions: [
+    {
+      action_id: "ca_1",
+      label: "Verify claim c1",
+      rationale: "claim_requires_verification",
+      evidence_gap_refs: ["gap:claim:c1:missing_evidence"],
+      priority: "high",
+    },
+  ],
+  recent_revelations: [
+    {
+      revelation_id: "rev-1",
+      occurred_at: "2026-03-17T12:05:00Z",
+      title: "Acme and PAC filings overlap",
+      summary:
+        "The latest filing pull corroborates that Acme Corp and PAC Fund Alpha share an address across multiple records.",
+      provenance: {
+        source: "agent_step",
+        step_index: 4,
+      },
+    },
+  ],
+  wiki_nav: {
+    sources: [
+      {
+        source_id: "acme-corp",
+        title: "Acme Corp",
+        category: "corporate",
+        file_path: "wiki/acme-corp.md",
+        sections: [
+          {
+            section_id: "acme-corp::summary",
+            title: "Summary",
+            facts: [
+              {
+                fact_id: "acme-corp::summary::jurisdiction",
+                label: "Jurisdiction",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  warnings: [],
+};

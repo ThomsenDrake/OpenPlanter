@@ -5,6 +5,7 @@ import {
   MOCK_CONFIG,
   MOCK_SESSIONS,
   MOCK_CREDENTIALS,
+  MOCK_INVESTIGATION_OVERVIEW,
 } from "./fixtures/graph-data";
 
 /** Inject Tauri IPC mocks before page loads. */
@@ -17,6 +18,8 @@ async function injectTauriMocks(page: Page) {
           switch (cmd) {
             case "get_graph_data":
               return graphData;
+            case "get_investigation_overview":
+              return overview;
             case "get_config":
               return config;
             case "list_sessions":
@@ -68,6 +71,7 @@ async function injectTauriMocks(page: Page) {
     },
     {
       graphData: MOCK_GRAPH_DATA,
+      overview: MOCK_INVESTIGATION_OVERVIEW,
       config: MOCK_CONFIG,
       sessions: MOCK_SESSIONS,
       credentials: MOCK_CREDENTIALS,
@@ -75,14 +79,18 @@ async function injectTauriMocks(page: Page) {
   );
 }
 
+async function openGraphTab(page: Page) {
+  await page.locator(".investigation-tab", { hasText: "Graph" }).click();
+  await page.waitForSelector(".graph-pane", { timeout: 5000 });
+  await page.waitForTimeout(2000);
+}
+
 test.describe("Graph Pane", () => {
   test.beforeEach(async ({ page }) => {
     await injectTauriMocks(page);
     await page.goto("/");
-    // Wait for the graph pane to be in the DOM
-    await page.waitForSelector(".graph-pane", { timeout: 5000 });
-    // Give Cytoscape time to initialize and layout
-    await page.waitForTimeout(2000);
+    await page.waitForSelector(".investigation-pane", { timeout: 5000 });
+    await openGraphTab(page);
     // Session filter defaults ON (hides all pre-existing nodes).
     // Turn it off so non-session tests see all nodes.
     const toggle = page.locator(".graph-session-toggle");
@@ -98,6 +106,7 @@ test.describe("Graph Pane", () => {
     // Grid layout: sidebar, chat pane, graph pane
     await expect(page.locator(".sidebar")).toBeVisible();
     await expect(page.locator(".chat-pane")).toBeVisible();
+    await expect(page.locator(".investigation-pane")).toBeVisible();
     await expect(page.locator(".graph-pane")).toBeVisible();
     await expect(page.locator(".input-bar")).toBeVisible();
   });
@@ -391,6 +400,24 @@ test.describe("Graph Pane", () => {
           switch (cmd) {
             case "get_graph_data":
               return { nodes: [], edges: [] };
+            case "get_investigation_overview":
+              return {
+                session_id: null,
+                generated_at: "2026-03-17T12:00:00Z",
+                snapshot: {
+                  focus_question_count: 0,
+                  supported_count: 0,
+                  contested_count: 0,
+                  outstanding_gap_count: 0,
+                  candidate_action_count: 0,
+                },
+                focus_questions: [],
+                outstanding_gaps: [],
+                candidate_actions: [],
+                recent_revelations: [],
+                wiki_nav: { sources: [] },
+                warnings: [],
+              };
             case "get_config":
               return {
                 provider: "anthropic", model: "claude-opus-4-6",
@@ -424,6 +451,8 @@ test.describe("Graph Pane", () => {
     });
 
     await page.goto("http://localhost:5173/");
+    await page.waitForSelector(".investigation-pane", { timeout: 5000 });
+    await page.locator(".investigation-tab", { hasText: "Graph" }).click();
     await page.waitForTimeout(2000);
 
     const placeholder = page.locator(".graph-placeholder");
@@ -699,6 +728,30 @@ test.describe("Graph Pane", () => {
                 invokeCount++;
                 // First call returns base data, subsequent calls return new data
                 return invokeCount <= 1 ? graphData : graphDataNew;
+              case "get_investigation_overview":
+                return {
+                  session_id: "test-session-001",
+                  generated_at: "2026-03-17T12:00:00Z",
+                  snapshot: {
+                    focus_question_count: 1,
+                    supported_count: 0,
+                    contested_count: 1,
+                    outstanding_gap_count: 1,
+                    candidate_action_count: 1,
+                  },
+                  focus_questions: [
+                    {
+                      id: "q1",
+                      text: "Who controls Acme Corp?",
+                      priority: "high",
+                    },
+                  ],
+                  outstanding_gaps: [],
+                  candidate_actions: [],
+                  recent_revelations: [],
+                  wiki_nav: { sources: [] },
+                  warnings: [],
+                };
               case "get_config":
                 return config;
               case "list_sessions":
@@ -741,6 +794,8 @@ test.describe("Graph Pane", () => {
     );
 
     await page.goto("http://localhost:5173/");
+    await page.waitForSelector(".investigation-pane", { timeout: 5000 });
+    await page.locator(".investigation-tab", { hasText: "Graph" }).click();
     await page.waitForSelector(".graph-pane", { timeout: 5000 });
     await page.waitForTimeout(2000);
 

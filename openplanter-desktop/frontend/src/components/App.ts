@@ -1,7 +1,7 @@
 /** Root layout component. */
 import { createStatusBar } from "./StatusBar";
 import { createChatPane } from "./ChatPane";
-import { createGraphPane } from "./GraphPane";
+import { createInvestigationPane } from "./InvestigationPane";
 import { createWorkspaceInitGate } from "./WorkspaceInitGate";
 import { appState } from "../state/store";
 import { listSessions, openSession, deleteSession, getCredentialsStatus, getSessionHistory } from "../api/invoke";
@@ -58,9 +58,9 @@ export function createApp(root: HTMLElement): void {
   const chatPane = createChatPane();
   root.appendChild(chatPane);
 
-  // Graph pane
-  const graphPane = createGraphPane();
-  root.appendChild(graphPane);
+  // Investigation pane
+  const investigationPane = createInvestigationPane();
+  root.appendChild(investigationPane);
 
   // Workspace init gate
   const workspaceInitGate = createWorkspaceInitGate();

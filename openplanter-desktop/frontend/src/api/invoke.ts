@@ -4,6 +4,7 @@ import type {
   ConfigView,
   GraphData,
   InitStatusView,
+  InvestigationOverviewView,
   MigrationInitRequest,
   MigrationInitResultView,
   MigrationSourceInspection,
@@ -64,6 +65,10 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function getGraphData(): Promise<GraphData> {
   return invoke("get_graph_data");
+}
+
+export async function getInvestigationOverview(): Promise<InvestigationOverviewView> {
+  return invoke("get_investigation_overview");
 }
 
 export async function readWikiFile(path: string): Promise<string> {

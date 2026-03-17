@@ -104,6 +104,86 @@ export interface GraphData {
   edges: GraphEdge[];
 }
 
+export interface InvestigationSnapshotView {
+  focus_question_count: number;
+  supported_count: number;
+  contested_count: number;
+  outstanding_gap_count: number;
+  candidate_action_count: number;
+}
+
+export interface OverviewQuestionView {
+  id: string;
+  text: string;
+  priority: string;
+  updated_at?: string;
+}
+
+export interface OverviewGapView {
+  gap_id: string;
+  label: string;
+  status: string;
+  kind: string;
+  scope: string;
+  related_action_ids: string[];
+}
+
+export interface OverviewActionView {
+  action_id: string;
+  label: string;
+  rationale?: string;
+  evidence_gap_refs: string[];
+  priority: string;
+}
+
+export interface OverviewRevelationProvenanceView {
+  source: string;
+  step_index?: number;
+}
+
+export interface OverviewRevelationView {
+  revelation_id: string;
+  occurred_at: string;
+  title: string;
+  summary: string;
+  provenance: OverviewRevelationProvenanceView;
+}
+
+export interface WikiNavFactView {
+  fact_id: string;
+  label: string;
+}
+
+export interface WikiNavSectionView {
+  section_id: string;
+  title: string;
+  facts: WikiNavFactView[];
+}
+
+export interface WikiNavSourceView {
+  source_id: string;
+  title: string;
+  category: string;
+  file_path: string;
+  sections: WikiNavSectionView[];
+}
+
+export interface WikiNavTreeView {
+  sources: WikiNavSourceView[];
+}
+
+export interface InvestigationOverviewView {
+  session_id: string | null;
+  generated_at: string;
+  snapshot: InvestigationSnapshotView;
+  focus_questions: OverviewQuestionView[];
+  outstanding_gaps: OverviewGapView[];
+  candidate_actions: OverviewActionView[];
+  recent_revelations: OverviewRevelationView[];
+  wiki_nav: WikiNavTreeView;
+  warnings: string[];
+}
+
 export interface ConfigView {
   provider: string;
   model: string;

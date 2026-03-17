@@ -515,6 +515,16 @@ export function createGraphPane(): HTMLElement {
     });
   }) as EventListener);
 
+  window.addEventListener("investigation-tab-changed", ((e: CustomEvent<{ tab: string }>) => {
+    if (e.detail?.tab !== "graph") {
+      return;
+    }
+    setTimeout(() => {
+      fitView();
+      void autoRefreshGraph();
+    }, 0);
+  }) as EventListener);
+
   return pane;
 }
 

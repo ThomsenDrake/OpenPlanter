@@ -18,6 +18,7 @@ import {
   openSession,
   deleteSession,
   getGraphData,
+  getInvestigationOverview,
   getInitStatus,
   inspectMigrationSource,
   debugLog,
@@ -208,6 +209,36 @@ describe("invoke wrappers", () => {
     const data = await getGraphData();
     expect(data.nodes).toHaveLength(1);
     expect(data.nodes[0].label).toBe("Test");
+  });
+
+  it("getInvestigationOverview returns overview structure", async () => {
+    __setHandler("get_investigation_overview", () => ({
+      session_id: "session-1",
+      generated_at: "2026-03-17T12:00:00Z",
+      snapshot: {
+        focus_question_count: 1,
+        supported_count: 0,
+        contested_count: 1,
+        outstanding_gap_count: 2,
+        candidate_action_count: 1,
+      },
+      focus_questions: [
+        {
+          id: "q1",
+          text: "Who controls Acme Corp?",
+          priority: "high",
+        },
+      ],
+      outstanding_gaps: [],
+      candidate_actions: [],
+      recent_revelations: [],
+      wiki_nav: { sources: [] },
+      warnings: [],
+    }));
+    const overview = await getInvestigationOverview();
+    expect(overview.session_id).toBe("session-1");
+    expect(overview.snapshot.outstanding_gap_count).toBe(2);
+    expect(overview.focus_questions[0].text).toContain("Acme Corp");
   });
 
   it("debugLog sends message", async () => {

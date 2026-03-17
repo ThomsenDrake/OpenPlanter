@@ -180,6 +180,121 @@ pub struct GraphEdge {
     pub label: Option<String>,
 }
 
+/// Snapshot counts for the investigation overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestigationSnapshotView {
+    pub focus_question_count: u32,
+    pub supported_count: u32,
+    pub contested_count: u32,
+    pub outstanding_gap_count: u32,
+    pub candidate_action_count: u32,
+}
+
+/// Focus question summary shown in the overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewQuestionView {
+    pub id: String,
+    pub text: String,
+    pub priority: String,
+    pub updated_at: Option<String>,
+}
+
+/// Outstanding gap summary shown in the overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewGapView {
+    pub gap_id: String,
+    pub label: String,
+    pub status: String,
+    pub kind: String,
+    pub scope: String,
+    #[serde(default)]
+    pub related_action_ids: Vec<String>,
+}
+
+/// Candidate next action summary shown in the overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewActionView {
+    pub action_id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub evidence_gap_refs: Vec<String>,
+    pub priority: String,
+}
+
+/// Recent insight surfaced from session replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewRevelationProvenanceView {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<u32>,
+}
+
+/// Recent revelation entry shown in the overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewRevelationView {
+    pub revelation_id: String,
+    pub occurred_at: String,
+    pub title: String,
+    pub summary: String,
+    pub provenance: OverviewRevelationProvenanceView,
+}
+
+/// Lowest-level wiki navigation item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiNavFactView {
+    pub fact_id: String,
+    pub label: String,
+}
+
+/// Second-level wiki navigation item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiNavSectionView {
+    pub section_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub facts: Vec<WikiNavFactView>,
+}
+
+/// Top-level wiki navigation item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiNavSourceView {
+    pub source_id: String,
+    pub title: String,
+    pub category: String,
+    pub file_path: String,
+    #[serde(default)]
+    pub sections: Vec<WikiNavSectionView>,
+}
+
+/// Wiki navigation tree used by the overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiNavTreeView {
+    #[serde(default)]
+    pub sources: Vec<WikiNavSourceView>,
+}
+
+/// Aggregated investigation overview payload for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestigationOverviewView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub generated_at: String,
+    pub snapshot: InvestigationSnapshotView,
+    #[serde(default)]
+    pub focus_questions: Vec<OverviewQuestionView>,
+    #[serde(default)]
+    pub outstanding_gaps: Vec<OverviewGapView>,
+    #[serde(default)]
+    pub candidate_actions: Vec<OverviewActionView>,
+    #[serde(default)]
+    pub recent_revelations: Vec<OverviewRevelationView>,
+    pub wiki_nav: WikiNavTreeView,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// All events the engine can emit to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

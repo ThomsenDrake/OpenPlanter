@@ -167,6 +167,8 @@ async function init() {
       ],
     }));
 
+    window.dispatchEvent(new CustomEvent("agent-finished"));
+
     // Process input queue
     processQueue();
   });
@@ -189,6 +191,8 @@ async function init() {
         },
       ],
     }));
+
+    window.dispatchEvent(new CustomEvent("agent-finished"));
 
     // Process input queue even on error
     processQueue();
