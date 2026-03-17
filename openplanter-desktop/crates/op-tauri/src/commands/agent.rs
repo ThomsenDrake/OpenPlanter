@@ -18,10 +18,27 @@ use op_core::engine::{SolveEmitter, SolveInitialContext};
 use op_core::session::replay::{ReplayEntry, ReplayLogger};
 use op_core::workspace_init;
 
-const FOLLOW_UP_TOKEN_CUES: &[&str] = &[
-    "it", "this", "that", "these", "those", "also", "why", "how", "continue", "clarify", "expand",
+const FOLLOW_UP_TOKEN_CUES: &[&str] = &["it", "this", "that", "these", "those", "also"];
+const FOLLOW_UP_PHRASE_CUES: &[&str] = &[
+    "what about",
+    "follow up",
+    "tell me more",
+    "continue",
+    "clarify",
+    "expand",
+    "why does this",
+    "why does that",
+    "why does it",
+    "why is this",
+    "why is that",
+    "why is it",
+    "how does this",
+    "how does that",
+    "how does it",
+    "how is this",
+    "how is that",
+    "how is it",
 ];
-const FOLLOW_UP_PHRASE_CUES: &[&str] = &["what about", "follow up", "tell me more"];
 const TOKEN_OVERLAP_THRESHOLD: f64 = 0.20;
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "but", "does", "for", "from", "had", "has", "have", "into", "its",
@@ -44,17 +61,31 @@ fn normalized_tokens(text: &str) -> HashSet<String> {
         .collect()
 }
 
+fn contains_phrase(words: &[String], cue: &str) -> bool {
+    let cue_words = cue
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if cue_words.is_empty() || words.len() < cue_words.len() {
+        return false;
+    }
+    words.windows(cue_words.len()).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(cue_words.iter().map(String::as_str))
+    })
+}
+
 fn has_follow_up_cue(objective: &str) -> bool {
-    let normalized = normalize_words(objective).join(" ");
-    let token_set = normalize_words(objective)
-        .into_iter()
-        .collect::<HashSet<_>>();
+    let words = normalize_words(objective);
+    let token_set = words.iter().map(String::as_str).collect::<HashSet<_>>();
     FOLLOW_UP_TOKEN_CUES
         .iter()
         .any(|cue| token_set.contains(*cue))
         || FOLLOW_UP_PHRASE_CUES
             .iter()
-            .any(|cue| normalized.contains(cue))
+            .any(|cue| contains_phrase(&words, cue))
 }
 
 fn token_overlap_ratio(objective: &str, turn_history: &[TurnSummary]) -> f64 {
@@ -466,6 +497,34 @@ mod tests {
             tmp.path(),
             "sid",
             "Summarize zoning permits in Boston",
+            "auto",
+            50,
+        )
+        .await;
+        assert!(warning.is_none());
+        assert!(context.turn_history.is_none());
+        assert!(context.continuity_mode.is_none());
+        assert!(context.continuity_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_solve_initial_context_keeps_generic_how_prompt_fresh() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("investigation_state.json"),
+            r#"{
+                "schema_version":"1.0.0",
+                "session_id":"sid",
+                "legacy":{"turn_history":[{"turn_number":1,"objective":"Investigate donor network shell companies","result_preview":"Matched donor network address records","timestamp":"2026-01-01T00:00:00Z","steps_used":3,"replay_seq_start":1}]}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let (context, warning) = build_solve_initial_context(
+            tmp.path(),
+            "sid",
+            "How do we structure a CI pipeline?",
             "auto",
             50,
         )

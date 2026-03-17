@@ -13,11 +13,16 @@ struct ResolvedInvestigationState {
 }
 
 /// Summary of a completed turn for inclusion in subsequent prompts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TurnSummary {
+    #[serde(default)]
     pub turn_number: u32,
+    #[serde(default)]
     pub objective: String,
+    #[serde(default)]
     pub result_preview: String,
+    #[serde(default)]
     pub timestamp: String,
     #[serde(default)]
     pub steps_used: u32,
@@ -716,5 +721,32 @@ mod tests {
         assert_eq!(history[1].turn_number, 3);
         assert_eq!(history[0].result_preview, "ok");
         assert_eq!(history[1].result_preview, "done");
+    }
+
+    #[tokio::test]
+    async fn test_turn_history_from_state_preserves_legacy_minimal_entries() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("investigation_state.json"),
+            r#"{
+                "schema_version":"1.0.0",
+                "session_id":"sid",
+                "legacy":{"turn_history":[{"turn_number":4}]}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let state = load_or_migrate_investigation_state(tmp.path())
+            .await
+            .unwrap();
+        let history = turn_history_from_state(&state);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].turn_number, 4);
+        assert_eq!(history[0].objective, "");
+        assert_eq!(history[0].result_preview, "");
+        assert_eq!(history[0].timestamp, "");
+        assert_eq!(history[0].steps_used, 0);
+        assert_eq!(history[0].replay_seq_start, 0);
     }
 }
