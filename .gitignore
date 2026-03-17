@@ -1,4 +1,5 @@
 # Local environment and workspace state
+.codex/
 .env
 .env.*
 .venv/
@@ -40,5 +41,6 @@ git-apply-*.txt
 
 # Editor and OS cruft
 .DS_Store
+._*
 .idea/
 .vscode/
