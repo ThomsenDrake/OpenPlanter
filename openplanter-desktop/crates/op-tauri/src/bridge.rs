@@ -186,6 +186,8 @@ pub struct LoggingEmitter<E: SolveEmitter> {
     current_args_buf: Mutex<String>,
     /// Whether the current tool args buffer was truncated.
     current_args_truncated: Mutex<bool>,
+    /// Final completion payload emitted during the solve.
+    completion: Mutex<Option<CompletionSnapshot>>,
 }
 
 /// A tool call being accumulated during streaming.
@@ -193,6 +195,12 @@ struct PendingToolCall {
     name: String,
     key_arg: String,
     start_time: std::time::Instant,
+}
+
+#[derive(Clone)]
+pub struct CompletionSnapshot {
+    pub result: String,
+    pub loop_metrics: Option<LoopMetrics>,
 }
 
 /// Key argument names for tool call display (mirrors frontend KEY_ARGS).
@@ -274,7 +282,12 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
             current_tool: Mutex::new(String::new()),
             current_args_buf: Mutex::new(String::new()),
             current_args_truncated: Mutex::new(false),
+            completion: Mutex::new(None),
         }
+    }
+
+    pub fn take_completion(&self) -> Option<CompletionSnapshot> {
+        self.completion.lock().unwrap().take()
     }
 }
 
@@ -394,6 +407,10 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         loop_metrics: Option<LoopMetrics>,
         completion: Option<CompletionMeta>,
     ) {
+        *self.completion.lock().unwrap() = Some(CompletionSnapshot {
+            result: result.to_string(),
+            loop_metrics: loop_metrics.clone(),
+        });
         let entry = ReplayEntry {
             seq: 0,
             timestamp: String::new(),

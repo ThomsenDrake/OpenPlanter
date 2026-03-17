@@ -110,6 +110,7 @@ export interface ConfigView {
   reasoning_effort: string | null;
   zai_plan: string;
   web_search_provider: string;
+  continuity_mode: string;
   chrome_mcp_enabled: boolean;
   chrome_mcp_auto_connect: boolean;
   chrome_mcp_browser_url: string | null;
@@ -132,6 +133,7 @@ export interface PartialConfig {
   reasoning_effort?: string;
   zai_plan?: string;
   web_search_provider?: string;
+  continuity_mode?: string;
   chrome_mcp_enabled?: boolean;
   chrome_mcp_auto_connect?: boolean;
   chrome_mcp_browser_url?: string | null;
@@ -164,6 +166,7 @@ export interface PersistentSettings {
   default_model_ollama?: string | null;
   zai_plan?: string | null;
   web_search_provider?: string | null;
+  continuity_mode?: string | null;
   chrome_mcp_enabled?: boolean | null;
   chrome_mcp_auto_connect?: boolean | null;
   chrome_mcp_browser_url?: string | null;

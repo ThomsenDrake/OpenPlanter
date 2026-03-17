@@ -239,6 +239,8 @@ Use turn history to:
 - Avoid re-doing work that a prior turn already completed
 - Understand the progression of the investigation so far
 - Pick up where a previous turn left off
+- Treat the summaries as bounded hints, not exhaustive truth
+- Re-validate important details with tools before relying on them
 
 For full details of any prior turn, read the session logs:
   replay.jsonl (full transcript) or events.jsonl (lightweight trace)."#;

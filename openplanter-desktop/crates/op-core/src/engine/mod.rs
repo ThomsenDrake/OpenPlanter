@@ -27,6 +27,7 @@ use crate::prompts::build_system_prompt;
 use crate::tools::WorkspaceTools;
 use crate::tools::defs::build_tool_defs;
 
+use self::context::TurnSummary;
 use self::curator::{
     CuratorCheckpoint, CuratorStateDelta, build_state_delta, run_curator_checkpoint,
 };
@@ -35,6 +36,9 @@ use self::curator::{
 pub struct SolveInitialContext {
     pub session_id: Option<String>,
     pub session_dir: Option<String>,
+    pub turn_history: Option<Vec<TurnSummary>>,
+    pub continuity_mode: Option<String>,
+    pub continuity_reason: Option<String>,
     pub question_reasoning_packet: Option<Value>,
 }
 
@@ -298,6 +302,36 @@ fn build_initial_user_message(
         payload.insert(
             "session_dir".to_string(),
             Value::String(session_dir.clone()),
+        );
+    }
+    if initial_context.continuity_mode.as_deref() == Some("continue") {
+        payload.insert(
+            "continuity_mode".to_string(),
+            Value::String("continue".to_string()),
+        );
+        if let Some(reason) = initial_context
+            .continuity_reason
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            payload.insert(
+                "continuity_reason".to_string(),
+                Value::String(reason.clone()),
+            );
+        }
+        let turn_history = initial_context.turn_history.clone().unwrap_or_default();
+        if !turn_history.is_empty() {
+            payload.insert(
+                "turn_history".to_string(),
+                serde_json::to_value(&turn_history)?,
+            );
+        }
+        payload.insert(
+            "turn_history_note".to_string(),
+            Value::String(format!(
+                "{} prior turn(s) included as compact hints. Re-validate with tools if needed.",
+                turn_history.len()
+            )),
         );
     }
     if let Some(packet) = initial_context.question_reasoning_packet.clone() {
@@ -626,7 +660,10 @@ fn evaluate_budget_extension(
     let window = &records[start..];
 
     let tool_steps = window.iter().filter(|record| record.tool_count > 0).count();
-    let failed_steps = window.iter().filter(|record| record.failed_tool_step).count();
+    let failed_steps = window
+        .iter()
+        .filter(|record| record.failed_tool_step)
+        .count();
     let failure_ratio = if tool_steps == 0 {
         0.0
     } else {
@@ -689,10 +726,22 @@ fn evaluate_budget_extension(
         Value::from(repeated_signature_streak as u64),
     );
     payload.insert("failure_ratio".into(), Value::from(failure_ratio));
-    payload.insert("novel_action_count".into(), Value::from(novel_action_count as u64));
-    payload.insert("state_delta_count".into(), Value::from(state_delta_count as u64));
-    payload.insert("has_build_or_finalize".into(), Value::from(has_build_or_finalize));
-    payload.insert("positive_signals".into(), Value::from(positive_signals as u64));
+    payload.insert(
+        "novel_action_count".into(),
+        Value::from(novel_action_count as u64),
+    );
+    payload.insert(
+        "state_delta_count".into(),
+        Value::from(state_delta_count as u64),
+    );
+    payload.insert(
+        "has_build_or_finalize".into(),
+        Value::from(has_build_or_finalize),
+    );
+    payload.insert(
+        "positive_signals".into(),
+        Value::from(positive_signals as u64),
+    );
     payload.insert(
         "blockers".into(),
         Value::Array(
@@ -752,7 +801,9 @@ fn build_partial_completion_text(
                 .to_string(),
         );
     }
-    next_actions.push(format!("Continue the objective with the strongest completed lead: {objective}"));
+    next_actions.push(format!(
+        "Continue the objective with the strongest completed lead: {objective}"
+    ));
     next_actions.push(
         "Turn the completed work below into a concrete artifact or summary before doing more exploration."
             .to_string(),
@@ -1488,10 +1539,7 @@ mod tests {
         assert!(eligible, "expected progress window to earn an extension");
         assert_eq!(payload.get("novel_action_count"), Some(&Value::from(2u64)));
         assert_eq!(payload.get("state_delta_count"), Some(&Value::from(2u64)));
-        assert_eq!(
-            payload.get("blockers"),
-            Some(&Value::Array(Vec::new()))
-        );
+        assert_eq!(payload.get("blockers"), Some(&Value::Array(Vec::new())));
     }
 
     #[test]
@@ -1586,11 +1634,7 @@ mod tests {
             termination_reason: "budget_cap".into(),
         };
 
-        let text = build_partial_completion_text(
-            "finish the artifact",
-            &loop_metrics,
-            &records,
-        );
+        let text = build_partial_completion_text("finish the artifact", &loop_metrics, &records);
 
         assert!(text.contains("Partial completion for objective: finish the artifact"));
         assert!(text.contains("Termination reason: budget_cap"));
@@ -1716,6 +1760,9 @@ mod tests {
             Some(&SolveInitialContext {
                 session_id: Some("session-1".to_string()),
                 session_dir: Some("/tmp/session-1".to_string()),
+                turn_history: None,
+                continuity_mode: None,
+                continuity_reason: None,
                 question_reasoning_packet: Some(serde_json::json!({
                     "reasoning_mode": "question_centric",
                     "focus_question_ids": ["q_1"],
@@ -1770,6 +1817,9 @@ mod tests {
             Some(&SolveInitialContext {
                 session_id: Some("session-1".to_string()),
                 session_dir: Some("/tmp/session-1".to_string()),
+                turn_history: None,
+                continuity_mode: None,
+                continuity_reason: None,
                 question_reasoning_packet: None,
             }),
         )
@@ -1781,6 +1831,67 @@ mod tests {
             parsed["objective"],
             Value::String("investigate".to_string())
         );
+    }
+
+    #[test]
+    fn test_build_initial_user_message_includes_turn_history_only_for_continue_mode() {
+        let config = AgentConfig::default();
+        let message = build_initial_user_message(
+            "investigate",
+            &config,
+            Some(&SolveInitialContext {
+                session_id: Some("session-1".to_string()),
+                session_dir: Some("/tmp/session-1".to_string()),
+                turn_history: Some(vec![TurnSummary {
+                    turn_number: 1,
+                    objective: "first question".into(),
+                    result_preview: "first result".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    steps_used: 2,
+                    replay_seq_start: 1,
+                }]),
+                continuity_mode: Some("continue".to_string()),
+                continuity_reason: Some("follow_up_cue".to_string()),
+                question_reasoning_packet: None,
+            }),
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(parsed["continuity_mode"], "continue");
+        assert_eq!(parsed["continuity_reason"], "follow_up_cue");
+        assert_eq!(parsed["turn_history"][0]["objective"], "first question");
+        assert!(parsed.get("turn_history_note").is_some());
+    }
+
+    #[test]
+    fn test_build_initial_user_message_omits_turn_history_for_fresh_mode() {
+        let config = AgentConfig::default();
+        let message = build_initial_user_message(
+            "investigate",
+            &config,
+            Some(&SolveInitialContext {
+                session_id: Some("session-1".to_string()),
+                session_dir: Some("/tmp/session-1".to_string()),
+                turn_history: Some(vec![TurnSummary {
+                    turn_number: 1,
+                    objective: "first question".into(),
+                    result_preview: "first result".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    steps_used: 2,
+                    replay_seq_start: 1,
+                }]),
+                continuity_mode: None,
+                continuity_reason: None,
+                question_reasoning_packet: None,
+            }),
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&message).unwrap();
+        assert!(parsed.get("turn_history").is_none());
+        assert!(parsed.get("continuity_mode").is_none());
+        assert!(parsed.get("continuity_reason").is_none());
     }
 
     #[test]

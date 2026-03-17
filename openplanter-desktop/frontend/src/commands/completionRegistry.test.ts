@@ -25,6 +25,7 @@ describe("completionRegistry", () => {
     expect(values).toContain("/model");
     expect(values).toContain("/zai-plan");
     expect(values).toContain("/web-search");
+    expect(values).toContain("/continuity");
     expect(values).toContain("/reasoning");
     expect(values).toContain("/chrome");
     expect(values).toContain("/init");
@@ -91,6 +92,17 @@ describe("completionRegistry", () => {
     const childValues = webSearchCmd!.children!.map((c) => c.value);
     expect(childValues).toEqual(["exa", "firecrawl", "brave", "tavily"]);
     expect(webSearchCmd!.children![0].children?.[0].value).toBe("--save");
+  });
+
+  it("/continuity has auto, fresh, and continue children", () => {
+    const continuityCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/continuity");
+    expect(continuityCmd).toBeDefined();
+    expect(continuityCmd!.children?.map((child) => child.value)).toEqual([
+      "auto",
+      "fresh",
+      "continue",
+    ]);
+    expect(continuityCmd!.children?.[0].children?.[0].value).toBe("--save");
   });
 
   it("/zai-plan has paygo and coding children", () => {

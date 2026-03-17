@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
+    normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
     normalize_web_search_provider, normalize_zai_plan,
 };
 
@@ -60,6 +60,7 @@ pub struct PersistentSettings {
     pub default_model_ollama: Option<String>,
     pub zai_plan: Option<String>,
     pub web_search_provider: Option<String>,
+    pub continuity_mode: Option<String>,
     pub chrome_mcp_enabled: Option<bool>,
     pub chrome_mcp_auto_connect: Option<bool>,
     pub chrome_mcp_browser_url: Option<String>,
@@ -101,6 +102,10 @@ impl PersistentSettings {
             .web_search_provider
             .as_deref()
             .map(|value| normalize_web_search_provider(Some(value)));
+        let continuity_mode = self
+            .continuity_mode
+            .as_deref()
+            .map(|value| normalize_continuity_mode(Some(value)));
         let zai_plan = self
             .zai_plan
             .as_deref()
@@ -124,6 +129,7 @@ impl PersistentSettings {
             default_model_ollama: trim_opt(&self.default_model_ollama),
             zai_plan,
             web_search_provider,
+            continuity_mode,
             chrome_mcp_enabled: self.chrome_mcp_enabled,
             chrome_mcp_auto_connect: self.chrome_mcp_auto_connect,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
@@ -133,7 +139,9 @@ impl PersistentSettings {
                 .chrome_mcp_channel
                 .as_deref()
                 .map(|value| normalize_chrome_mcp_channel(Some(value))),
-            chrome_mcp_connect_timeout_sec: self.chrome_mcp_connect_timeout_sec.map(|value| value.max(1)),
+            chrome_mcp_connect_timeout_sec: self
+                .chrome_mcp_connect_timeout_sec
+                .map(|value| value.max(1)),
             chrome_mcp_rpc_timeout_sec: self.chrome_mcp_rpc_timeout_sec.map(|value| value.max(1)),
         })
     }
@@ -158,11 +166,15 @@ impl PersistentSettings {
         add!(default_model_ollama, "default_model_ollama");
         add!(zai_plan, "zai_plan");
         add!(web_search_provider, "web_search_provider");
+        add!(continuity_mode, "continuity_mode");
         add!(chrome_mcp_enabled, "chrome_mcp_enabled");
         add!(chrome_mcp_auto_connect, "chrome_mcp_auto_connect");
         add!(chrome_mcp_browser_url, "chrome_mcp_browser_url");
         add!(chrome_mcp_channel, "chrome_mcp_channel");
-        add!(chrome_mcp_connect_timeout_sec, "chrome_mcp_connect_timeout_sec");
+        add!(
+            chrome_mcp_connect_timeout_sec,
+            "chrome_mcp_connect_timeout_sec"
+        );
         add!(chrome_mcp_rpc_timeout_sec, "chrome_mcp_rpc_timeout_sec");
         payload
     }
@@ -192,6 +204,7 @@ impl PersistentSettings {
             default_model_ollama: get_str(obj, "default_model_ollama"),
             zai_plan: get_str(obj, "zai_plan"),
             web_search_provider: get_str(obj, "web_search_provider"),
+            continuity_mode: get_str(obj, "continuity_mode"),
             chrome_mcp_enabled: normalize_bool(obj.get("chrome_mcp_enabled"))?,
             chrome_mcp_auto_connect: normalize_bool(obj.get("chrome_mcp_auto_connect"))?,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
@@ -316,6 +329,7 @@ mod tests {
             default_model_zai: Some("glm-5".into()),
             zai_plan: Some("coding".into()),
             web_search_provider: Some("firecrawl".into()),
+            continuity_mode: Some("continue".into()),
             ..Default::default()
         };
         store.save(&settings).unwrap();
@@ -325,6 +339,7 @@ mod tests {
         assert_eq!(loaded.default_model_zai, Some("glm-5".into()));
         assert_eq!(loaded.zai_plan, Some("coding".into()));
         assert_eq!(loaded.web_search_provider, Some("firecrawl".into()));
+        assert_eq!(loaded.continuity_mode, Some("continue".into()));
     }
 
     #[test]
@@ -356,6 +371,7 @@ mod tests {
             default_model_zai: Some("glm-5".into()),
             zai_plan: Some("coding".into()),
             web_search_provider: Some("firecrawl".into()),
+            continuity_mode: Some("fresh".into()),
             ..Default::default()
         };
         let json_val = serde_json::to_value(settings.to_json()).unwrap();
@@ -366,6 +382,7 @@ mod tests {
         assert_eq!(loaded.default_model_zai, Some("glm-5".into()));
         assert_eq!(loaded.zai_plan, Some("coding".into()));
         assert_eq!(loaded.web_search_provider, Some("firecrawl".into()));
+        assert_eq!(loaded.continuity_mode, Some("fresh".into()));
     }
 
     #[test]
@@ -386,5 +403,15 @@ mod tests {
         };
         let normalized = settings.normalized().unwrap();
         assert_eq!(normalized.zai_plan, Some("paygo".into()));
+    }
+
+    #[test]
+    fn test_continuity_mode_normalized() {
+        let settings = PersistentSettings {
+            continuity_mode: Some("unexpected".into()),
+            ..Default::default()
+        };
+        let normalized = settings.normalized().unwrap();
+        assert_eq!(normalized.continuity_mode, Some("auto".into()));
     }
 }

@@ -140,6 +140,13 @@ describe("dispatchSlashCommand", () => {
     ).toBe(true);
   });
 
+  it("continuity dispatches", async () => {
+    const result = await dispatchSlashCommand("/continuity");
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("handled");
+    expect(result!.lines.some((l) => l.includes("Continuity mode:"))).toBe(true);
+  });
+
   it("web search dispatches", async () => {
     const result = await dispatchSlashCommand("/web-search");
     expect(result).not.toBeNull();
@@ -185,6 +192,12 @@ describe("dispatchSlashCommand", () => {
     const result = await dispatchSlashCommand("/help");
     expect(result).not.toBeNull();
     expect(result!.lines.some((l) => l.includes("/chrome"))).toBe(true);
+  });
+
+  it("help includes continuity command", async () => {
+    const result = await dispatchSlashCommand("/help");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("/continuity"))).toBe(true);
   });
 
   it("chrome dispatches", async () => {

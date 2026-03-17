@@ -43,6 +43,12 @@ const WEB_SEARCH_PROVIDERS: CompletionItem[] = [
   { value: "tavily", description: "Use Tavily for web search", children: SAVE_FLAG },
 ];
 
+const CONTINUITY_MODES: CompletionItem[] = [
+  { value: "auto", description: "Infer follow-ups automatically", children: SAVE_FLAG },
+  { value: "fresh", description: "Force a fresh turn context", children: SAVE_FLAG },
+  { value: "continue", description: "Force prior-turn continuity", children: SAVE_FLAG },
+];
+
 const ZAI_PLANS: CompletionItem[] = [
   { value: "paygo", description: "Use the Z.AI PAYGO endpoint", children: SAVE_FLAG },
   { value: "coding", description: "Use the Z.AI Coding Plan endpoint", children: SAVE_FLAG },
@@ -79,6 +85,11 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
     value: "/web-search",
     description: "Show or switch the web search provider",
     children: WEB_SEARCH_PROVIDERS,
+  },
+  {
+    value: "/continuity",
+    description: "Show or switch follow-up continuity mode",
+    children: CONTINUITY_MODES,
   },
   {
     value: "/reasoning",

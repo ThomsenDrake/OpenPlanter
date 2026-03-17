@@ -1,7 +1,8 @@
 use crate::state::AppState;
 use op_core::config::{
     has_openai_auth, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-    normalize_web_search_provider, normalize_zai_plan, resolve_zai_base_url,
+    normalize_continuity_mode, normalize_web_search_provider, normalize_zai_plan,
+    resolve_zai_base_url,
 };
 use op_core::credentials::credentials_from_env;
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
@@ -21,6 +22,7 @@ async fn make_config_view(
         reasoning_effort: cfg.reasoning_effort.clone(),
         zai_plan: cfg.zai_plan.clone(),
         web_search_provider: cfg.web_search_provider.clone(),
+        continuity_mode: cfg.continuity_mode.clone(),
         chrome_mcp_enabled: cfg.chrome_mcp_enabled,
         chrome_mcp_auto_connect: cfg.chrome_mcp_auto_connect,
         chrome_mcp_browser_url: cfg.chrome_mcp_browser_url.clone(),
@@ -67,6 +69,7 @@ fn merge_settings(
         web_search_provider: incoming
             .web_search_provider
             .or(existing.web_search_provider),
+        continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
         chrome_mcp_enabled: incoming.chrome_mcp_enabled.or(existing.chrome_mcp_enabled),
         chrome_mcp_auto_connect: incoming
             .chrome_mcp_auto_connect
@@ -122,6 +125,9 @@ pub async fn update_config(
     }
     if let Some(provider) = partial.web_search_provider {
         cfg.web_search_provider = normalize_web_search_provider(Some(&provider));
+    }
+    if let Some(mode) = partial.continuity_mode {
+        cfg.continuity_mode = normalize_continuity_mode(Some(&mode));
     }
     if let Some(enabled) = partial.chrome_mcp_enabled {
         cfg.chrome_mcp_enabled = enabled;

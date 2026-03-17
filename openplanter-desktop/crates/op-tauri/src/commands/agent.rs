@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
@@ -6,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 use crate::bridge::{LoggingEmitter, TauriEmitter};
 use crate::commands::session::sessions_dir;
 use crate::state::AppState;
-use op_core::engine::context::load_or_migrate_investigation_state;
+use op_core::engine::context::{
+    TurnSummary, append_turn_summary, load_or_migrate_investigation_state, turn_history_from_state,
+};
 use op_core::engine::investigation_state::{
     build_question_reasoning_packet, has_reasoning_content,
 };
@@ -14,18 +18,151 @@ use op_core::engine::{SolveEmitter, SolveInitialContext};
 use op_core::session::replay::{ReplayEntry, ReplayLogger};
 use op_core::workspace_init;
 
+const FOLLOW_UP_TOKEN_CUES: &[&str] = &[
+    "it", "this", "that", "these", "those", "also", "why", "how", "continue", "clarify", "expand",
+];
+const FOLLOW_UP_PHRASE_CUES: &[&str] = &["what about", "follow up", "tell me more"];
+const TOKEN_OVERLAP_THRESHOLD: f64 = 0.20;
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "but", "does", "for", "from", "had", "has", "have", "into", "its",
+    "not", "our", "the", "their", "them", "then", "there", "they", "was", "were", "what", "when",
+    "where", "which", "with", "would",
+];
+
+fn normalize_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn normalized_tokens(text: &str) -> HashSet<String> {
+    normalize_words(text)
+        .into_iter()
+        .filter(|token| token.len() >= 3 && !STOPWORDS.contains(&token.as_str()))
+        .collect()
+}
+
+fn has_follow_up_cue(objective: &str) -> bool {
+    let normalized = normalize_words(objective).join(" ");
+    let token_set = normalize_words(objective)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    FOLLOW_UP_TOKEN_CUES
+        .iter()
+        .any(|cue| token_set.contains(*cue))
+        || FOLLOW_UP_PHRASE_CUES
+            .iter()
+            .any(|cue| normalized.contains(cue))
+}
+
+fn token_overlap_ratio(objective: &str, turn_history: &[TurnSummary]) -> f64 {
+    let current_tokens = normalized_tokens(objective);
+    if current_tokens.is_empty() || turn_history.is_empty() {
+        return 0.0;
+    }
+
+    let recent_tokens = turn_history
+        .iter()
+        .rev()
+        .take(2)
+        .flat_map(|entry| {
+            normalized_tokens(&entry.objective)
+                .into_iter()
+                .chain(normalized_tokens(&entry.result_preview))
+        })
+        .collect::<HashSet<_>>();
+    if recent_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let shared = current_tokens.intersection(&recent_tokens).count();
+    shared as f64 / current_tokens.len() as f64
+}
+
+fn bounded_turn_history(
+    turn_history: &[TurnSummary],
+    max_turn_summaries: usize,
+) -> Vec<TurnSummary> {
+    let keep = std::cmp::min(6, max_turn_summaries.max(1));
+    turn_history
+        .iter()
+        .rev()
+        .take(keep)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn resolve_continuity(
+    objective: &str,
+    configured_mode: &str,
+    turn_history: &[TurnSummary],
+    max_turn_summaries: usize,
+) -> (Option<Vec<TurnSummary>>, Option<String>, Option<String>) {
+    match configured_mode {
+        "fresh" => (None, None, None),
+        "continue" => (
+            Some(bounded_turn_history(turn_history, max_turn_summaries)),
+            Some("continue".to_string()),
+            Some("explicit_continue".to_string()),
+        ),
+        _ => {
+            if turn_history.is_empty() {
+                return (None, None, None);
+            }
+            if has_follow_up_cue(objective) {
+                return (
+                    Some(bounded_turn_history(turn_history, max_turn_summaries)),
+                    Some("continue".to_string()),
+                    Some("follow_up_cue".to_string()),
+                );
+            }
+            let overlap = token_overlap_ratio(objective, turn_history);
+            if overlap >= TOKEN_OVERLAP_THRESHOLD {
+                (
+                    Some(bounded_turn_history(turn_history, max_turn_summaries)),
+                    Some("continue".to_string()),
+                    Some(format!("token_overlap:{overlap:.2}")),
+                )
+            } else {
+                (None, None, None)
+            }
+        }
+    }
+}
+
 async fn build_solve_initial_context(
     session_dir: &Path,
     session_id: &str,
+    objective: &str,
+    configured_mode: &str,
+    max_turn_summaries: usize,
 ) -> (SolveInitialContext, Option<String>) {
     let mut initial_context = SolveInitialContext {
         session_id: Some(session_id.to_string()),
         session_dir: Some(session_dir.display().to_string()),
+        turn_history: None,
+        continuity_mode: None,
+        continuity_reason: None,
         question_reasoning_packet: None,
     };
 
     match load_or_migrate_investigation_state(session_dir).await {
         Ok(state) => {
+            let turn_history = turn_history_from_state(&state);
+            let (bounded_history, continuity_mode, continuity_reason) = resolve_continuity(
+                objective,
+                configured_mode,
+                &turn_history,
+                max_turn_summaries,
+            );
+            initial_context.turn_history = bounded_history;
+            initial_context.continuity_mode = continuity_mode;
+            initial_context.continuity_reason = continuity_reason;
             let packet = build_question_reasoning_packet(&state, 8, 6);
             if has_reasoning_content(&packet) {
                 initial_context.question_reasoning_packet = Some(packet);
@@ -35,7 +172,7 @@ async fn build_solve_initial_context(
         Err(err) => (
             initial_context,
             Some(format!(
-                "[solve] failed to load investigation state for reasoning packet; continuing without packet: {err}"
+                "[solve] failed to load investigation state for continuity and reasoning packet; continuing without session memory: {err}"
             )),
         ),
     }
@@ -77,6 +214,7 @@ pub async fn solve(
     // Set up replay logging for this session
     let session_dir = sessions_dir(&state).await.join(&session_id);
     let mut replay = ReplayLogger::new(&session_dir);
+    let replay_seq_start = ReplayLogger::max_seq(&session_dir).await.unwrap_or(0) + 1;
 
     // Log the user message
     let user_entry = ReplayEntry {
@@ -104,7 +242,7 @@ pub async fn solve(
         eprintln!("[agent] failed to update metadata: {e}");
     }
 
-    let emitter = LoggingEmitter::new(TauriEmitter::new(app), replay);
+    let emitter = Arc::new(LoggingEmitter::new(TauriEmitter::new(app), replay));
     let cwd = std::env::current_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|_| "<unavailable>".to_string());
@@ -116,25 +254,60 @@ pub async fn solve(
         session_id
     ));
     emitter.emit_trace(&format!("[startup:info] {}", state.startup_trace()));
-    let (initial_context, initial_context_warning) =
-        build_solve_initial_context(&session_dir, &session_id).await;
+    let (initial_context, initial_context_warning) = build_solve_initial_context(
+        &session_dir,
+        &session_id,
+        &objective,
+        &cfg.continuity_mode,
+        cfg.max_turn_summaries.max(1) as usize,
+    )
+    .await;
     if let Some(warning) = initial_context_warning.as_deref() {
         emitter.emit_trace(warning);
     }
 
     tokio::spawn(async move {
+        let emitter_for_inner = emitter.clone();
+        let cfg_for_inner = cfg.clone();
+        let objective_for_inner = objective.clone();
+        let initial_context_for_inner = initial_context.clone();
+        let chrome_mcp_for_inner = chrome_mcp.clone();
+        let token_for_inner = token.clone();
         let result = tokio::spawn(async move {
             op_core::engine::solve_with_initial_context_and_chrome_mcp(
-                &objective,
-                &cfg,
-                &emitter,
-                token,
-                Some(initial_context),
-                chrome_mcp,
+                &objective_for_inner,
+                &cfg_for_inner,
+                emitter_for_inner.as_ref(),
+                token_for_inner,
+                Some(initial_context_for_inner),
+                chrome_mcp_for_inner,
             )
             .await;
         })
         .await;
+
+        if result.is_ok() {
+            if let Some(completion) = emitter.take_completion() {
+                if let Err(err) = append_turn_summary(
+                    &session_dir,
+                    &objective,
+                    &completion.result,
+                    completion
+                        .loop_metrics
+                        .as_ref()
+                        .map(|metrics| metrics.steps)
+                        .unwrap_or(0),
+                    replay_seq_start,
+                    cfg.max_turn_summaries.max(1) as usize,
+                )
+                .await
+                {
+                    emitter.emit_trace(&format!(
+                        "[solve] failed to persist turn summary; continuing without continuity update: {err}"
+                    ));
+                }
+            }
+        }
 
         {
             let mut running = running_flag.lock().await;
@@ -190,7 +363,8 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) = build_solve_initial_context(tmp.path(), "sid").await;
+        let (context, warning) =
+            build_solve_initial_context(tmp.path(), "sid", "Investigate this", "auto", 50).await;
         assert!(warning.is_none());
         let packet = context
             .question_reasoning_packet
@@ -211,10 +385,94 @@ mod tests {
             .await
             .unwrap();
 
-        let (context, warning) = build_solve_initial_context(tmp.path(), "sid").await;
+        let (context, warning) =
+            build_solve_initial_context(tmp.path(), "sid", "Investigate this", "auto", 50).await;
         assert!(warning.is_none());
         assert!(context.question_reasoning_packet.is_none());
         assert_eq!(context.session_id, Some("sid".to_string()));
         assert_eq!(context.session_dir, Some(tmp.path().display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_build_solve_initial_context_continues_on_follow_up_cue() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("investigation_state.json"),
+            r#"{
+                "schema_version":"1.0.0",
+                "session_id":"sid",
+                "legacy":{"turn_history":[{"turn_number":1,"objective":"Investigate Acme donor network","result_preview":"Found linked shell companies","timestamp":"2026-01-01T00:00:00Z","steps_used":3,"replay_seq_start":1}]}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let (context, warning) =
+            build_solve_initial_context(tmp.path(), "sid", "Why does that matter?", "auto", 50)
+                .await;
+        assert!(warning.is_none());
+        assert_eq!(context.continuity_mode.as_deref(), Some("continue"));
+        assert_eq!(context.continuity_reason.as_deref(), Some("follow_up_cue"));
+        assert_eq!(context.turn_history.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_build_solve_initial_context_continues_on_token_overlap() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("investigation_state.json"),
+            r#"{
+                "schema_version":"1.0.0",
+                "session_id":"sid",
+                "legacy":{"turn_history":[{"turn_number":1,"objective":"Investigate donor network shell companies","result_preview":"Matched donor network address records","timestamp":"2026-01-01T00:00:00Z","steps_used":3,"replay_seq_start":1}]}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let (context, warning) = build_solve_initial_context(
+            tmp.path(),
+            "sid",
+            "Compare donor network addresses",
+            "auto",
+            50,
+        )
+        .await;
+        assert!(warning.is_none());
+        assert_eq!(context.continuity_mode.as_deref(), Some("continue"));
+        assert!(
+            context
+                .continuity_reason
+                .as_deref()
+                .is_some_and(|value| value.starts_with("token_overlap:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_solve_initial_context_keeps_unrelated_turns_fresh() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("investigation_state.json"),
+            r#"{
+                "schema_version":"1.0.0",
+                "session_id":"sid",
+                "legacy":{"turn_history":[{"turn_number":1,"objective":"Investigate donor network shell companies","result_preview":"Matched donor network address records","timestamp":"2026-01-01T00:00:00Z","steps_used":3,"replay_seq_start":1}]}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let (context, warning) = build_solve_initial_context(
+            tmp.path(),
+            "sid",
+            "Summarize zoning permits in Boston",
+            "auto",
+            50,
+        )
+        .await;
+        assert!(warning.is_none());
+        assert!(context.turn_history.is_none());
+        assert!(context.continuity_mode.is_none());
+        assert!(context.continuity_reason.is_none());
     }
 }

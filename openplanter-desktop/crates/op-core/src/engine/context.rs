@@ -19,7 +19,9 @@ pub struct TurnSummary {
     pub objective: String,
     pub result_preview: String,
     pub timestamp: String,
+    #[serde(default)]
     pub steps_used: u32,
+    #[serde(default)]
     pub replay_seq_start: u64,
 }
 
@@ -121,6 +123,78 @@ pub async fn load_or_migrate_investigation_state(
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     load_existing_investigation_state(session_dir, session_id).await
+}
+
+pub fn turn_history_from_state(state: &InvestigationState) -> Vec<TurnSummary> {
+    state
+        .legacy
+        .turn_history
+        .iter()
+        .filter_map(|item| serde_json::from_value::<TurnSummary>(item.clone()).ok())
+        .collect()
+}
+
+pub async fn append_turn_summary(
+    session_dir: &Path,
+    objective: &str,
+    result: &str,
+    steps_used: u32,
+    replay_seq_start: u64,
+    max_turn_summaries: usize,
+) -> std::io::Result<()> {
+    let session_id = session_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let typed_path = session_dir.join("investigation_state.json");
+    let legacy_path = session_dir.join("state.json");
+
+    let mut typed_state = load_or_migrate_investigation_state(session_dir).await?;
+    if typed_state.session_id.is_empty() {
+        typed_state.session_id = session_id.to_string();
+    }
+
+    let mut history = turn_history_from_state(&typed_state);
+    let turn_number = history
+        .last()
+        .map(|entry| entry.turn_number + 1)
+        .unwrap_or(1);
+    history.push(TurnSummary {
+        turn_number,
+        objective: objective.to_string(),
+        result_preview: preview_result(result, 200),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        steps_used,
+        replay_seq_start,
+    });
+
+    let keep = max_turn_summaries.max(1);
+    if history.len() > keep {
+        history = history.split_off(history.len() - keep);
+    }
+
+    let turn_history = history
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let observations = typed_state.legacy_observations();
+    let loop_metrics = typed_state.legacy.loop_metrics.clone();
+    let extra_fields = typed_state.legacy.extra_fields.clone();
+    typed_state.merge_legacy_updates(
+        &observations,
+        Some(&turn_history),
+        Some(&loop_metrics),
+        Some(&extra_fields),
+    );
+
+    let typed_json = serde_json::to_string_pretty(&typed_state)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    fs::write(&typed_path, typed_json).await?;
+
+    let legacy_json = serde_json::to_string_pretty(&typed_state.to_legacy_python_projection())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    fs::write(&legacy_path, legacy_json).await
 }
 
 async fn load_existing_investigation_state(
@@ -231,6 +305,14 @@ fn legacy_rust_observations(value: &Value) -> Option<Vec<Observation>> {
             })
             .collect(),
     )
+}
+
+fn preview_result(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let end = text.floor_char_boundary(max_chars);
+    format!("{}...", &text[..end])
 }
 
 #[cfg(test)]
@@ -560,5 +642,79 @@ mod tests {
         let parsed: TurnSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.turn_number, 1);
         assert_eq!(parsed.objective, "Investigate Acme Corp");
+    }
+
+    #[tokio::test]
+    async fn test_append_turn_summary_persists_to_typed_and_legacy() {
+        let tmp = tempdir().unwrap();
+
+        append_turn_summary(
+            tmp.path(),
+            "Investigate Acme",
+            "Found connections",
+            4,
+            2,
+            10,
+        )
+        .await
+        .unwrap();
+
+        let typed: Value = serde_json::from_str(
+            &fs::read_to_string(tmp.path().join("investigation_state.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            typed["legacy"]["turn_history"][0]["objective"],
+            "Investigate Acme"
+        );
+        assert_eq!(typed["legacy"]["turn_history"][0]["steps_used"], 4);
+        assert_eq!(typed["legacy"]["turn_history"][0]["replay_seq_start"], 2);
+
+        let legacy: Value = serde_json::from_str(
+            &fs::read_to_string(tmp.path().join("state.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy["turn_history"][0]["turn_number"], 1);
+        assert_eq!(
+            legacy["turn_history"][0]["result_preview"],
+            "Found connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_turn_summary_truncates_history_and_preview() {
+        let tmp = tempdir().unwrap();
+
+        append_turn_summary(tmp.path(), "one", &"x".repeat(240), 1, 1, 2)
+            .await
+            .unwrap();
+        let initial_state = load_or_migrate_investigation_state(tmp.path())
+            .await
+            .unwrap();
+        let initial_history = turn_history_from_state(&initial_state);
+        assert_eq!(initial_history.len(), 1);
+        assert!(initial_history[0].result_preview.ends_with("..."));
+        assert!(initial_history[0].result_preview.len() <= 203);
+
+        append_turn_summary(tmp.path(), "two", "ok", 2, 2, 2)
+            .await
+            .unwrap();
+        append_turn_summary(tmp.path(), "three", "done", 3, 3, 2)
+            .await
+            .unwrap();
+
+        let state = load_or_migrate_investigation_state(tmp.path())
+            .await
+            .unwrap();
+        let history = turn_history_from_state(&state);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].turn_number, 2);
+        assert_eq!(history[1].turn_number, 3);
+        assert_eq!(history[0].result_preview, "ok");
+        assert_eq!(history[1].result_preview, "done");
     }
 }

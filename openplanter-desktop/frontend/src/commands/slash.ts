@@ -7,6 +7,7 @@ import { handleReasoningCommand } from "./reasoning";
 import { handleWebSearchCommand } from "./webSearch";
 import { handleZaiPlanCommand } from "./zaiPlan";
 import { handleInitCommand } from "./init";
+import { handleContinuityCommand } from "./continuity";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -38,6 +39,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /web-search        Show current web search provider",
           "  /web-search <provider>  Set web search provider (exa, firecrawl, brave, tavily)",
           "  /web-search <provider> --save  Set and persist",
+          "  /continuity       Show current follow-up continuity mode",
+          "  /continuity <mode>  Set mode (auto, fresh, continue)",
+          "  /continuity <mode> --save  Set and persist",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
           "  /chrome             Show current Chrome DevTools MCP status",
@@ -95,6 +99,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Model:       ${s.model || "—"}`,
           `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
           `Web search:  ${s.webSearchProvider || "exa"}`,
+          `Continuity:  ${s.continuityMode || "auto"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
           ...formatChromeStatusLines(s),
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
@@ -117,6 +122,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/web-search":
       return handleWebSearchCommand(args);
+
+    case "/continuity":
+      return handleContinuityCommand(args);
 
     case "/reasoning":
       return handleReasoningCommand(args);

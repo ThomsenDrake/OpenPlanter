@@ -25,6 +25,7 @@ describe("createStatusBar", () => {
     expect(bar.querySelector(".model")).not.toBeNull();
     expect(bar.querySelector(".reasoning")).not.toBeNull();
     expect(bar.querySelector(".zai-plan")).not.toBeNull();
+    expect(bar.querySelector(".continuity")).not.toBeNull();
     expect(bar.querySelector(".mode")).not.toBeNull();
     expect(bar.querySelector(".session")).not.toBeNull();
     expect(bar.querySelector(".tokens")).not.toBeNull();
@@ -59,6 +60,12 @@ describe("createStatusBar", () => {
     appState.update((s) => ({ ...s, provider: "zai", zaiPlan: "coding" }));
     const bar = createStatusBar();
     expect(bar.querySelector(".zai-plan")!.textContent).toBe("zai:coding");
+  });
+
+  it("renders continuity mode", () => {
+    appState.update((s) => ({ ...s, continuityMode: "continue" }));
+    const bar = createStatusBar();
+    expect(bar.querySelector(".continuity")!.textContent).toBe("continuity:continue");
   });
 
   it("hides Z.AI plan when provider is not zai", () => {
