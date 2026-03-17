@@ -73,6 +73,7 @@ export interface AppState {
   model: string;
   zaiPlan: string;
   webSearchProvider: string;
+  continuityMode: string;
   chromeMcpEnabled: boolean;
   chromeMcpAutoConnect: boolean;
   chromeMcpBrowserUrl: string | null;
@@ -117,6 +118,7 @@ export const appState = new Store<AppState>({
   model: "",
   zaiPlan: "paygo",
   webSearchProvider: "exa",
+  continuityMode: "auto",
   chromeMcpEnabled: false,
   chromeMcpAutoConnect: true,
   chromeMcpBrowserUrl: null,

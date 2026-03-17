@@ -78,6 +78,11 @@ impl ReplayLogger {
         Ok(())
     }
 
+    /// Return the highest sequence number currently recorded for a session.
+    pub async fn max_seq(session_dir: &Path) -> std::io::Result<u64> {
+        Self::max_seq_from_file(&session_dir.join("replay.jsonl")).await
+    }
+
     async fn max_seq_from_file(path: &Path) -> std::io::Result<u64> {
         if !path.exists() {
             return Ok(0);
@@ -178,6 +183,31 @@ mod tests {
         assert_eq!(entries[0].seq, 1);
         assert_eq!(entries[1].seq, 2);
         assert_eq!(entries[2].seq, 3);
+    }
+
+    #[tokio::test]
+    async fn test_max_seq_reads_existing_entries() {
+        let tmp = tempdir().unwrap();
+        let mut logger = ReplayLogger::new(tmp.path());
+        logger
+            .append(ReplayEntry {
+                seq: 0,
+                timestamp: String::new(),
+                role: "user".into(),
+                content: "hello".into(),
+                tool_name: None,
+                is_rendered: None,
+                step_number: None,
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: None,
+                step_tool_calls: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(ReplayLogger::max_seq(tmp.path()).await.unwrap(), 1);
     }
 
     #[tokio::test]

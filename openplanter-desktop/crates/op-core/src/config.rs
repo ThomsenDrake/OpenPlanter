@@ -92,6 +92,14 @@ pub fn normalize_web_search_provider(value: Option<&str>) -> String {
     }
 }
 
+pub fn normalize_continuity_mode(value: Option<&str>) -> String {
+    match value.unwrap_or_default().trim().to_lowercase().as_str() {
+        "fresh" => "fresh".to_string(),
+        "continue" => "continue".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
 pub fn normalize_chrome_mcp_channel(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "beta" => "beta".to_string(),
@@ -235,6 +243,7 @@ pub struct AgentConfig {
     pub brave_api_key: Option<String>,
     pub tavily_api_key: Option<String>,
     pub web_search_provider: String,
+    pub continuity_mode: String,
     pub voyage_api_key: Option<String>,
     pub mistral_transcription_api_key: Option<String>,
     pub mistral_transcription_model: String,
@@ -313,6 +322,7 @@ impl Default for AgentConfig {
             brave_api_key: None,
             tavily_api_key: None,
             web_search_provider: "exa".into(),
+            continuity_mode: "auto".into(),
             voyage_api_key: None,
             mistral_transcription_api_key: None,
             mistral_transcription_model: MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into(),
@@ -427,6 +437,8 @@ impl AgentConfig {
         });
         let web_search_provider =
             normalize_web_search_provider(env_opt("OPENPLANTER_WEB_SEARCH_PROVIDER").as_deref());
+        let continuity_mode =
+            normalize_continuity_mode(env_opt("OPENPLANTER_CONTINUITY_MODE").as_deref());
         let chrome_mcp_enabled = env_bool("OPENPLANTER_CHROME_MCP_ENABLED", false);
         let chrome_mcp_auto_connect = env_bool("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", true);
 
@@ -474,6 +486,7 @@ impl AgentConfig {
             brave_api_key,
             tavily_api_key,
             web_search_provider,
+            continuity_mode,
             voyage_api_key,
             mistral_transcription_api_key,
             mistral_transcription_model: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")
@@ -685,6 +698,7 @@ mod tests {
             "OPENPLANTER_RECURSIVE",
             "OPENPLANTER_DEMO",
             "OPENPLANTER_WEB_SEARCH_PROVIDER",
+            "OPENPLANTER_CONTINUITY_MODE",
             "OPENPLANTER_BRAVE_API_KEY",
             "BRAVE_API_KEY",
             "OPENPLANTER_BRAVE_BASE_URL",
@@ -773,6 +787,7 @@ mod tests {
             MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC
         );
         assert_eq!(cfg.web_search_provider, "exa");
+        assert_eq!(cfg.continuity_mode, "auto");
         assert_eq!(cfg.rate_limit_max_retries, 12);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 1.0);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 60.0);
@@ -819,6 +834,7 @@ mod tests {
             env::set_var("OPENPLANTER_RATE_LIMIT_BACKOFF_MAX_SEC", "30.0");
             env::set_var("OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC", "90.0");
             env::set_var("OPENPLANTER_ZAI_PLAN", "coding");
+            env::set_var("OPENPLANTER_CONTINUITY_MODE", "continue");
             env::set_var("OPENPLANTER_ZAI_STREAM_MAX_RETRIES", "7");
             env::set_var("OPENPLANTER_TAVILY_BASE_URL", "https://tavily.example");
         }
@@ -855,6 +871,7 @@ mod tests {
         assert_eq!(cfg.zai_base_url, ZAI_CODING_BASE_URL);
         assert_eq!(cfg.zai_stream_max_retries, 7);
         assert_eq!(cfg.web_search_provider, "tavily");
+        assert_eq!(cfg.continuity_mode, "continue");
         assert_eq!(cfg.tavily_base_url, "https://tavily.example");
         assert_eq!(cfg.rate_limit_max_retries, 5);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 2.5);
@@ -906,6 +923,9 @@ mod tests {
         assert_eq!(normalize_web_search_provider(Some("brave")), "brave");
         assert_eq!(normalize_web_search_provider(Some("tavily")), "tavily");
         assert_eq!(normalize_web_search_provider(Some("other")), "exa");
+        assert_eq!(normalize_continuity_mode(Some("fresh")), "fresh");
+        assert_eq!(normalize_continuity_mode(Some("continue")), "continue");
+        assert_eq!(normalize_continuity_mode(Some("other")), "auto");
         assert!(is_foundry_openai_base_url(FOUNDRY_OPENAI_BASE_URL));
         assert!(is_foundry_anthropic_base_url(FOUNDRY_ANTHROPIC_BASE_URL));
         assert_eq!(

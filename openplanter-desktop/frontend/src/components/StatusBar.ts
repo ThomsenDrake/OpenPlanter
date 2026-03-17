@@ -17,6 +17,9 @@ export function createStatusBar(): HTMLElement {
   const zaiPlanEl = document.createElement("span");
   zaiPlanEl.className = "zai-plan";
 
+  const continuityEl = document.createElement("span");
+  continuityEl.className = "continuity";
+
   const modeEl = document.createElement("span");
   modeEl.className = "mode";
 
@@ -30,6 +33,7 @@ export function createStatusBar(): HTMLElement {
   bar.appendChild(modelEl);
   bar.appendChild(reasoningEl);
   bar.appendChild(zaiPlanEl);
+  bar.appendChild(continuityEl);
   bar.appendChild(modeEl);
   bar.appendChild(sessionEl);
   bar.appendChild(tokensEl);
@@ -43,6 +47,7 @@ export function createStatusBar(): HTMLElement {
       : "";
     zaiPlanEl.textContent =
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
+    continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
     modeEl.textContent = s.recursive ? "recursive" : "flat";
     sessionEl.textContent = s.sessionId ? `session ${s.sessionId.slice(0, 8)}` : "";
 

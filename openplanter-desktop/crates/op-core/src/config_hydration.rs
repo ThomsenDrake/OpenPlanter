@@ -1,8 +1,9 @@
 use std::env;
 
 use crate::config::{
-    AgentConfig, FOUNDRY_OPENAI_API_KEY_PLACEHOLDER, normalize_web_search_provider,
-    normalize_zai_plan, resolve_openai_api_key, resolve_zai_base_url,
+    AgentConfig, FOUNDRY_OPENAI_API_KEY_PLACEHOLDER, normalize_continuity_mode,
+    normalize_web_search_provider, normalize_zai_plan, resolve_openai_api_key,
+    resolve_zai_base_url,
 };
 use crate::credentials::CredentialBundle;
 use crate::settings::PersistentSettings;
@@ -103,6 +104,12 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
         }
     }
 
+    if !has_env_value(&["OPENPLANTER_CONTINUITY_MODE"]) {
+        if let Some(mode) = settings.continuity_mode.as_deref() {
+            cfg.continuity_mode = normalize_continuity_mode(Some(mode));
+        }
+    }
+
     if !has_env_value(&["OPENPLANTER_CHROME_MCP_ENABLED"]) {
         if let Some(enabled) = settings.chrome_mcp_enabled {
             cfg.chrome_mcp_enabled = enabled;
@@ -160,4 +167,22 @@ fn has_env_value(keys: &[&str]) -> bool {
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_settings_to_config_sets_continuity_when_env_missing() {
+        let mut cfg = AgentConfig::default();
+        let settings = PersistentSettings {
+            continuity_mode: Some("continue".into()),
+            ..Default::default()
+        };
+
+        apply_settings_to_config(&mut cfg, &settings);
+
+        assert_eq!(cfg.continuity_mode, "continue");
+    }
 }
