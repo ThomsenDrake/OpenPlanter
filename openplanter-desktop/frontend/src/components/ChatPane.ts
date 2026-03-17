@@ -3,6 +3,8 @@ import { appState, type ChatMessage, type StepToolCall } from "../state/store";
 import { createInputBar } from "./InputBar";
 import { parseAgentContent, stripToolXml, type ContentSegment } from "./contentParser";
 import { extractToolCallKeyArg, KEY_ARGS } from "./toolArgs";
+import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
+import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 
@@ -219,6 +221,41 @@ export function createChatPane(): HTMLElement {
 
   pane.appendChild(createInputBar());
 
+  function handleWikiLinkClick(event: Event) {
+    if (event.defaultPrevented) return;
+
+    const rawTarget = event.target;
+    const target =
+      rawTarget instanceof Element
+        ? rawTarget
+        : rawTarget instanceof Node
+          ? rawTarget.parentElement
+          : null;
+    if (!target) return;
+
+    const link = target.closest("a");
+    if (!link || !messagesEl.contains(link)) return;
+    if (!link.closest(".message.assistant.rendered")) return;
+
+    const href = link.getAttribute("href");
+    if (!href) return;
+
+    const wikiPath = resolveWikiMarkdownHref(href);
+    if (!wikiPath) return;
+
+    event.preventDefault();
+    const requestedTitle = link.textContent?.trim() || undefined;
+    window.dispatchEvent(new CustomEvent<OpenWikiDrawerDetail>(OPEN_WIKI_DRAWER_EVENT, {
+      detail: {
+        wikiPath,
+        source: "chat",
+        requestedTitle,
+      },
+    }));
+  }
+
+  messagesEl.addEventListener("click", handleWikiLinkClick);
+
   let renderedCount = 0;
 
   // ── Auto-scroll with proximity check ──
@@ -351,6 +388,7 @@ export function createChatPane(): HTMLElement {
               }
             }
           }
+          el.addEventListener("click", handleWikiLinkClick);
         } else {
           el.textContent = msg.content;
         }

@@ -16,6 +16,7 @@ vi.mock("./InputBar", () => ({
 
 import { appState, type ChatMessage } from "../state/store";
 import { createChatPane, KEY_ARGS } from "./ChatPane";
+import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 
 function makeMsg(overrides: Partial<ChatMessage> & { role: ChatMessage["role"]; content: string }): ChatMessage {
   return {
@@ -127,6 +128,67 @@ describe("createChatPane", () => {
     expect(msg).not.toBeNull();
     expect(msg!.innerHTML).toContain("<strong>");
     expect(msg!.innerHTML).toContain("bold text");
+  });
+
+  it("dispatches wiki drawer events for assistant markdown wiki links", () => {
+    const pane = createChatPane();
+    document.body.appendChild(pane);
+    const events: OpenWikiDrawerDetail[] = [];
+    const listener = (event: Event) => {
+      events.push((event as CustomEvent<OpenWikiDrawerDetail>).detail);
+    };
+    window.addEventListener(OPEN_WIKI_DRAWER_EVENT, listener as EventListener);
+
+    appState.update((s) => ({
+      ...s,
+      messages: [
+        makeMsg({
+          role: "assistant",
+          content: "See [USASpending](contracts/usaspending.md) for details.",
+          isRendered: true,
+        }),
+      ],
+    }));
+
+    const link = pane.querySelector(".message.assistant.rendered a") as HTMLAnchorElement;
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(events).toEqual([
+      {
+        wikiPath: "wiki/contracts/usaspending.md",
+        source: "chat",
+        requestedTitle: "USASpending",
+      },
+    ]);
+
+    window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener as EventListener);
+    document.body.removeChild(pane);
+  });
+
+  it("does not dispatch wiki drawer events for external assistant links", () => {
+    const pane = createChatPane();
+    document.body.appendChild(pane);
+    const listener = vi.fn();
+    window.addEventListener(OPEN_WIKI_DRAWER_EVENT, listener as EventListener);
+
+    appState.update((s) => ({
+      ...s,
+      messages: [
+        makeMsg({
+          role: "assistant",
+          content: "Visit [OpenAI](https://openai.com).",
+          isRendered: true,
+        }),
+      ],
+    }));
+
+    const link = pane.querySelector(".message.assistant.rendered a") as HTMLAnchorElement;
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(listener).not.toHaveBeenCalled();
+
+    window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener as EventListener);
+    document.body.removeChild(pane);
   });
 
   it("renders tool message with tool name label", () => {

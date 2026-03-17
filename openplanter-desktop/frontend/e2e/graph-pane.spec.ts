@@ -275,6 +275,33 @@ test.describe("Graph Pane", () => {
     await expect(page.locator(".graph-detail")).not.toBeVisible();
   });
 
+  test("drawer markdown links open linked wiki documents in place", async ({ page }) => {
+    await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)._cyreg?.cy;
+      if (!cy) return;
+      cy.getElementById("acme-corp").emit("tap");
+    });
+
+    await expect(page.locator(".graph-source-drawer.visible")).toBeVisible();
+    await expect(page.locator(".graph-source-drawer-title")).toHaveText("Acme Corp");
+    await expect(page.locator(".graph-source-drawer-body")).toContainText("Mock wiki content for testing.");
+
+    await page.locator(".graph-source-drawer-body a", { hasText: "other-file.md" }).click();
+
+    await expect(page.locator(".graph-source-drawer.visible")).toBeVisible();
+    await expect(page.locator(".graph-source-drawer-title")).toHaveText("other-file");
+    await expect(page.locator(".graph-source-drawer-body")).toContainText("other-file");
+
+    const selectedNodeId = await page.evaluate(() => {
+      const container = document.querySelector(".graph-canvas");
+      const cy = (container as any)?._cyreg?.cy;
+      const selected = cy?.nodes(":selected");
+      return selected && selected.length > 0 ? selected[0].id() : null;
+    });
+    expect(selectedNodeId).toBe("acme-corp");
+  });
+
   test("clicking section node shows detail overlay with view source button", async ({ page }) => {
     // Tap a section node — should show the detail overlay
     await page.evaluate(() => {
