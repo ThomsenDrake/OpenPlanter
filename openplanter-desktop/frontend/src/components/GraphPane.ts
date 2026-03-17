@@ -1,5 +1,5 @@
 /** Graph pane: 2D investigative graph (Cytoscape.js). */
-import type { GraphData } from "../api/types";
+import type { GraphData, GraphNode } from "../api/types";
 import { getGraphData, readWikiFile } from "../api/invoke";
 import {
   initGraph,
@@ -19,6 +19,8 @@ import {
 } from "../graph/cytoGraph";
 import { bindInteractions } from "../graph/interaction";
 import { getCategoryColor } from "../graph/colors";
+import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
+import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 
@@ -143,6 +145,10 @@ export function createGraphPane(): HTMLElement {
   let baselineNodeIds = new Set<string>();
   let baselineCaptured = false;
   let sessionFilterActive = true;
+  let currentGraphData: GraphData = { nodes: [], edges: [] };
+  let currentDrawerWikiPath: string | null = null;
+  let drawerLoadSeq = 0;
+  let suppressNextSourceSelectionId: string | null = null;
 
   // --- Search handler (200ms debounce) ---
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -208,6 +214,7 @@ export function createGraphPane(): HTMLElement {
     try {
       const data = await getGraphData();
       if (data.nodes.length > 0) {
+        currentGraphData = data;
         updateGraph(data);
         buildLegend(getCategories());
         if (sessionFilterActive) {
@@ -267,22 +274,46 @@ export function createGraphPane(): HTMLElement {
     }
   }
 
+  function findSourceNodeByPath(wikiPath: string): GraphNode | undefined {
+    return currentGraphData.nodes.find((node) => node.node_type === "source" && node.path === wikiPath);
+  }
+
+  function fallbackTitleFromPath(wikiPath: string): string {
+    return wikiPath.replace(/^wiki\//, "").replace(/\.md$/, "");
+  }
+
   // --- Drawer open/close ---
-  function openDrawer(label: string, path: string): void {
-    drawerTitle.textContent = label;
+  function openWikiDrawer(detail: OpenWikiDrawerDetail): void {
+    hideDetail();
+    currentDrawerWikiPath = detail.wikiPath;
+
+    const sourceNode = findSourceNodeByPath(detail.wikiPath);
+    drawerTitle.textContent =
+      detail.requestedTitle ||
+      sourceNode?.label ||
+      fallbackTitleFromPath(detail.wikiPath);
     drawerBody.innerHTML = '<span style="color:var(--text-muted)">Loading...</span>';
     drawerBackdrop.classList.add("visible");
     drawer.classList.add("visible");
 
-    readWikiFile(path).then((content) => {
+    if (detail.source !== "graph" && sourceNode) {
+      suppressNextSourceSelectionId = sourceNode.id;
+      focusNode(sourceNode.id);
+    }
+
+    const loadSeq = ++drawerLoadSeq;
+    readWikiFile(detail.wikiPath).then((content) => {
+      if (loadSeq !== drawerLoadSeq) return;
       drawerBody.innerHTML = md.render(content);
       interceptDrawerLinks();
     }).catch((err) => {
+      if (loadSeq !== drawerLoadSeq) return;
       drawerBody.innerHTML = `<span style="color:var(--error)">Failed to load: ${err}</span>`;
     });
   }
 
   function hideDrawer(): void {
+    currentDrawerWikiPath = null;
     drawerBackdrop.classList.remove("visible");
     drawer.classList.remove("visible");
   }
@@ -291,20 +322,18 @@ export function createGraphPane(): HTMLElement {
   function interceptDrawerLinks(): void {
     drawerBody.querySelectorAll("a").forEach((link) => {
       const href = link.getAttribute("href");
-      if (!href || !href.endsWith(".md")) return;
-      // Skip external links
-      if (href.startsWith("http://") || href.startsWith("https://")) return;
+      if (!href) return;
 
       link.addEventListener("click", (e) => {
+        const resolvedPath = resolveWikiMarkdownHref(href, { baseWikiPath: currentDrawerWikiPath });
+        if (!resolvedPath) return;
+
         e.preventDefault();
-        // Resolve relative path: if drawer is showing wiki/fec.md and link is sec.md → wiki/sec.md
-        const currentDir = drawerTitle.textContent?.includes("/")
-          ? (drawerTitle.textContent || "").substring(0, (drawerTitle.textContent || "").lastIndexOf("/") + 1)
-          : "wiki/";
-        const resolvedPath = href.startsWith("wiki/") ? href : `wiki/${href}`;
-        const nodeId = href.replace(/\.md$/, "").replace(/^.*\//, "");
-        openDrawer(nodeId, resolvedPath);
-        focusNode(nodeId);
+        openWikiDrawer({
+          wikiPath: resolvedPath,
+          source: "drawer",
+          requestedTitle: link.textContent?.trim() || undefined,
+        });
       });
     });
   }
@@ -322,8 +351,16 @@ export function createGraphPane(): HTMLElement {
   }): void {
     // Source nodes: open the full-width drawer instead
     if (data.node_type === "source") {
+      if (suppressNextSourceSelectionId === data.id) {
+        suppressNextSourceSelectionId = null;
+        return;
+      }
       hideDetail();
-      openDrawer(data.label, data.path);
+      openWikiDrawer({
+        wikiPath: data.path,
+        source: "graph",
+        requestedTitle: data.label,
+      });
       return;
     }
 
@@ -384,9 +421,10 @@ export function createGraphPane(): HTMLElement {
     viewSourceBtn.textContent = "View source";
     viewSourceBtn.addEventListener("click", () => {
       hideDetail();
-      // path is the wiki file path (e.g. wiki/fec.md)
-      const sourceLabel = data.path.replace(/^wiki\//, "").replace(/\.md$/, "");
-      openDrawer(sourceLabel, data.path);
+      openWikiDrawer({
+        wikiPath: data.path,
+        source: "graph",
+      });
     });
     detail.appendChild(viewSourceBtn);
 
@@ -421,6 +459,7 @@ export function createGraphPane(): HTMLElement {
   let interactionsBound = false;
 
   function initializeWithData(data: GraphData): void {
+    currentGraphData = data;
     // Remove placeholder if present
     const placeholder = pane.querySelector(".graph-placeholder");
     if (placeholder) placeholder.remove();
@@ -470,6 +509,7 @@ export function createGraphPane(): HTMLElement {
   // Listen for wiki updates
   window.addEventListener("wiki-updated", ((e: CustomEvent<GraphData>) => {
     const data = e.detail;
+    currentGraphData = data;
     if (data.nodes.length > 0) {
       initializeWithData(data);
       // Re-apply session filter if active
@@ -490,6 +530,10 @@ export function createGraphPane(): HTMLElement {
   window.addEventListener("curator-done", () => {
     autoRefreshGraph();
   });
+
+  window.addEventListener(OPEN_WIKI_DRAWER_EVENT, ((e: CustomEvent<OpenWikiDrawerDetail>) => {
+    openWikiDrawer(e.detail);
+  }) as EventListener);
 
   // Listen for session changes — reset baseline
   window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean }>) => {
