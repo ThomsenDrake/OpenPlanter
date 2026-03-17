@@ -15,8 +15,8 @@ vi.mock("./ChatPane", () => ({
   createChatPane: () => document.createElement("div"),
   KEY_ARGS: {},
 }));
-vi.mock("./GraphPane", () => ({
-  createGraphPane: () => document.createElement("div"),
+vi.mock("./InvestigationPane", () => ({
+  createInvestigationPane: () => document.createElement("div"),
 }));
 
 import { appState } from "../state/store";

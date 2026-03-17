@@ -17,6 +17,14 @@ import {
   getCategories,
   getNodeIds,
 } from "../graph/cytoGraph";
+import {
+  captureGraphSessionBaseline,
+  getGraphSessionBaselineIds,
+  hasGraphSessionBaseline,
+  isGraphSessionFilterActive,
+  resetGraphSessionState,
+  setGraphSessionFilterActive,
+} from "../graph/sessionBaseline";
 import { bindInteractions } from "../graph/interaction";
 import { getCategoryColor } from "../graph/colors";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
@@ -82,7 +90,6 @@ export function createGraphPane(): HTMLElement {
   sessionToggle.className = "graph-session-toggle";
   sessionToggle.textContent = "\u2726"; // ✦
   sessionToggle.title = "Show only new nodes from this session";
-  sessionToggle.classList.add("active");
 
   const sessionHint = document.createElement("span");
   sessionHint.className = "graph-session-hint";
@@ -142,9 +149,6 @@ export function createGraphPane(): HTMLElement {
 
   // State
   const hiddenCategories = new Set<string>();
-  let baselineNodeIds = new Set<string>();
-  let baselineCaptured = false;
-  let sessionFilterActive = true;
   let currentGraphData: GraphData = { nodes: [], edges: [] };
   let currentDrawerWikiPath: string | null = null;
   let drawerLoadSeq = 0;
@@ -193,16 +197,19 @@ export function createGraphPane(): HTMLElement {
     }, 3000);
   }
 
-  sessionToggle.addEventListener("click", () => {
-    sessionFilterActive = !sessionFilterActive;
-    if (sessionFilterActive) {
-      sessionToggle.classList.add("active");
-    } else {
-      sessionToggle.classList.remove("active");
-    }
-    const newCount = filterBySession(sessionFilterActive, baselineNodeIds);
+  function syncSessionToggle(): void {
+    sessionToggle.classList.toggle("active", isGraphSessionFilterActive());
+  }
 
-    if (sessionFilterActive) {
+  syncSessionToggle();
+
+  sessionToggle.addEventListener("click", () => {
+    const nextFilterState = !isGraphSessionFilterActive();
+    setGraphSessionFilterActive(nextFilterState);
+    syncSessionToggle();
+    const newCount = filterBySession(nextFilterState, getGraphSessionBaselineIds());
+
+    if (nextFilterState) {
       showHint(newCount === 0 ? "0 new" : `${newCount} new`);
     } else {
       sessionHint.classList.remove("visible");
@@ -217,8 +224,8 @@ export function createGraphPane(): HTMLElement {
         currentGraphData = data;
         updateGraph(data);
         buildLegend(getCategories());
-        if (sessionFilterActive) {
-          filterBySession(true, baselineNodeIds);
+        if (isGraphSessionFilterActive()) {
+          filterBySession(true, getGraphSessionBaselineIds());
         }
       }
     } catch {
@@ -478,14 +485,13 @@ export function createGraphPane(): HTMLElement {
     }
 
     // Capture baseline node IDs on first load
-    if (!baselineCaptured) {
-      baselineNodeIds = getNodeIds();
-      baselineCaptured = true;
+    if (!hasGraphSessionBaseline()) {
+      captureGraphSessionBaseline(getNodeIds());
     }
 
     // Apply session filter if active (e.g. auto-activated for new sessions)
-    if (sessionFilterActive) {
-      filterBySession(true, baselineNodeIds);
+    if (isGraphSessionFilterActive()) {
+      filterBySession(true, getGraphSessionBaselineIds());
     }
 
     buildLegend(getCategories());
@@ -513,8 +519,8 @@ export function createGraphPane(): HTMLElement {
     if (data.nodes.length > 0) {
       initializeWithData(data);
       // Re-apply session filter if active
-      if (sessionFilterActive) {
-        filterBySession(true, baselineNodeIds);
+      if (isGraphSessionFilterActive()) {
+        filterBySession(true, getGraphSessionBaselineIds());
       }
     } else {
       updateGraph(data);
@@ -538,25 +544,29 @@ export function createGraphPane(): HTMLElement {
   // Listen for session changes — reset baseline
   window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean }>) => {
     const isNew = e.detail?.isNew ?? false;
-    baselineNodeIds = new Set<string>();
-    baselineCaptured = false;
-
-    if (isNew) {
-      sessionFilterActive = true;
-      sessionToggle.classList.add("active");
-    } else {
-      sessionFilterActive = false;
-      sessionToggle.classList.remove("active");
-    }
+    resetGraphSessionState(isNew);
+    syncSessionToggle();
+    sessionHint.classList.remove("visible");
 
     // Re-fetch graph for new session
     getGraphData().then((data) => {
+      captureGraphSessionBaseline(data.nodes.map((node) => node.id));
       if (data.nodes.length > 0) {
         initializeWithData(data);
       }
     }).catch((e) => {
       console.error("Failed to load graph data on session change:", e);
     });
+  }) as EventListener);
+
+  window.addEventListener("investigation-tab-changed", ((e: CustomEvent<{ tab: string }>) => {
+    if (e.detail?.tab !== "graph") {
+      return;
+    }
+    setTimeout(() => {
+      fitView();
+      void autoRefreshGraph();
+    }, 0);
   }) as EventListener);
 
   return pane;

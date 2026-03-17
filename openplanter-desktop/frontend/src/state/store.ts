@@ -2,6 +2,7 @@
 import type {
   CompletionMeta,
   InitStatusView,
+  InvestigationOverviewView,
   LoopMetrics,
   LoopHealthEvent,
   MigrationInitResultView,
@@ -104,6 +105,11 @@ export interface AppState {
   initGateMode: "standard" | "migration";
   migrationProgress: MigrationProgressEvent | null;
   migrationResult: MigrationInitResultView | null;
+  investigationViewTab: "overview" | "graph";
+  overviewStatus: "idle" | "loading" | "ready" | "error";
+  overviewData: InvestigationOverviewView | null;
+  overviewError: string | null;
+  overviewSelectedWikiPath: string | null;
 }
 
 export const appState = new Store<AppState>({
@@ -143,4 +149,9 @@ export const appState = new Store<AppState>({
   initGateMode: "standard",
   migrationProgress: null,
   migrationResult: null,
+  investigationViewTab: "overview",
+  overviewStatus: "idle",
+  overviewData: null,
+  overviewError: null,
+  overviewSelectedWikiPath: null,
 });

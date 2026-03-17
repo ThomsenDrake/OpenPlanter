@@ -1,6 +1,15 @@
 use crate::state::AppState;
-use op_core::events::{GraphData, GraphEdge, GraphNode, NodeType};
+use op_core::engine::context::load_or_migrate_investigation_state;
+use op_core::engine::investigation_state::build_question_reasoning_packet;
+use op_core::events::{
+    GraphData, GraphEdge, GraphNode, InvestigationOverviewView, InvestigationSnapshotView,
+    NodeType, OverviewActionView, OverviewGapView, OverviewQuestionView,
+    OverviewRevelationProvenanceView, OverviewRevelationView, WikiNavFactView, WikiNavSectionView,
+    WikiNavSourceView, WikiNavTreeView,
+};
+use op_core::session::replay::ReplayEntry;
 use regex::Regex;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +19,9 @@ use tauri::State;
 static LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+\.md)\)").unwrap());
 static CATEGORY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^#{2,3}\s+(.+)").unwrap());
+const MAX_FOCUS_QUESTIONS: usize = 8;
+const MAX_EVIDENCE_PER_ITEM: usize = 6;
+const MAX_RECENT_REVELATIONS: usize = 6;
 
 /// Walk up from `start` to find a directory containing `wiki/index.md`.
 /// Checks both `.openplanter/wiki/` (preferred) and `wiki/` at each level.
@@ -684,26 +696,17 @@ pub fn find_shared_field_edges(all_nodes: &[GraphNode]) -> Vec<GraphEdge> {
     edges
 }
 
-/// Get the wiki knowledge graph data by parsing wiki/index.md and all source files.
-#[tauri::command]
-pub async fn get_graph_data(state: State<'_, AppState>) -> Result<GraphData, String> {
-    let cfg = state.config.lock().await;
-    let wiki_dir = match find_wiki_dir(&cfg.workspace) {
-        Some(d) => d,
-        None => {
-            return Ok(GraphData {
-                nodes: vec![],
-                edges: vec![],
-            });
-        }
-    };
+fn resolve_wiki_context(workspace: &Path) -> Option<(PathBuf, PathBuf)> {
+    let wiki_dir = find_wiki_dir(workspace)?;
+    let project_root = wiki_dir.parent().unwrap_or(workspace).to_path_buf();
+    Some((wiki_dir, project_root))
+}
 
+fn build_graph_data_from_paths(wiki_dir: &Path, project_root: &Path) -> Result<GraphData, String> {
     let index_path = wiki_dir.join("index.md");
     let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
     let source_nodes = parse_index_nodes(&content);
-    let project_root = wiki_dir.parent().unwrap_or(&cfg.workspace);
 
-    // Parse each source file into section/fact nodes
     let mut all_nodes: Vec<GraphNode> = source_nodes.clone();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
 
@@ -716,15 +719,12 @@ pub async fn get_graph_data(state: State<'_, AppState>) -> Result<GraphData, Str
         }
     }
 
-    // Source-to-source edges (existing: link + mentions)
     let source_edges = find_cross_references(&source_nodes, project_root);
     all_edges.extend(source_edges);
 
-    // Fact-to-source cross-reference edges
     let cross_ref_edges = extract_cross_ref_edges(&all_nodes, &source_nodes);
     all_edges.extend(cross_ref_edges);
 
-    // Fact-to-fact shared-field edges
     let shared_field_edges = find_shared_field_edges(&all_nodes);
     all_edges.extend(shared_field_edges);
 
@@ -732,6 +732,517 @@ pub async fn get_graph_data(state: State<'_, AppState>) -> Result<GraphData, Str
         nodes: all_nodes,
         edges: all_edges,
     })
+}
+
+fn build_graph_data_for_workspace(workspace: &Path) -> Result<GraphData, String> {
+    let Some((wiki_dir, project_root)) = resolve_wiki_context(workspace) else {
+        return Ok(GraphData {
+            nodes: vec![],
+            edges: vec![],
+        });
+    };
+    build_graph_data_from_paths(&wiki_dir, &project_root)
+}
+
+fn build_wiki_nav(graph_data: &GraphData) -> WikiNavTreeView {
+    let mut source_nodes = graph_data
+        .nodes
+        .iter()
+        .filter(|node| node.node_type.as_ref() == Some(&NodeType::Source))
+        .collect::<Vec<_>>();
+    source_nodes.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+    });
+
+    let mut sections_by_parent: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
+    let mut facts_by_parent: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
+    for node in &graph_data.nodes {
+        match node.node_type.as_ref() {
+            Some(NodeType::Section) => {
+                if let Some(parent_id) = node.parent_id.as_deref() {
+                    sections_by_parent.entry(parent_id).or_default().push(node);
+                }
+            }
+            Some(NodeType::Fact) => {
+                if let Some(parent_id) = node.parent_id.as_deref() {
+                    facts_by_parent.entry(parent_id).or_default().push(node);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let sources = source_nodes
+        .into_iter()
+        .map(|source| {
+            let mut sections = sections_by_parent
+                .get(source.id.as_str())
+                .cloned()
+                .unwrap_or_default();
+            sections.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+
+            let sections = sections
+                .into_iter()
+                .map(|section| {
+                    WikiNavSectionView {
+                        section_id: section.id.clone(),
+                        title: section.label.clone(),
+                        facts: collect_section_facts(
+                            section,
+                            &sections_by_parent,
+                            &facts_by_parent,
+                        )
+                            .into_iter()
+                            .map(|fact| WikiNavFactView {
+                                fact_id: fact.id.clone(),
+                                label: fact.label.clone(),
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+
+            WikiNavSourceView {
+                source_id: source.id.clone(),
+                title: source.label.clone(),
+                category: source.category.clone(),
+                file_path: source.path.clone(),
+                sections,
+            }
+        })
+        .collect();
+
+    WikiNavTreeView { sources }
+}
+
+fn collect_section_facts<'a>(
+    section: &'a GraphNode,
+    sections_by_parent: &HashMap<&str, Vec<&'a GraphNode>>,
+    facts_by_parent: &HashMap<&str, Vec<&'a GraphNode>>,
+) -> Vec<&'a GraphNode> {
+    let mut facts = facts_by_parent
+        .get(section.id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    facts.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+
+    let mut child_sections = sections_by_parent
+        .get(section.id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    child_sections
+        .sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+
+    for child_section in child_sections {
+        facts.extend(collect_section_facts(
+            child_section,
+            sections_by_parent,
+            facts_by_parent,
+        ));
+    }
+
+    facts
+}
+
+fn get_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn get_nested_array<'a>(value: &'a Value, parent: &str, child: &str) -> &'a [Value] {
+    value.get(parent)
+        .and_then(Value::as_object)
+        .and_then(|obj| obj.get(child))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn parse_focus_questions(packet: &Value) -> Vec<OverviewQuestionView> {
+    get_array(packet, "unresolved_questions")
+        .iter()
+        .filter_map(|question| {
+            let id = question.get("id").and_then(Value::as_str)?.to_string();
+            let text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(OverviewQuestionView {
+                id,
+                text,
+                priority: question
+                    .get("priority")
+                    .and_then(Value::as_str)
+                    .unwrap_or("medium")
+                    .to_string(),
+                updated_at: question
+                    .get("updated_at")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+                    .filter(|value| !value.is_empty()),
+            })
+        })
+        .collect()
+}
+
+fn gap_label(gap: &Value) -> String {
+    let gap_id = gap.get("gap_id").and_then(Value::as_str).unwrap_or("gap");
+    let kind = gap.get("kind").and_then(Value::as_str).unwrap_or("gap");
+    let scope = gap.get("scope").and_then(Value::as_str).unwrap_or("investigation");
+    let question_id = gap.get("question_id").and_then(Value::as_str);
+    let claim_id = gap.get("claim_id").and_then(Value::as_str);
+
+    match (kind, scope, question_id, claim_id) {
+        ("missing_evidence", "question", Some(question_id), _) => {
+            format!("Question {question_id} needs cited evidence")
+        }
+        ("missing_counter_evidence", "claim", _, Some(claim_id)) => {
+            format!("Claim {claim_id} needs counter-evidence")
+        }
+        ("missing_confidence", "claim", _, Some(claim_id)) => {
+            format!("Claim {claim_id} needs a confidence score")
+        }
+        ("low_confidence", "claim", _, Some(claim_id)) => {
+            format!("Claim {claim_id} has low confidence")
+        }
+        ("missing_evidence", "claim", _, Some(claim_id)) => {
+            format!("Claim {claim_id} needs more evidence")
+        }
+        _ => format!("{scope} gap: {gap_id}"),
+    }
+}
+
+fn parse_candidate_actions_and_gaps(
+    packet: &Value,
+) -> (Vec<OverviewActionView>, Vec<OverviewGapView>) {
+    let mut actions = Vec::new();
+    let mut gaps_by_id: HashMap<String, OverviewGapView> = HashMap::new();
+
+    for action in get_array(packet, "candidate_actions") {
+        let action_id = action
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if action_id.is_empty() {
+            continue;
+        }
+
+        let gap_ids = action
+            .get("evidence_gap_refs")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items.iter()
+                    .filter_map(|item| {
+                        let gap_id = item.get("gap_id").and_then(Value::as_str)?;
+                        let entry = gaps_by_id.entry(gap_id.to_string()).or_insert_with(|| {
+                            OverviewGapView {
+                                gap_id: gap_id.to_string(),
+                                label: gap_label(item),
+                                status: "open".to_string(),
+                                kind: item
+                                    .get("kind")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("gap")
+                                    .to_string(),
+                                scope: item
+                                    .get("scope")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("investigation")
+                                    .to_string(),
+                                related_action_ids: Vec::new(),
+                            }
+                        });
+                        if !entry.related_action_ids.iter().any(|id| id == &action_id) {
+                            entry.related_action_ids.push(action_id.clone());
+                        }
+                        Some(gap_id.to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        actions.push(OverviewActionView {
+            action_id,
+            label: action
+                .get("title")
+                .and_then(Value::as_str)
+                .or_else(|| action.get("description").and_then(Value::as_str))
+                .unwrap_or("Next action")
+                .to_string(),
+            rationale: action
+                .get("rationale")
+                .and_then(Value::as_object)
+                .and_then(|value| value.get("summary"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| {
+                    action
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                }),
+            evidence_gap_refs: gap_ids,
+            priority: action
+                .get("priority")
+                .and_then(Value::as_str)
+                .unwrap_or("medium")
+                .to_string(),
+        });
+    }
+
+    let mut gaps = gaps_by_id.into_values().collect::<Vec<_>>();
+    gaps.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.gap_id.cmp(&right.gap_id))
+    });
+    (actions, gaps)
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn stable_text_hash(text: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn normalized_revelation_text(text: &str) -> String {
+    collapse_whitespace(text).to_lowercase()
+}
+
+fn is_substantive_revelation(role: &str, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.eq_ignore_ascii_case("No wiki updates needed") {
+        return false;
+    }
+    if trimmed.starts_with("Error:") {
+        return false;
+    }
+    match role {
+        "curator" => trimmed.len() >= 10,
+        _ => trimmed.len() >= 40,
+    }
+}
+
+fn revelation_title(text: &str) -> String {
+    let trimmed = collapse_whitespace(text);
+    let sentence = trimmed
+        .split_terminator(['.', '!', '?', '\n'])
+        .next()
+        .unwrap_or(trimmed.as_str())
+        .trim();
+    if sentence.len() <= 90 {
+        sentence.to_string()
+    } else {
+        let end = sentence.floor_char_boundary(90);
+        format!("{}...", &sentence[..end])
+    }
+}
+
+fn revelation_summary(text: &str) -> String {
+    let trimmed = collapse_whitespace(text);
+    if trimmed.len() <= 240 {
+        trimmed
+    } else {
+        let end = trimmed.floor_char_boundary(240);
+        format!("{}...", &trimmed[..end])
+    }
+}
+
+fn source_rank(role: &str) -> u8 {
+    match role {
+        "curator" => 3,
+        "step-summary" => 2,
+        "assistant" => 1,
+        _ => 0,
+    }
+}
+
+fn replay_text(entry: &ReplayEntry) -> Option<(&'static str, String)> {
+    match entry.role.as_str() {
+        "curator" => Some(("curator_update", entry.content.trim().to_string())),
+        "step-summary" => entry
+            .step_model_preview
+            .as_ref()
+            .map(|text| ("agent_step", text.trim().to_string()))
+            .or_else(|| Some(("agent_step", entry.content.trim().to_string()))),
+        "assistant" => Some(("assistant_message", entry.content.trim().to_string())),
+        _ => None,
+    }
+}
+
+fn build_recent_revelations(entries: &[ReplayEntry]) -> Vec<OverviewRevelationView> {
+    let mut candidates = entries
+        .iter()
+        .filter_map(|entry| {
+            let (source, text) = replay_text(entry)?;
+            if !is_substantive_revelation(entry.role.as_str(), &text) {
+                return None;
+            }
+            let normalized = normalized_revelation_text(&text);
+            if normalized.is_empty() {
+                return None;
+            }
+            Some((
+                entry.timestamp.clone(),
+                entry.step_number.unwrap_or(0),
+                source_rank(entry.role.as_str()),
+                source,
+                normalized,
+                text,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| right.4.cmp(&left.4))
+    });
+
+    let mut seen = HashSet::new();
+    let mut revelations = Vec::new();
+    for (timestamp, step_index, _rank, source, normalized, text) in candidates {
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        revelations.push(OverviewRevelationView {
+            revelation_id: format!("{source}:{step_index}:{:08x}", stable_text_hash(&normalized)),
+            occurred_at: timestamp,
+            title: revelation_title(&text),
+            summary: revelation_summary(&text),
+            provenance: OverviewRevelationProvenanceView {
+                source: source.to_string(),
+                step_index: if step_index == 0 {
+                    None
+                } else {
+                    Some(step_index)
+                },
+            },
+        });
+        if revelations.len() >= MAX_RECENT_REVELATIONS {
+            break;
+        }
+    }
+
+    revelations
+}
+
+fn build_investigation_overview_view(
+    session_id: Option<String>,
+    graph_data: &GraphData,
+    packet: Option<&Value>,
+    replay_entries: Option<&[ReplayEntry]>,
+    warnings: Vec<String>,
+) -> InvestigationOverviewView {
+    let focus_questions = packet.map(parse_focus_questions).unwrap_or_default();
+    let (candidate_actions, outstanding_gaps) = packet
+        .map(parse_candidate_actions_and_gaps)
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
+    let snapshot = InvestigationSnapshotView {
+        focus_question_count: focus_questions.len() as u32,
+        supported_count: packet
+            .map(|value| get_nested_array(value, "findings", "supported").len() as u32)
+            .unwrap_or(0),
+        contested_count: packet
+            .map(|value| get_nested_array(value, "findings", "contested").len() as u32)
+            .unwrap_or(0),
+        outstanding_gap_count: outstanding_gaps.len() as u32,
+        candidate_action_count: candidate_actions.len() as u32,
+    };
+
+    InvestigationOverviewView {
+        session_id,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        snapshot,
+        focus_questions,
+        outstanding_gaps,
+        candidate_actions,
+        recent_revelations: replay_entries
+            .map(build_recent_revelations)
+            .unwrap_or_default(),
+        wiki_nav: build_wiki_nav(graph_data),
+        warnings,
+    }
+}
+
+/// Get the wiki knowledge graph data by parsing wiki/index.md and all source files.
+#[tauri::command]
+pub async fn get_graph_data(state: State<'_, AppState>) -> Result<GraphData, String> {
+    let workspace = state.config.lock().await.workspace.clone();
+    build_graph_data_for_workspace(&workspace)
+}
+
+/// Get a wiki + investigation overview payload for the frontend.
+#[tauri::command]
+pub async fn get_investigation_overview(
+    state: State<'_, AppState>,
+) -> Result<InvestigationOverviewView, String> {
+    let cfg = state.config.lock().await.clone();
+    let session_id = state.session_id.lock().await.clone();
+
+    let graph_data = build_graph_data_for_workspace(&cfg.workspace)?;
+    let mut warnings = Vec::new();
+    let mut packet = None;
+    let mut replay_entries = None;
+
+    if let Some(session_id_value) = session_id.as_ref() {
+        let session_dir = cfg
+            .workspace
+            .join(&cfg.session_root_dir)
+            .join("sessions")
+            .join(session_id_value);
+
+        match load_or_migrate_investigation_state(&session_dir).await {
+            Ok(state) => {
+                packet = Some(build_question_reasoning_packet(
+                    &state,
+                    MAX_FOCUS_QUESTIONS,
+                    MAX_EVIDENCE_PER_ITEM,
+                ));
+            }
+            Err(err) => warnings.push(format!(
+                "Failed to load investigation state for overview: {err}"
+            )),
+        }
+
+        match op_core::session::replay::ReplayLogger::read_all(&session_dir).await {
+            Ok(entries) => replay_entries = Some(entries),
+            Err(err) => warnings.push(format!("Failed to read replay history for overview: {err}")),
+        }
+    }
+
+    Ok(build_investigation_overview_view(
+        session_id,
+        &graph_data,
+        packet.as_ref(),
+        replay_entries.as_deref(),
+        warnings,
+    ))
 }
 
 /// Read a wiki markdown file's contents, given a relative path like "wiki/fec.md".
@@ -1419,7 +1930,7 @@ mod tests {
     fn test_parse_table_rows() {
         let source = make_source("fec");
         let content = "## Data Schema\n\n| Field | Description |\n|-------|-------------|\n| `candidate_id` | Unique ID |\n| `name` | Full name |";
-        let (nodes, edges) = parse_source_file(&source, content);
+        let (nodes, _edges) = parse_source_file(&source, content);
         // 1 section + 2 fact rows (header + separator skipped)
         let facts: Vec<_> = nodes
             .iter()
@@ -1739,5 +2250,239 @@ Links here.";
             edges.is_empty(),
             "should only match facts under data-schema sections"
         );
+    }
+
+    #[test]
+    fn test_build_wiki_nav_creates_hierarchy() {
+        let graph_data = GraphData {
+            nodes: vec![
+                GraphNode {
+                    id: "source-a".to_string(),
+                    label: "Source A".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Source),
+                    parent_id: None,
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary".to_string(),
+                    label: "Summary".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Section),
+                    parent_id: Some("source-a".to_string()),
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary::fact".to_string(),
+                    label: "Jurisdiction".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Fact),
+                    parent_id: Some("source-a::summary".to_string()),
+                    content: Some("- **Jurisdiction**: US".to_string()),
+                },
+            ],
+            edges: vec![],
+        };
+
+        let nav = build_wiki_nav(&graph_data);
+        assert_eq!(nav.sources.len(), 1);
+        assert_eq!(nav.sources[0].sections.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts[0].label, "Jurisdiction");
+    }
+
+    #[test]
+    fn test_build_wiki_nav_includes_nested_section_facts() {
+        let graph_data = GraphData {
+            nodes: vec![
+                GraphNode {
+                    id: "source-a".to_string(),
+                    label: "Source A".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Source),
+                    parent_id: None,
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary".to_string(),
+                    label: "Summary".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Section),
+                    parent_id: Some("source-a".to_string()),
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary::subsection".to_string(),
+                    label: "Subsection".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Section),
+                    parent_id: Some("source-a::summary".to_string()),
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary::subsection::fact".to_string(),
+                    label: "Nested fact".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Fact),
+                    parent_id: Some("source-a::summary::subsection".to_string()),
+                    content: Some("- **Nested fact**: Included".to_string()),
+                },
+            ],
+            edges: vec![],
+        };
+
+        let nav = build_wiki_nav(&graph_data);
+        assert_eq!(nav.sources.len(), 1);
+        assert_eq!(nav.sources[0].sections.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts[0].label, "Nested fact");
+    }
+
+    #[test]
+    fn test_parse_candidate_actions_and_gaps_dedupes_gap_ids() {
+        let packet = serde_json::json!({
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "title": "Resolve question q1",
+                    "priority": "high",
+                    "rationale": { "summary": "question_unresolved" },
+                    "evidence_gap_refs": [
+                        {
+                            "gap_id": "gap:claim:c1:missing_evidence",
+                            "kind": "missing_evidence",
+                            "scope": "claim",
+                            "claim_id": "c1"
+                        }
+                    ]
+                },
+                {
+                    "id": "ca_2",
+                    "title": "Verify claim c1",
+                    "priority": "medium",
+                    "rationale": { "summary": "claim_requires_verification" },
+                    "evidence_gap_refs": [
+                        {
+                            "gap_id": "gap:claim:c1:missing_evidence",
+                            "kind": "missing_evidence",
+                            "scope": "claim",
+                            "claim_id": "c1"
+                        },
+                        {
+                            "gap_id": "gap:claim:c1:missing_confidence",
+                            "kind": "missing_confidence",
+                            "scope": "claim",
+                            "claim_id": "c1"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let (actions, gaps) = parse_candidate_actions_and_gaps(&packet);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(gaps.len(), 2);
+        let gap = gaps
+            .iter()
+            .find(|item| item.gap_id == "gap:claim:c1:missing_evidence")
+            .expect("missing_evidence gap should exist");
+        assert_eq!(gap.related_action_ids, vec!["ca_1", "ca_2"]);
+    }
+
+    #[test]
+    fn test_build_recent_revelations_prefers_curator_and_dedupes() {
+        let entries = vec![
+            ReplayEntry {
+                seq: 1,
+                timestamp: "2026-03-17T10:00:00Z".to_string(),
+                role: "assistant".to_string(),
+                content: "Acme Corp appears to share an address with PAC Fund Alpha in multiple records, which is now corroborated by the latest filing pull.".to_string(),
+                tool_name: None,
+                is_rendered: Some(true),
+                step_number: None,
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: None,
+                step_tool_calls: None,
+            },
+            ReplayEntry {
+                seq: 2,
+                timestamp: "2026-03-17T10:01:00Z".to_string(),
+                role: "step-summary".to_string(),
+                content: String::new(),
+                tool_name: None,
+                is_rendered: None,
+                step_number: Some(4),
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: Some("Acme Corp appears to share an address with PAC Fund Alpha in multiple records, which is now corroborated by the latest filing pull.".to_string()),
+                step_tool_calls: None,
+            },
+            ReplayEntry {
+                seq: 3,
+                timestamp: "2026-03-17T10:02:00Z".to_string(),
+                role: "curator".to_string(),
+                content: "Curator updated the corporate and campaign finance wiki pages with the newly corroborated Acme/PAC address overlap.".to_string(),
+                tool_name: None,
+                is_rendered: None,
+                step_number: None,
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: None,
+                step_tool_calls: None,
+            },
+        ];
+
+        let revelations = build_recent_revelations(&entries);
+        assert_eq!(revelations.len(), 2);
+        assert_eq!(revelations[0].provenance.source, "curator_update");
+        assert_eq!(revelations[1].provenance.source, "agent_step");
+    }
+
+    #[test]
+    fn test_build_investigation_overview_view_surfaces_warnings_without_replay() {
+        let graph_data = GraphData {
+            nodes: vec![],
+            edges: vec![],
+        };
+        let packet = serde_json::json!({
+            "unresolved_questions": [
+                {
+                    "id": "q1",
+                    "question": "Who owns Acme Corp?",
+                    "priority": "high",
+                    "updated_at": "2026-03-17T09:00:00Z"
+                }
+            ],
+            "findings": {
+                "supported": [],
+                "contested": [{ "id": "c1" }],
+                "unresolved": []
+            },
+            "candidate_actions": []
+        });
+
+        let overview = build_investigation_overview_view(
+            Some("session-1".to_string()),
+            &graph_data,
+            Some(&packet),
+            None,
+            vec!["Replay missing".to_string()],
+        );
+
+        assert_eq!(overview.snapshot.focus_question_count, 1);
+        assert_eq!(overview.snapshot.contested_count, 1);
+        assert_eq!(overview.recent_revelations.len(), 0);
+        assert_eq!(overview.warnings, vec!["Replay missing"]);
     }
 }
