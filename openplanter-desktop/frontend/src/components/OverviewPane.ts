@@ -11,6 +11,7 @@ import type {
   WikiNavSourceView,
 } from "../api/types";
 import { appState } from "../state/store";
+import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 
 const md = new MarkdownIt({
   html: false,
@@ -46,24 +47,43 @@ export function createOverviewPane(): HTMLElement {
   const main = document.createElement("div");
   main.className = "overview-main";
 
-  const nav = document.createElement("aside");
-  nav.className = "overview-nav";
-
   const snapshotSection = createSection("Investigation Snapshot");
   const gapsSection = createSection("Outstanding Gaps");
   const actionsSection = createSection("Candidate Actions");
   const revelationsSection = createSection("Recent Revelations");
-  const detailSection = createSection("Wiki Drill-down");
+  const detailSection = createSection("Wiki Navigation");
   detailSection.body.classList.add("overview-document");
+  const documentControls = document.createElement("div");
+  documentControls.className = "overview-document-controls";
 
-  const navTitle = document.createElement("div");
-  navTitle.className = "overview-nav-title";
-  navTitle.textContent = "Wiki Navigation";
+  const documentSelectLabel = document.createElement("label");
+  documentSelectLabel.className = "overview-document-select-label";
+  documentSelectLabel.textContent = "Page";
 
-  const navBody = document.createElement("div");
-  navBody.className = "overview-nav-body";
+  const documentSelect = document.createElement("select");
+  documentSelect.className = "overview-document-select";
+  documentSelect.addEventListener("change", () => {
+    if (documentSelect.value) {
+      setSelectedPath(documentSelect.value);
+    }
+  });
+  documentSelectLabel.appendChild(documentSelect);
+  documentControls.appendChild(documentSelectLabel);
 
-  nav.append(navTitle, navBody);
+  const documentTitleEl = document.createElement("div");
+  documentTitleEl.className = "overview-document-title";
+
+  const documentViewport = document.createElement("div");
+  documentViewport.className = "overview-document-viewport";
+
+  const documentStatusEl = document.createElement("div");
+  documentStatusEl.className = "overview-empty";
+
+  const documentContentEl = document.createElement("div");
+  documentContentEl.className = "overview-document-body rendered";
+
+  documentViewport.append(documentStatusEl, documentContentEl);
+  detailSection.body.append(documentControls, documentTitleEl, documentViewport);
   main.append(
     snapshotSection.section,
     gapsSection.section,
@@ -71,7 +91,7 @@ export function createOverviewPane(): HTMLElement {
     revelationsSection.section,
     detailSection.section,
   );
-  body.append(main, nav);
+  body.append(main);
   pane.append(header, alerts, body);
 
   let refreshTimer: number | null = null;
@@ -81,6 +101,13 @@ export function createOverviewPane(): HTMLElement {
   let documentHtml = "";
   let documentTitle = "Wiki document";
   let documentError = "";
+  let loadedDocumentPath: string | null = null;
+
+  const initialState = appState.get();
+  let lastOverviewData = initialState.overviewData;
+  let lastOverviewStatus = initialState.overviewStatus;
+  let lastOverviewError = initialState.overviewError;
+  let lastOverviewSelectedWikiPath = initialState.overviewSelectedWikiPath;
 
   function createCardList<T>(
     items: T[],
@@ -157,6 +184,7 @@ export function createOverviewPane(): HTMLElement {
       documentTitle = "Wiki document";
       documentHtml = "";
       documentError = "";
+      loadedDocumentPath = null;
       render();
       return;
     }
@@ -174,18 +202,30 @@ export function createOverviewPane(): HTMLElement {
       documentStatus = "ready";
       documentHtml = md.render(content);
       documentError = "";
+      loadedDocumentPath = path;
       render();
       interceptDocumentLinks();
+      documentViewport.scrollTop = 0;
     } catch (error) {
       if (seq !== docSeq) return;
       documentStatus = "error";
       documentHtml = "";
       documentError = String(error);
+      loadedDocumentPath = null;
       render();
     }
   }
 
   function setSelectedPath(path: string): void {
+    const { overviewSelectedWikiPath } = appState.get();
+    if (
+      path === overviewSelectedWikiPath &&
+      (documentStatus === "loading" ||
+        (documentStatus === "ready" && loadedDocumentPath === path))
+    ) {
+      return;
+    }
+
     appState.update((state) => ({
       ...state,
       overviewSelectedWikiPath: path,
@@ -194,13 +234,16 @@ export function createOverviewPane(): HTMLElement {
   }
 
   function interceptDocumentLinks(): void {
-    detailSection.body.querySelectorAll("a").forEach((anchor) => {
+    documentContentEl.querySelectorAll("a").forEach((anchor) => {
       const href = anchor.getAttribute("href");
-      if (!href || !href.endsWith(".md")) return;
-      if (href.startsWith("http://") || href.startsWith("https://")) return;
+      if (!href) return;
       anchor.addEventListener("click", (event) => {
+        const resolvedPath = resolveWikiMarkdownHref(href, {
+          baseWikiPath: loadedDocumentPath,
+        });
+        if (!resolvedPath) return;
+
         event.preventDefault();
-        const resolvedPath = href.startsWith("wiki/") ? href : `wiki/${href}`;
         setSelectedPath(resolvedPath);
       });
     });
@@ -233,7 +276,9 @@ export function createOverviewPane(): HTMLElement {
         overviewSelectedWikiPath: selectedPath,
       }));
 
-      void loadDocument(selectedPath, overview);
+      if (selectedPath !== loadedDocumentPath || documentStatus !== "ready") {
+        void loadDocument(selectedPath, overview);
+      }
     } catch (error) {
       if (seq !== refreshSeq) return;
       appState.update((state) => ({
@@ -432,114 +477,81 @@ export function createOverviewPane(): HTMLElement {
     return item;
   }
 
-  function renderNav(overview: InvestigationOverviewView | null): void {
-    navBody.innerHTML = "";
+  function renderDocumentNav(overview: InvestigationOverviewView | null): void {
     const selectedPath = appState.get().overviewSelectedWikiPath;
 
     if (!overview || overview.wiki_nav.sources.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "overview-empty";
-      empty.textContent = "No wiki sources available yet.";
-      navBody.appendChild(empty);
+      documentSelect.innerHTML = "";
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No wiki pages available";
+      documentSelect.appendChild(option);
+      documentSelect.disabled = true;
       return;
     }
 
+    documentSelect.disabled = false;
+    documentSelect.innerHTML = "";
+
     let currentCategory = "";
+    let categoryGroup: HTMLOptGroupElement | null = null;
     for (const source of overview.wiki_nav.sources) {
       if (source.category !== currentCategory) {
         currentCategory = source.category;
-        const category = document.createElement("div");
-        category.className = "overview-nav-category";
-        category.textContent = currentCategory;
-        navBody.appendChild(category);
+        categoryGroup = document.createElement("optgroup");
+        categoryGroup.label = currentCategory;
+        documentSelect.appendChild(categoryGroup);
       }
 
-      const sourceWrap = document.createElement("div");
-      sourceWrap.className = "overview-nav-source-block";
-
-      const sourceButton = document.createElement("button");
-      sourceButton.className = "overview-nav-source";
-      if (selectedPath === source.file_path) {
-        sourceButton.classList.add("active");
-      }
-      sourceButton.textContent = source.title;
-      sourceButton.addEventListener("click", () => setSelectedPath(source.file_path));
-      sourceWrap.appendChild(sourceButton);
-
-      if (source.sections.length > 0) {
-        const sections = document.createElement("div");
-        sections.className = "overview-nav-sections";
-        for (const section of source.sections) {
-          const sectionButton = document.createElement("button");
-          sectionButton.className = "overview-nav-section";
-          sectionButton.textContent = section.title;
-          sectionButton.addEventListener("click", () => setSelectedPath(source.file_path));
-          sections.appendChild(sectionButton);
-
-          if (section.facts.length > 0) {
-            const facts = document.createElement("div");
-            facts.className = "overview-nav-facts";
-            for (const fact of section.facts) {
-              const factButton = document.createElement("button");
-              factButton.className = "overview-nav-fact";
-              factButton.textContent = fact.label;
-              factButton.addEventListener("click", () => setSelectedPath(source.file_path));
-              facts.appendChild(factButton);
-            }
-            sections.appendChild(facts);
-          }
-        }
-        sourceWrap.appendChild(sections);
-      }
-
-      navBody.appendChild(sourceWrap);
+      const option = document.createElement("option");
+      option.value = source.file_path;
+      option.textContent = source.title;
+      (categoryGroup ?? documentSelect).appendChild(option);
     }
+
+    documentSelect.value = selectedPath ?? overview.wiki_nav.sources[0]?.file_path ?? "";
   }
 
   function renderDocument(overview: InvestigationOverviewView | null): void {
-    detailSection.body.innerHTML = "";
-
-    const title = document.createElement("div");
-    title.className = "overview-document-title";
-    title.textContent = documentTitle;
-    detailSection.body.appendChild(title);
+    documentTitleEl.textContent = documentTitle;
 
     if (!overview || !appState.get().overviewSelectedWikiPath) {
-      const empty = document.createElement("div");
-      empty.className = "overview-empty";
-      empty.textContent = "Select a wiki source to inspect the underlying document.";
-      detailSection.body.appendChild(empty);
+      documentStatusEl.textContent = "Select a wiki page to inspect the underlying document.";
+      documentStatusEl.hidden = false;
+      documentContentEl.hidden = true;
+      documentContentEl.innerHTML = "";
       return;
     }
 
     if (documentStatus === "loading") {
-      const loading = document.createElement("div");
-      loading.className = "overview-empty";
-      loading.textContent = "Loading wiki document...";
-      detailSection.body.appendChild(loading);
+      documentStatusEl.textContent = "Loading wiki document...";
+      documentStatusEl.hidden = false;
+      documentContentEl.hidden = true;
+      documentContentEl.innerHTML = "";
       return;
     }
 
     if (documentStatus === "error") {
-      const error = document.createElement("div");
-      error.className = "overview-empty";
-      error.textContent = `Failed to load wiki document: ${documentError}`;
-      detailSection.body.appendChild(error);
+      documentStatusEl.textContent = `Failed to load wiki document: ${documentError}`;
+      documentStatusEl.hidden = false;
+      documentContentEl.hidden = true;
+      documentContentEl.innerHTML = "";
       return;
     }
 
     if (documentStatus === "ready") {
-      const content = document.createElement("div");
-      content.className = "overview-document-body rendered";
-      content.innerHTML = documentHtml;
-      detailSection.body.appendChild(content);
+      documentStatusEl.hidden = true;
+      documentContentEl.hidden = false;
+      if (documentContentEl.innerHTML !== documentHtml) {
+        documentContentEl.innerHTML = documentHtml;
+      }
       return;
     }
 
-    const idle = document.createElement("div");
-    idle.className = "overview-empty";
-    idle.textContent = "No wiki document selected.";
-    detailSection.body.appendChild(idle);
+    documentStatusEl.textContent = "No wiki document selected.";
+    documentStatusEl.hidden = false;
+    documentContentEl.hidden = true;
+    documentContentEl.innerHTML = "";
   }
 
   function render(): void {
@@ -582,15 +594,34 @@ export function createOverviewPane(): HTMLElement {
       ),
     );
 
-    renderNav(overview);
+    renderDocumentNav(overview);
     renderDocument(overview);
   }
 
-  appState.subscribe(() => {
-    render();
+  appState.subscribe((state) => {
+    const shouldRender =
+      state.overviewData !== lastOverviewData ||
+      state.overviewStatus !== lastOverviewStatus ||
+      state.overviewError !== lastOverviewError ||
+      state.overviewSelectedWikiPath !== lastOverviewSelectedWikiPath;
+
+    lastOverviewData = state.overviewData;
+    lastOverviewStatus = state.overviewStatus;
+    lastOverviewError = state.overviewError;
+    lastOverviewSelectedWikiPath = state.overviewSelectedWikiPath;
+
+    if (shouldRender) {
+      render();
+    }
   });
 
   window.addEventListener("session-changed", () => {
+    loadedDocumentPath = null;
+    documentStatus = "idle";
+    documentHtml = "";
+    documentTitle = "Wiki document";
+    documentError = "";
+    render();
     scheduleRefresh(0);
   });
   window.addEventListener("curator-done", () => {

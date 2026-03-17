@@ -115,6 +115,8 @@ describe("createOverviewPane", () => {
       expect(pane.textContent).toContain("Who controls Acme Corp?");
       expect(pane.textContent).toContain("Claim c1 needs more evidence");
       expect(pane.textContent).toContain("Acme and PAC filings overlap");
+      expect(pane.querySelector(".overview-document-select")).not.toBeNull();
+      expect(pane.querySelector(".overview-nav")).toBeNull();
       expect(pane.textContent).toContain("Acme Corp");
     });
   });
@@ -211,5 +213,107 @@ describe("createOverviewPane", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pane.textContent).not.toContain("Stale overview should be ignored");
+  });
+
+  it("keeps the selected wiki page stable across overview refreshes", async () => {
+    let overviewCalls = 0;
+    const readPaths: string[] = [];
+    const wikiSources = [
+      {
+        source_id: "acme",
+        title: "Acme Corp",
+        category: "corporate",
+        file_path: "wiki/acme.md",
+        sections: [],
+      },
+      {
+        source_id: "budget",
+        title: "Budget Documents",
+        category: "public-records",
+        file_path: "wiki/budget.md",
+        sections: [],
+      },
+    ];
+
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+
+    __setHandler("get_investigation_overview", () => {
+      overviewCalls += 1;
+      return makeOverview({
+        focus_questions: [
+          {
+            id: "q1",
+            text:
+              overviewCalls === 1
+                ? "Who controls Acme Corp?"
+                : "What changed in the refreshed overview?",
+            priority: "high",
+          },
+        ],
+        wiki_nav: {
+          sources: wikiSources,
+        },
+      });
+    });
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    const documentSelect = pane.querySelector(
+      ".overview-document-select",
+    ) as HTMLSelectElement;
+
+    await vi.waitFor(() => {
+      expect(documentSelect.options.length).toBe(2);
+      expect(readPaths).toEqual(["wiki/acme.md"]);
+    });
+
+    documentSelect.value = "wiki/budget.md";
+    documentSelect.dispatchEvent(new Event("change"));
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/budget.md");
+      expect(pane.textContent).toContain("wiki/budget.md");
+    });
+
+    window.dispatchEvent(new CustomEvent("curator-done"));
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("What changed in the refreshed overview?");
+    });
+
+    expect(documentSelect.value).toBe("wiki/budget.md");
+    expect(readPaths).toEqual(["wiki/acme.md", "wiki/budget.md"]);
+  });
+
+  it("keeps the wiki viewport mounted across unrelated app state updates", async () => {
+    __setHandler("get_investigation_overview", () => makeOverview());
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    const viewport = pane.querySelector(
+      ".overview-document-viewport",
+    ) as HTMLDivElement;
+
+    await vi.waitFor(() => {
+      expect(viewport).not.toBeNull();
+      expect(pane.textContent).toContain("wiki/acme.md");
+    });
+
+    viewport.scrollTop = 64;
+
+    appState.update((state) => ({
+      ...state,
+      inputTokens: state.inputTokens + 10,
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(pane.querySelector(".overview-document-viewport")).toBe(viewport);
+    expect(viewport.scrollTop).toBe(64);
   });
 });
