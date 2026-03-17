@@ -786,18 +786,14 @@ fn build_wiki_nav(graph_data: &GraphData) -> WikiNavTreeView {
             let sections = sections
                 .into_iter()
                 .map(|section| {
-                    let mut facts = facts_by_parent
-                        .get(section.id.as_str())
-                        .cloned()
-                        .unwrap_or_default();
-                    facts.sort_by(|left, right| {
-                        left.label.to_lowercase().cmp(&right.label.to_lowercase())
-                    });
-
                     WikiNavSectionView {
                         section_id: section.id.clone(),
                         title: section.label.clone(),
-                        facts: facts
+                        facts: collect_section_facts(
+                            section,
+                            &sections_by_parent,
+                            &facts_by_parent,
+                        )
                             .into_iter()
                             .map(|fact| WikiNavFactView {
                                 fact_id: fact.id.clone(),
@@ -819,6 +815,35 @@ fn build_wiki_nav(graph_data: &GraphData) -> WikiNavTreeView {
         .collect();
 
     WikiNavTreeView { sources }
+}
+
+fn collect_section_facts<'a>(
+    section: &'a GraphNode,
+    sections_by_parent: &HashMap<&str, Vec<&'a GraphNode>>,
+    facts_by_parent: &HashMap<&str, Vec<&'a GraphNode>>,
+) -> Vec<&'a GraphNode> {
+    let mut facts = facts_by_parent
+        .get(section.id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    facts.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+
+    let mut child_sections = sections_by_parent
+        .get(section.id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    child_sections
+        .sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+
+    for child_section in child_sections {
+        facts.extend(collect_section_facts(
+            child_section,
+            sections_by_parent,
+            facts_by_parent,
+        ));
+    }
+
+    facts
 }
 
 fn get_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
@@ -2267,6 +2292,57 @@ Links here.";
         assert_eq!(nav.sources[0].sections.len(), 1);
         assert_eq!(nav.sources[0].sections[0].facts.len(), 1);
         assert_eq!(nav.sources[0].sections[0].facts[0].label, "Jurisdiction");
+    }
+
+    #[test]
+    fn test_build_wiki_nav_includes_nested_section_facts() {
+        let graph_data = GraphData {
+            nodes: vec![
+                GraphNode {
+                    id: "source-a".to_string(),
+                    label: "Source A".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Source),
+                    parent_id: None,
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary".to_string(),
+                    label: "Summary".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Section),
+                    parent_id: Some("source-a".to_string()),
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary::subsection".to_string(),
+                    label: "Subsection".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Section),
+                    parent_id: Some("source-a::summary".to_string()),
+                    content: None,
+                },
+                GraphNode {
+                    id: "source-a::summary::subsection::fact".to_string(),
+                    label: "Nested fact".to_string(),
+                    category: "corporate".to_string(),
+                    path: "wiki/source-a.md".to_string(),
+                    node_type: Some(NodeType::Fact),
+                    parent_id: Some("source-a::summary::subsection".to_string()),
+                    content: Some("- **Nested fact**: Included".to_string()),
+                },
+            ],
+            edges: vec![],
+        };
+
+        let nav = build_wiki_nav(&graph_data);
+        assert_eq!(nav.sources.len(), 1);
+        assert_eq!(nav.sources[0].sections.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts.len(), 1);
+        assert_eq!(nav.sources[0].sections[0].facts[0].label, "Nested fact");
     }
 
     #[test]

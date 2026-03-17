@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const sessionBaselineMocks = vi.hoisted(() => ({
+  primeGraphSessionBaseline: vi.fn(async () => {}),
+  resetGraphSessionState: vi.fn(),
+}));
+
 vi.mock("./OverviewPane", () => ({
   createOverviewPane: () => {
     const el = document.createElement("div");
@@ -17,6 +22,8 @@ vi.mock("./GraphPane", () => ({
   },
 }));
 
+vi.mock("../graph/sessionBaseline", () => sessionBaselineMocks);
+
 import { appState } from "../state/store";
 import { createInvestigationPane } from "./InvestigationPane";
 
@@ -31,6 +38,8 @@ describe("createInvestigationPane", () => {
   });
 
   afterEach(() => {
+    sessionBaselineMocks.primeGraphSessionBaseline.mockClear();
+    sessionBaselineMocks.resetGraphSessionState.mockClear();
     appState.set(originalState);
     document.body.innerHTML = "";
   });
@@ -60,5 +69,33 @@ describe("createInvestigationPane", () => {
     expect(
       pane.querySelector(".investigation-tab.active")?.textContent,
     ).toBe("Graph");
+  });
+
+  it("primes the graph session baseline before the graph is mounted", () => {
+    const pane = createInvestigationPane();
+    document.body.appendChild(pane);
+
+    window.dispatchEvent(new CustomEvent("session-changed", { detail: { isNew: true } }));
+
+    expect(sessionBaselineMocks.resetGraphSessionState).toHaveBeenCalledWith(true);
+    expect(sessionBaselineMocks.primeGraphSessionBaseline).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers baseline priming to the mounted graph pane once it exists", () => {
+    const pane = createInvestigationPane();
+    document.body.appendChild(pane);
+
+    const graphTab = Array.from(
+      pane.querySelectorAll(".investigation-tab"),
+    ).find((button) => button.textContent === "Graph") as HTMLButtonElement;
+    graphTab.click();
+
+    sessionBaselineMocks.primeGraphSessionBaseline.mockClear();
+    sessionBaselineMocks.resetGraphSessionState.mockClear();
+
+    window.dispatchEvent(new CustomEvent("session-changed", { detail: { isNew: false } }));
+
+    expect(sessionBaselineMocks.resetGraphSessionState).not.toHaveBeenCalled();
+    expect(sessionBaselineMocks.primeGraphSessionBaseline).not.toHaveBeenCalled();
   });
 });

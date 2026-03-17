@@ -1,4 +1,8 @@
 import { appState } from "../state/store";
+import {
+  primeGraphSessionBaseline,
+  resetGraphSessionState,
+} from "../graph/sessionBaseline";
 import { createGraphPane } from "./GraphPane";
 import { createOverviewPane } from "./OverviewPane";
 
@@ -73,6 +77,15 @@ export function createInvestigationPane(): HTMLElement {
   appState.subscribe((state) => {
     updateActiveTab(state.investigationViewTab);
   });
+
+  window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean }>) => {
+    if (graphPane) {
+      return;
+    }
+
+    resetGraphSessionState(e.detail?.isNew ?? false);
+    void primeGraphSessionBaseline();
+  }) as EventListener);
 
   tabs.append(overviewTab, graphTab);
   pane.append(tabs, content);
