@@ -68,8 +68,11 @@ describe("appState", () => {
     expect(state.messages).toEqual([]);
     expect(state.reasoningEffort).toBeNull();
     expect(state.recursive).toBe(true);
+    expect(state.recursionPolicy).toBe("auto");
+    expect(state.minSubtaskDepth).toBe(0);
     expect(state.maxDepth).toBe(4);
     expect(state.maxStepsPerCall).toBe(100);
+    expect(state.currentConversationPath).toBeNull();
     expect(state.inputQueue).toEqual([]);
     expect(state.initGateState).toBe("ready");
     expect(state.isInitBusy).toBe(false);

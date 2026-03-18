@@ -402,7 +402,7 @@ export function createChatPane(): HTMLElement {
   }
 
   function renderStepSummaryEl(el: HTMLElement, msg: ChatMessage) {
-    // Header line: timestamp  Step N  ·  Xk in / Yk out
+    // Header line: timestamp  Depth N  ·  Path X  ·  Step N  ·  Xk in / Yk out
     const header = document.createElement("div");
     header.className = "step-header-line";
     const ts = new Date(msg.timestamp);
@@ -413,7 +413,11 @@ export function createChatPane(): HTMLElement {
     ].join(":");
     const inK = ((msg.stepTokensIn || 0) / 1000).toFixed(1);
     const outK = ((msg.stepTokensOut || 0) / 1000).toFixed(1);
-    header.textContent = `${timeStr}  Step ${msg.stepNumber || "?"}  ·  ${inK}k in / ${outK}k out`;
+    const stepDepth = msg.stepDepth ?? 0;
+    const conversationPath = msg.conversationPath ?? "0";
+    header.textContent =
+      `${timeStr}  Depth ${stepDepth}  ·  Path ${conversationPath}  ·  ` +
+      `Step ${msg.stepNumber || "?"}  ·  ${inK}k in / ${outK}k out`;
     el.appendChild(header);
 
     // Model text preview (if any)
@@ -574,6 +578,8 @@ export function createChatPane(): HTMLElement {
           content: "",
           timestamp: now,
           stepNumber: event.step,
+          stepDepth: event.depth,
+          conversationPath: event.conversation_path ?? "0",
           stepTokensIn: event.tokens.input_tokens,
           stepTokensOut: event.tokens.output_tokens,
           stepElapsed: stepElapsed,

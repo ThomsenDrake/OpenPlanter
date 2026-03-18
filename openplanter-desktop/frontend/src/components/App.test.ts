@@ -104,6 +104,9 @@ describe("createApp", () => {
     expect(settings!.textContent).toContain("glm-5");
     expect(settings!.textContent).toContain("coding");
     expect(settings!.textContent).toContain("firecrawl");
+    expect(settings!.textContent).toContain("recursive (auto)");
+    expect(settings!.textContent).toContain("min subtask depth:");
+    expect(settings!.textContent).toContain("max depth:");
   });
 
   it("renders credential status", async () => {

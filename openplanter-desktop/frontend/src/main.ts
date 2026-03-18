@@ -22,6 +22,17 @@ const SPLASH_ART = [
   " \\___/          |_|                                                    \\___/ ",
 ].join("\n");
 
+function formatRecursionMode(state: {
+  recursive: boolean;
+  recursionPolicy: string;
+  minSubtaskDepth: number;
+  maxDepth: number;
+}): string {
+  if (!state.recursive) return "flat";
+  const policy = state.recursionPolicy.replace(/_/g, "-");
+  return `recursive:${policy} min:${state.minSubtaskDepth} max:${state.maxDepth}`;
+}
+
 async function init() {
   const app = document.getElementById("app")!;
   createApp(app);
@@ -52,7 +63,9 @@ async function init() {
       sessionId: config.session_id,
       reasoningEffort: config.reasoning_effort,
       recursive: config.recursive,
+      recursionPolicy: config.recursion_policy,
       workspace: config.workspace,
+      minSubtaskDepth: config.min_subtask_depth,
       maxDepth: config.max_depth,
       maxStepsPerCall: config.max_steps_per_call,
       initStatus,
@@ -66,7 +79,7 @@ async function init() {
   // Add splash art and startup info (session created lazily on first message)
   const state = appState.get();
   const reasoningLabel = state.reasoningEffort ?? "off";
-  const modeLabel = state.recursive ? "recursive" : "flat";
+  const modeLabel = formatRecursionMode(state);
 
   appState.update((s) => ({
     ...s,
@@ -125,6 +138,7 @@ async function init() {
       outputTokens: s.outputTokens + event.tokens.output_tokens,
       currentStep: event.step,
       currentDepth: event.depth,
+      currentConversationPath: event.conversation_path ?? s.currentConversationPath,
       lastLoopMetrics: event.loop_metrics ?? s.lastLoopMetrics,
     }));
 
@@ -143,6 +157,7 @@ async function init() {
       isRunning: false,
       currentStep: 0,
       currentDepth: 0,
+      currentConversationPath: null,
       loopHealth: null,
       lastLoopMetrics: event.loop_metrics ?? s.lastLoopMetrics,
       lastCompletion: event.completion ?? null,
@@ -181,6 +196,7 @@ async function init() {
       isRunning: false,
       currentStep: 0,
       currentDepth: 0,
+      currentConversationPath: null,
       loopHealth: null,
       lastCompletion: null,
       messages: [
@@ -213,7 +229,10 @@ async function init() {
   await onLoopHealth((event) => {
     appState.update((s) => ({
       ...s,
+      currentStep: event.step,
+      currentDepth: event.depth,
       loopHealth: event,
+      currentConversationPath: event.conversation_path ?? s.currentConversationPath,
       lastLoopMetrics: event.metrics,
     }));
   });

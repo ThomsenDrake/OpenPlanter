@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
-    normalize_web_search_provider, normalize_zai_plan,
+    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
 };
 
 const VALID_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
@@ -61,6 +61,10 @@ pub struct PersistentSettings {
     pub zai_plan: Option<String>,
     pub web_search_provider: Option<String>,
     pub continuity_mode: Option<String>,
+    pub recursive: Option<bool>,
+    pub recursion_policy: Option<String>,
+    pub min_subtask_depth: Option<i64>,
+    pub max_depth: Option<i64>,
     pub chrome_mcp_enabled: Option<bool>,
     pub chrome_mcp_auto_connect: Option<bool>,
     pub chrome_mcp_browser_url: Option<String>,
@@ -106,6 +110,15 @@ impl PersistentSettings {
             .continuity_mode
             .as_deref()
             .map(|value| normalize_continuity_mode(Some(value)));
+        let recursion_policy = self
+            .recursion_policy
+            .as_deref()
+            .map(|value| normalize_recursion_policy(Some(value)));
+        let max_depth = self.max_depth.map(|value| value.max(0));
+        let min_subtask_depth = self
+            .min_subtask_depth
+            .map(|value| value.max(0))
+            .map(|value| value.min(max_depth.unwrap_or(value)));
         let zai_plan = self
             .zai_plan
             .as_deref()
@@ -130,6 +143,10 @@ impl PersistentSettings {
             zai_plan,
             web_search_provider,
             continuity_mode,
+            recursive: self.recursive,
+            recursion_policy,
+            min_subtask_depth,
+            max_depth,
             chrome_mcp_enabled: self.chrome_mcp_enabled,
             chrome_mcp_auto_connect: self.chrome_mcp_auto_connect,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
@@ -167,6 +184,10 @@ impl PersistentSettings {
         add!(zai_plan, "zai_plan");
         add!(web_search_provider, "web_search_provider");
         add!(continuity_mode, "continuity_mode");
+        add!(recursive, "recursive");
+        add!(recursion_policy, "recursion_policy");
+        add!(min_subtask_depth, "min_subtask_depth");
+        add!(max_depth, "max_depth");
         add!(chrome_mcp_enabled, "chrome_mcp_enabled");
         add!(chrome_mcp_auto_connect, "chrome_mcp_auto_connect");
         add!(chrome_mcp_browser_url, "chrome_mcp_browser_url");
@@ -205,6 +226,10 @@ impl PersistentSettings {
             zai_plan: get_str(obj, "zai_plan"),
             web_search_provider: get_str(obj, "web_search_provider"),
             continuity_mode: get_str(obj, "continuity_mode"),
+            recursive: normalize_bool(obj.get("recursive"))?,
+            recursion_policy: get_str(obj, "recursion_policy"),
+            min_subtask_depth: obj.get("min_subtask_depth").and_then(|value| value.as_i64()),
+            max_depth: obj.get("max_depth").and_then(|value| value.as_i64()),
             chrome_mcp_enabled: normalize_bool(obj.get("chrome_mcp_enabled"))?,
             chrome_mcp_auto_connect: normalize_bool(obj.get("chrome_mcp_auto_connect"))?,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(

@@ -53,6 +53,23 @@ _META_DELIVERABLE_OBJECTIVE_PATTERN = re.compile(
     r"\b(plan(?:ning)?|approach|strategy|outline|spec(?:ification)?|design|roadmap|proposal|review|audit|analysis|analyze|brainstorm)\b",
     re.I,
 )
+_MULTI_PHASE_PATTERNS = (
+    re.compile(r"\b(and then|after|before|first|then|finally)\b", re.I),
+    re.compile(r"\b(compare|cross-reference|cross reference|end-to-end|end to end)\b", re.I),
+)
+_INVESTIGATE_INTENT_PATTERN = re.compile(
+    r"\b(analyze|analysis|inspect|trace|understand|find|investigate|survey|read|search|compare)\b",
+    re.I,
+)
+_MUTATION_INTENT_PATTERN = re.compile(
+    r"\b(write|edit|fix|update|create|implement|verify|patch|modify|build)\b",
+    re.I,
+)
+_MULTI_SURFACE_PATTERNS = (
+    re.compile(r"\b(across|between|multiple files|frontend and backend|backend and frontend)\b", re.I),
+    re.compile(r"\bdataset\s+\w+\s+and\s+\w+\b", re.I),
+)
+_PATHLIKE_TOKEN_PATTERN = re.compile(r"(?:[\w./-]+\.[A-Za-z0-9]+|[/\\][\w./-]+)")
 
 
 def _summarize_args(args: dict[str, Any], max_len: int = 120) -> str:
@@ -132,6 +149,21 @@ def _lowest_tier_model(model_name: str) -> tuple[str, str | None]:
     if "claude" in lower:
         return ("claude-haiku-4-5-20251001", None)
     return (model_name, None)
+
+
+def _objective_requires_auto_recursion(objective: str) -> bool:
+    score = 0
+    lower = objective.lower()
+    if any(pattern.search(lower) for pattern in _MULTI_PHASE_PATTERNS):
+        score += 1
+    if _INVESTIGATE_INTENT_PATTERN.search(lower) and _MUTATION_INTENT_PATTERN.search(lower):
+        score += 1
+    multi_surface = any(pattern.search(lower) for pattern in _MULTI_SURFACE_PATTERNS)
+    if not multi_surface and len(_PATHLIKE_TOKEN_PATTERN.findall(objective)) >= 2:
+        multi_surface = True
+    if multi_surface:
+        score += 1
+    return score >= 2
 
 
 ModelFactory = Callable[[str, str | None], "BaseModel"]
@@ -433,20 +465,58 @@ class RLMEngine:
             )
         self._set_model_tool_defs(self.model, include_subtask=self.config.recursive)
 
-    def _build_tool_defs(self, *, include_subtask: bool) -> list[dict[str, Any]]:
+    def _build_tool_defs(
+        self,
+        *,
+        include_subtask: bool,
+        delegation_only: bool = False,
+    ) -> list[dict[str, Any]]:
         ac = self.config.acceptance_criteria
         dynamic_defs = self.tools.get_chrome_mcp_tool_defs()
         return get_tool_definitions(
             include_subtask=include_subtask,
+            delegation_only=delegation_only,
             include_acceptance_criteria=ac,
             dynamic_defs=dynamic_defs,
         )
 
-    def _set_model_tool_defs(self, model: BaseModel, *, include_subtask: bool) -> list[dict[str, Any]]:
-        tool_defs = self._build_tool_defs(include_subtask=include_subtask)
+    def _set_model_tool_defs(
+        self,
+        model: BaseModel,
+        *,
+        include_subtask: bool,
+        delegation_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        tool_defs = self._build_tool_defs(
+            include_subtask=include_subtask,
+            delegation_only=delegation_only,
+        )
         if hasattr(model, "tool_defs"):
             model.tool_defs = tool_defs
         return tool_defs
+
+    def _required_subtask_depth(self, objective: str) -> int:
+        if not self.config.recursive or self.config.max_depth <= 0:
+            return 0
+        min_depth = min(self.config.min_subtask_depth, self.config.max_depth)
+        if self.config.recursion_policy == "force_max":
+            return self.config.max_depth
+        auto_depth = 0
+        if self.config.max_steps_per_call >= 2 and _objective_requires_auto_recursion(objective):
+            auto_depth = 1
+        return min(self.config.max_depth, max(min_depth, auto_depth))
+
+    def _delegation_policy_message(self, depth: int, required_depth: int) -> str:
+        requirement = (
+            f"Delegation required: recursion policy requires depth {required_depth} "
+            f"before direct work or finalization. Current depth is {depth}. "
+            "Your next action must be exactly one subtask(objective=..., "
+        )
+        if self.config.acceptance_criteria:
+            requirement += 'acceptance_criteria="...").'
+        else:
+            requirement += "...)."
+        return requirement
 
     def cancel(self) -> None:
         """Signal the engine to stop after the current model call or tool."""
@@ -619,6 +689,9 @@ class RLMEngine:
                 "objective": objective,
                 "depth": depth,
                 "max_depth": self.config.max_depth,
+                "recursion_policy": self.config.recursion_policy,
+                "min_subtask_depth": self.config.min_subtask_depth,
+                "required_subtask_depth": self._required_subtask_depth(objective),
                 "max_steps_per_call": self.config.max_steps_per_call,
                 "workspace": str(self.config.workspace),
                 "external_context_summary": context.summary(),
@@ -666,6 +739,8 @@ class RLMEngine:
             if self.config.budget_extension_enabled
             else 0
         )
+        required_depth = self._required_subtask_depth(objective)
+        delegation_requirement_satisfied = depth >= required_depth
 
         self.last_loop_metrics = loop_metrics
 
@@ -681,6 +756,12 @@ class RLMEngine:
             )
 
         for step in range(1, max_total_steps + 1):
+            force_subtask = self.config.recursive and not delegation_requirement_satisfied
+            self._set_model_tool_defs(
+                model,
+                include_subtask=self.config.recursive,
+                delegation_only=force_subtask,
+            )
             if self._cancel.is_set():
                 self._emit(f"[d{depth}] cancelled by user", on_event)
                 loop_metrics["termination_reason"] = "cancelled"
@@ -804,6 +885,23 @@ class RLMEngine:
 
             # No tool calls + text present = final answer
             if not turn.tool_calls and turn.text:
+                if force_subtask:
+                    self._emit(
+                        f"[d{depth}/s{step}] recursion policy blocked shallow final answer; requesting subtask",
+                        on_event,
+                    )
+                    model.append_tool_results(
+                        conversation,
+                        [
+                            ToolResult(
+                                tool_call_id="delegation-floor",
+                                name="system",
+                                content=self._delegation_policy_message(depth, required_depth),
+                                is_error=True,
+                            )
+                        ],
+                    )
+                    continue
                 if self._is_meta_final_text(turn.text, objective):
                     loop_metrics["final_rejections"] += 1
                     self._emit(
@@ -856,6 +954,26 @@ class RLMEngine:
                     content="No tool calls and no text in response. Please use a tool or provide a final answer.",
                 )
                 model.append_tool_results(conversation, [empty_result])
+                continue
+
+            if force_subtask and (
+                len(turn.tool_calls) != 1 or turn.tool_calls[0].name != "subtask"
+            ):
+                self._emit(
+                    f"[d{depth}/s{step}] recursion policy blocked non-subtask action below required depth {required_depth}",
+                    on_event,
+                )
+                model.append_tool_results(
+                    conversation,
+                    [
+                        ToolResult(
+                            tool_call_id="delegation-floor",
+                            name="system",
+                            content=self._delegation_policy_message(depth, required_depth),
+                            is_error=True,
+                        )
+                    ],
+                )
                 continue
 
             # Log tool calls from model
@@ -946,6 +1064,15 @@ class RLMEngine:
                 results.append(r)
                 if is_final_entry and final_answer is None:
                     final_answer = r.content
+
+            if (
+                not delegation_requirement_satisfied
+                and len(turn.tool_calls) == 1
+                and turn.tool_calls[0].name == "subtask"
+                and results
+                and "Subtask result for" in results[0].content
+            ):
+                delegation_requirement_satisfied = True
 
             # Timestamp + step budget + context usage awareness
             if final_answer is None and results:

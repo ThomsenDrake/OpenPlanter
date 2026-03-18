@@ -235,6 +235,13 @@ and conversation, sharing workspace state with the parent.
 == SUBTASK DELEGATION ==
 You can delegate subtasks to lower-tier models to save budget and increase speed.
 
+== RECURSION CONTRACT ==
+- `recursive=false` means flat mode: no delegation tools are available.
+- `recursion_policy=auto` may require one level of delegation for complex, multi-surface tasks.
+- `recursion_policy=force_max` requires delegation until `max_depth` is reached.
+- `min_subtask_depth` is a hard floor in both modes.
+- If your current depth is below the required floor, your next action must be exactly one `subtask(...)`.
+
 Anthropic chain:  opus → sonnet → haiku
 OpenAI chain:     codex@xhigh → @high → @medium → @low
 

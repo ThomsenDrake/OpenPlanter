@@ -49,6 +49,26 @@ const CONTINUITY_MODES: CompletionItem[] = [
   { value: "continue", description: "Force prior-turn continuity", children: SAVE_FLAG },
 ];
 
+const RECURSION_FLAGS: CompletionItem[] = [
+  {
+    value: "--min",
+    description: "Require delegation down to at least this depth",
+    children: [{ value: "<n>", description: "Non-negative minimum depth", children: SAVE_FLAG }],
+  },
+  {
+    value: "--max",
+    description: "Set the maximum recursion depth",
+    children: [{ value: "<n>", description: "Non-negative maximum depth", children: SAVE_FLAG }],
+  },
+  ...SAVE_FLAG,
+];
+
+const RECURSION_MODES: CompletionItem[] = [
+  { value: "flat", description: "Disable recursion", children: RECURSION_FLAGS },
+  { value: "auto", description: "Use heuristic recursion", children: RECURSION_FLAGS },
+  { value: "force-max", description: "Force delegation to max depth", children: RECURSION_FLAGS },
+];
+
 const ZAI_PLANS: CompletionItem[] = [
   { value: "paygo", description: "Use the Z.AI PAYGO endpoint", children: SAVE_FLAG },
   { value: "coding", description: "Use the Z.AI Coding Plan endpoint", children: SAVE_FLAG },
@@ -90,6 +110,11 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
     value: "/continuity",
     description: "Show or switch follow-up continuity mode",
     children: CONTINUITY_MODES,
+  },
+  {
+    value: "/recursion",
+    description: "Show or configure recursion behavior",
+    children: RECURSION_MODES,
   },
   {
     value: "/reasoning",

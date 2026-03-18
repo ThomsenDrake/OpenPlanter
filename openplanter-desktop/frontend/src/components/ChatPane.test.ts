@@ -383,6 +383,7 @@ describe("createChatPane", () => {
         detail: {
           step: 1,
           depth: 0,
+          conversation_path: "0",
           tokens: { input_tokens: 12300, output_tokens: 2100 },
           elapsed_ms: 5000,
           is_final: false,
@@ -400,6 +401,8 @@ describe("createChatPane", () => {
 
     const header = summary!.querySelector(".step-header-line");
     expect(header).not.toBeNull();
+    expect(header!.textContent).toContain("Depth 0");
+    expect(header!.textContent).toContain("Path 0");
     expect(header!.textContent).toContain("Step 1");
     expect(header!.textContent).toContain("12.3k in");
     expect(header!.textContent).toContain("2.1k out");
@@ -457,6 +460,7 @@ describe("createChatPane", () => {
         detail: {
           step: 1,
           depth: 0,
+          conversation_path: "0",
           tokens: { input_tokens: 5000, output_tokens: 200 },
           elapsed_ms: 2000,
           is_final: false,
@@ -607,6 +611,8 @@ Trailing text.`;
           role: "step-summary",
           content: "",
           stepNumber: 1,
+          stepDepth: 0,
+          conversationPath: "0",
           stepTokensIn: 1000,
           stepTokensOut: 500,
           stepElapsed: 1000,
@@ -634,6 +640,8 @@ Trailing text.`;
           role: "step-summary",
           content: "",
           stepNumber: 1,
+          stepDepth: 0,
+          conversationPath: "0",
           stepTokensIn: 1000,
           stepTokensOut: 500,
           stepElapsed: 1000,
@@ -675,6 +683,8 @@ Trailing text.`;
           role: "step-summary",
           content: "",
           stepNumber: 2,
+          stepDepth: 1,
+          conversationPath: "0.1",
           stepTokensIn: 5000,
           stepTokensOut: 1500,
           stepElapsed: 3200,
@@ -691,6 +701,8 @@ Trailing text.`;
     expect(summary).not.toBeNull();
 
     const header = summary!.querySelector(".step-header-line");
+    expect(header!.textContent).toContain("Depth 1");
+    expect(header!.textContent).toContain("Path 0.1");
     expect(header!.textContent).toContain("Step 2");
     expect(header!.textContent).toContain("5.0k in");
     expect(header!.textContent).toContain("1.5k out");

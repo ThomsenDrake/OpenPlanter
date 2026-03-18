@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use chrono::Utc;
+use futures::future::join_all;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +25,7 @@ use crate::events::{
 };
 use crate::model::{BaseModel, Message, ModelTurn, RateLimitError};
 use crate::prompts::build_system_prompt;
+use crate::tools::ToolResult;
 use crate::tools::WorkspaceTools;
 use crate::tools::defs::build_tool_defs;
 
@@ -31,6 +33,7 @@ use self::context::TurnSummary;
 use self::curator::{
     CuratorCheckpoint, CuratorStateDelta, build_state_delta, run_curator_checkpoint,
 };
+use self::judge::{AcceptanceCriteriaJudge, JudgeVerdict};
 
 #[derive(Debug, Clone, Default)]
 pub struct SolveInitialContext {
@@ -141,6 +144,7 @@ pub trait SolveEmitter: Send + Sync {
         &self,
         _depth: u32,
         _step: u32,
+        _conversation_path: Option<String>,
         _phase: LoopPhase,
         _metrics: LoopMetrics,
         _is_final: bool,
@@ -210,12 +214,20 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
         extension_denials_cap: 0,
         termination_reason: "success".into(),
     };
-    emitter.emit_loop_health(0, 1, LoopPhase::Finalize, loop_metrics.clone(), true);
+    emitter.emit_loop_health(
+        0,
+        1,
+        Some("0".to_string()),
+        LoopPhase::Finalize,
+        loop_metrics.clone(),
+        true,
+    );
 
     // Emit step summary
     emitter.emit_step(StepEvent {
         depth: 0,
         step: 1,
+        conversation_path: Some("0".to_string()),
         tool_name: None,
         tokens: TokenUsage {
             input_tokens: 100,
@@ -265,11 +277,12 @@ fn build_initial_user_message(
     objective: &str,
     config: &AgentConfig,
     initial_context: Option<&SolveInitialContext>,
+    depth: u32,
+    conversation_path: &str,
+    required_subtask_depth: u32,
+    executor_mode: bool,
+    recursive_enabled: bool,
 ) -> Result<String, serde_json::Error> {
-    let Some(initial_context) = initial_context else {
-        return Ok(objective.to_string());
-    };
-
     let mut payload = Map::new();
     payload.insert(
         "timestamp".to_string(),
@@ -287,6 +300,32 @@ fn build_initial_user_message(
         "workspace".to_string(),
         Value::String(config.workspace.display().to_string()),
     );
+    payload.insert("depth".to_string(), Value::from(depth));
+    payload.insert(
+        "conversation_path".to_string(),
+        Value::String(conversation_path.to_string()),
+    );
+    payload.insert(
+        "max_depth".to_string(),
+        Value::from(config.max_depth.max(0)),
+    );
+    payload.insert("recursive".to_string(), Value::from(recursive_enabled));
+    payload.insert(
+        "recursion_policy".to_string(),
+        Value::String(config.recursion_policy.clone()),
+    );
+    payload.insert(
+        "min_subtask_depth".to_string(),
+        Value::from(config.min_subtask_depth.clamp(0, config.max_depth)),
+    );
+    payload.insert(
+        "required_subtask_depth".to_string(),
+        Value::from(required_subtask_depth),
+    );
+    payload.insert("executor_mode".to_string(), Value::from(executor_mode));
+    let Some(initial_context) = initial_context else {
+        return serde_json::to_string(&payload);
+    };
     if let Some(session_id) = initial_context
         .session_id
         .as_ref()
@@ -390,7 +429,8 @@ async fn chat_stream_with_rate_limit_retries(
     cancel: &CancellationToken,
     config: &AgentConfig,
     emitter: &dyn SolveEmitter,
-    step: usize,
+    _step: usize,
+    trace_prefix: &str,
 ) -> anyhow::Result<ModelTurn> {
     let max_retries = config.rate_limit_max_retries.max(0) as usize;
     let mut retries = 0usize;
@@ -418,7 +458,7 @@ async fn chat_stream_with_rate_limit_retries(
                         .map(|code| format!(" ({code})"))
                         .unwrap_or_default();
                     emitter.emit_trace(&format!(
-                        "[d0/s{step}] rate limited{provider_code}. Sleeping {delay_sec:.1}s before retry {retries}/{max_retries}..."
+                        "{trace_prefix} rate limited{provider_code}. Sleeping {delay_sec:.1}s before retry {retries}/{max_retries}..."
                     ));
                     if delay_sec > 0.0 {
                         tokio::select! {
@@ -504,6 +544,150 @@ fn is_meta_final_text(text: &str, objective: &str) -> bool {
         return !objective_allows_meta_final(objective);
     }
     false
+}
+
+fn model_tier(model_name: &str, reasoning_effort: Option<&str>) -> i32 {
+    let lower = model_name.to_ascii_lowercase();
+    if lower.contains("opus") {
+        return 1;
+    }
+    if lower.contains("sonnet") {
+        return 2;
+    }
+    if lower.contains("haiku") {
+        return 3;
+    }
+    if lower.starts_with("gpt-5") && lower.contains("codex") {
+        return match reasoning_effort.unwrap_or_default().to_ascii_lowercase().as_str() {
+            "xhigh" => 1,
+            "high" => 2,
+            "medium" => 3,
+            "low" => 4,
+            _ => 2,
+        };
+    }
+    2
+}
+
+fn lowest_tier_model(model_name: &str) -> (String, Option<String>) {
+    let lower = model_name.to_ascii_lowercase();
+    if lower.contains("claude") {
+        return ("claude-haiku-4-5-20251001".to_string(), None);
+    }
+    (model_name.to_string(), None)
+}
+
+fn objective_requires_auto_recursion(objective: &str) -> bool {
+    let lower = objective.to_ascii_lowercase();
+    let mut score = 0;
+
+    if [
+        "and then",
+        "after",
+        "before",
+        "first",
+        "then",
+        "finally",
+        "compare",
+        "cross-reference",
+        "cross reference",
+        "end-to-end",
+        "end to end",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        score += 1;
+    }
+
+    let has_investigate = [
+        "analyze",
+        "analysis",
+        "inspect",
+        "trace",
+        "understand",
+        "find",
+        "investigate",
+        "survey",
+        "read",
+        "search",
+        "compare",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    let has_mutation = [
+        "write",
+        "edit",
+        "fix",
+        "update",
+        "create",
+        "implement",
+        "verify",
+        "patch",
+        "modify",
+        "build",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if has_investigate && has_mutation {
+        score += 1;
+    }
+
+    let mut multi_surface = [
+        "across",
+        "between",
+        "multiple files",
+        "frontend and backend",
+        "backend and frontend",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !multi_surface {
+        let pathlike_tokens = objective
+            .split_whitespace()
+            .filter(|token| token.contains('/') || token.contains('\\') || token.contains('.'))
+            .count();
+        multi_surface = pathlike_tokens >= 2;
+    }
+    if multi_surface {
+        score += 1;
+    }
+
+    score >= 2
+}
+
+fn required_subtask_depth(config: &AgentConfig, objective: &str) -> u32 {
+    if !config.recursive || config.max_depth <= 0 {
+        return 0;
+    }
+    let max_depth = config.max_depth.max(0) as u32;
+    let min_depth = config.min_subtask_depth.clamp(0, config.max_depth) as u32;
+    if config.recursion_policy == "force_max" {
+        return max_depth;
+    }
+    let auto_depth = if config.max_steps_per_call >= 2 && objective_requires_auto_recursion(objective)
+    {
+        1
+    } else {
+        0
+    };
+    std::cmp::min(max_depth, std::cmp::max(min_depth, auto_depth))
+}
+
+fn delegation_policy_message(
+    depth: u32,
+    required_depth: u32,
+    acceptance_criteria_enabled: bool,
+) -> String {
+    let mut message = format!(
+        "Delegation required: recursion policy requires depth {required_depth} before direct work or finalization. Current depth is {depth}. Your next action must be exactly one subtask(objective=..., "
+    );
+    if acceptance_criteria_enabled {
+        message.push_str("acceptance_criteria=\"...\").");
+    } else {
+        message.push_str("...).");
+    }
+    message
 }
 
 fn is_recon_tool(name: &str) -> bool {
@@ -824,6 +1008,714 @@ fn build_partial_completion_text(
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SolveFrameStatus {
+    Final,
+    Partial,
+    Error,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+struct SolveFrameOutcome {
+    status: SolveFrameStatus,
+    result: String,
+    loop_metrics: Option<LoopMetrics>,
+    completion: Option<CompletionMeta>,
+}
+
+impl SolveFrameOutcome {
+    fn final_result(result: String, loop_metrics: LoopMetrics) -> Self {
+        Self {
+            status: SolveFrameStatus::Final,
+            result,
+            loop_metrics: Some(loop_metrics),
+            completion: None,
+        }
+    }
+
+    fn partial(result: String, loop_metrics: LoopMetrics, completion: CompletionMeta) -> Self {
+        Self {
+            status: SolveFrameStatus::Partial,
+            result,
+            loop_metrics: Some(loop_metrics),
+            completion: Some(completion),
+        }
+    }
+
+    fn error(message: String, loop_metrics: Option<LoopMetrics>) -> Self {
+        Self {
+            status: SolveFrameStatus::Error,
+            result: message,
+            loop_metrics,
+            completion: None,
+        }
+    }
+
+    fn cancelled(loop_metrics: Option<LoopMetrics>) -> Self {
+        Self {
+            status: SolveFrameStatus::Cancelled,
+            result: "Cancelled".to_string(),
+            loop_metrics,
+            completion: None,
+        }
+    }
+}
+
+fn judge_acceptance(criteria: &str, output: &str) -> String {
+    let judge = AcceptanceCriteriaJudge::new();
+    let result = judge.evaluate(criteria, output);
+    let verdict = match result.verdict {
+        JudgeVerdict::Pass => "PASS",
+        JudgeVerdict::Fail | JudgeVerdict::Partial => "FAIL",
+    };
+    format!("{verdict}: {}", result.reasoning)
+}
+
+fn build_subtask_config(
+    config: &AgentConfig,
+    current_model_name: &str,
+    current_reasoning_effort: Option<&str>,
+    requested_model: Option<&str>,
+    requested_effort: Option<&str>,
+) -> Result<AgentConfig, String> {
+    let mut child = config.clone();
+    if requested_model.is_none() && requested_effort.is_none() {
+        return Ok(child);
+    }
+
+    let requested_name = requested_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_model_name);
+    let cur_tier = model_tier(current_model_name, current_reasoning_effort);
+    let req_tier = model_tier(requested_name, requested_effort.or(current_reasoning_effort));
+    if req_tier < cur_tier {
+        return Err(format!(
+            "Cannot delegate to higher-tier model (current tier {cur_tier}, requested tier {req_tier}). Use an equal or lower-tier model."
+        ));
+    }
+
+    child.model = requested_name.to_string();
+    if let Some(effort) = requested_effort {
+        let trimmed = effort.trim();
+        child.reasoning_effort = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_ascii_lowercase())
+        };
+    }
+    Ok(child)
+}
+
+fn build_execute_config(config: &AgentConfig, current_model_name: &str) -> AgentConfig {
+    let mut child = config.clone();
+    let (executor_model, executor_effort) = lowest_tier_model(current_model_name);
+    child.model = executor_model;
+    if let Some(effort) = executor_effort {
+        child.reasoning_effort = Some(effort);
+    }
+    child
+}
+
+async fn execute_recursive_tool_call(
+    tool_call: &crate::model::ToolCall,
+    config: &AgentConfig,
+    emitter: &dyn SolveEmitter,
+    cancel: CancellationToken,
+    chrome_mcp: Option<Arc<crate::tools::chrome_mcp::ChromeMcpManager>>,
+    depth: u32,
+    child_path: String,
+    current_model_name: &str,
+    current_reasoning_effort: Option<&str>,
+) -> ToolResult {
+    let args: Value =
+        serde_json::from_str(&tool_call.arguments).unwrap_or(Value::Object(Map::new()));
+    let objective = args
+        .get("objective")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if objective.is_empty() {
+        return ToolResult::error(format!("{} requires objective", tool_call.name));
+    }
+
+    let criteria = args
+        .get("acceptance_criteria")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if config.acceptance_criteria && criteria.is_empty() {
+        return ToolResult::error(format!(
+            "{} requires acceptance_criteria when acceptance criteria mode is enabled. Provide specific, verifiable criteria for judging the result.",
+            tool_call.name
+        ));
+    }
+
+    let max_depth = config.max_depth.max(0) as u32;
+    if depth >= max_depth {
+        return ToolResult::error(format!(
+            "Max recursion depth reached; cannot run {}.",
+            tool_call.name
+        ));
+    }
+
+    let child_config = if tool_call.name == "execute" {
+        build_execute_config(config, current_model_name)
+    } else {
+        match build_subtask_config(
+            config,
+            current_model_name,
+            current_reasoning_effort,
+            args.get("model").and_then(|value| value.as_str()),
+            args.get("reasoning_effort").and_then(|value| value.as_str()),
+        ) {
+            Ok(cfg) => cfg,
+            Err(err) => return ToolResult::error(err),
+        }
+    };
+    let executor_mode = tool_call.name == "execute";
+    let outcome = solve_frame(
+        objective,
+        &child_config,
+        emitter,
+        cancel,
+        None,
+        chrome_mcp,
+        depth + 1,
+        child_path,
+        executor_mode,
+    )
+    .await;
+
+    let label = if executor_mode {
+        "Execute result for"
+    } else {
+        "Subtask result for"
+    };
+    let mut observation = format!("{label} '{}':\n{}", objective, outcome.result);
+    if !criteria.is_empty() && config.acceptance_criteria {
+        let verdict = judge_acceptance(&criteria, &outcome.result);
+        let tag = if verdict.starts_with("PASS") {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        observation.push_str(&format!("\n\n[ACCEPTANCE CRITERIA: {tag}]\n{verdict}"));
+    }
+
+    ToolResult::ok(observation)
+}
+
+async fn solve_frame(
+    objective: &str,
+    config: &AgentConfig,
+    emitter: &dyn SolveEmitter,
+    cancel: CancellationToken,
+    initial_context: Option<&SolveInitialContext>,
+    chrome_mcp: Option<Arc<crate::tools::chrome_mcp::ChromeMcpManager>>,
+    depth: u32,
+    conversation_path: String,
+    executor_mode: bool,
+) -> SolveFrameOutcome {
+    let recursive_enabled = config.recursive && !executor_mode;
+    let required_depth = required_subtask_depth(config, objective);
+    let mut delegation_requirement_satisfied = depth >= required_depth;
+
+    let model = match build_model(config) {
+        Ok(model) => model,
+        Err(err) => return SolveFrameOutcome::error(err.to_string(), None),
+    };
+    let provider = model.provider_name().to_string();
+    let current_model_name = model.model_name().to_string();
+    let current_reasoning_effort = config.reasoning_effort.as_deref();
+    emitter.emit_trace(&format!(
+        "[d{depth}/{conversation_path}] solving with {}/{}",
+        provider, current_model_name
+    ));
+
+    let dynamic_tool_defs = if let Some(manager) = chrome_mcp.as_ref() {
+        match manager.list_tools(false).await {
+            Ok(defs) => defs,
+            Err(err) => {
+                emitter.emit_trace(&format!(
+                    "[d{depth}/{conversation_path}] [chrome-mcp] unavailable; continuing with built-in tools only: {err}"
+                ));
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut tools = WorkspaceTools::new(config, chrome_mcp.clone());
+
+    let system_prompt =
+        build_system_prompt(recursive_enabled, config.acceptance_criteria, config.demo);
+    let initial_user_message = match build_initial_user_message(
+        objective,
+        config,
+        initial_context,
+        depth,
+        &conversation_path,
+        required_depth,
+        executor_mode,
+        recursive_enabled,
+    ) {
+        Ok(message) => message,
+        Err(err) => {
+            emitter.emit_trace(&format!(
+                "[d{depth}/{conversation_path}] failed to serialize initial context; falling back to plain objective: {err}"
+            ));
+            objective.to_string()
+        }
+    };
+    let mut messages = vec![
+        Message::System {
+            content: system_prompt,
+        },
+        Message::User {
+            content: initial_user_message,
+        },
+    ];
+
+    let mut loop_metrics = LoopMetrics::default();
+    let mut last_guardrail_streak = 0u32;
+    let mut active_curator_phase: Option<LoopPhase> = None;
+    let mut pending_curator_deltas: Vec<CuratorStateDelta> = Vec::new();
+    let mut step_records: Vec<StepProgressRecord> = Vec::new();
+    let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
+    let max_total_steps = active_step_budget
+        + if config.budget_extension_enabled {
+            (config.budget_extension_block_steps.max(1) * config.budget_extension_max_blocks.max(0))
+                as usize
+        } else {
+            0
+        };
+    let mut next_child_index = 1u32;
+
+    for step in 1..=max_total_steps {
+        let step_prefix = format!("[d{depth}/{conversation_path}/s{step}]");
+        if cancel.is_cancelled() {
+            tools.cleanup();
+            loop_metrics.termination_reason = "cancelled".into();
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "cancelled",
+                config,
+                &cancel,
+                emitter,
+            )
+            .await;
+            return SolveFrameOutcome::cancelled(Some(loop_metrics));
+        }
+
+        let step_start = std::time::Instant::now();
+        compact_messages(&mut messages, 100_000);
+
+        let force_subtask = recursive_enabled && !delegation_requirement_satisfied;
+        let tool_defs = build_tool_defs(
+            &provider,
+            &dynamic_tool_defs,
+            recursive_enabled,
+            force_subtask,
+            config.acceptance_criteria,
+        );
+        let stream_root = depth == 0;
+        let on_delta = |delta: DeltaEvent| {
+            if stream_root {
+                emitter.emit_delta(delta);
+            }
+        };
+        let turn = match chat_stream_with_rate_limit_retries(
+            model.as_ref(),
+            &messages,
+            &tool_defs,
+            &on_delta,
+            &cancel,
+            config,
+            emitter,
+            step,
+            &step_prefix,
+        )
+        .await
+        {
+            Ok(turn) => turn,
+            Err(err) => {
+                let msg = err.to_string();
+                tools.cleanup();
+                loop_metrics.termination_reason = if msg == "Cancelled" {
+                    "cancelled".into()
+                } else {
+                    "model_error".into()
+                };
+                flush_pending_curator_checkpoint(
+                    &mut pending_curator_deltas,
+                    if msg == "Cancelled" {
+                        "cancelled"
+                    } else {
+                        "model_error"
+                    },
+                    config,
+                    &cancel,
+                    emitter,
+                )
+                .await;
+                if msg == "Cancelled" {
+                    return SolveFrameOutcome::cancelled(Some(loop_metrics));
+                }
+                return SolveFrameOutcome::error(msg, Some(loop_metrics));
+            }
+        };
+
+        loop_metrics.steps = step as u32;
+        loop_metrics.model_turns += 1;
+
+        let tool_calls_opt = if turn.tool_calls.is_empty() {
+            None
+        } else {
+            Some(turn.tool_calls.clone())
+        };
+        messages.push(Message::Assistant {
+            content: turn.text.clone(),
+            tool_calls: tool_calls_opt,
+        });
+
+        if turn.tool_calls.is_empty() {
+            if turn.text.trim().is_empty() {
+                emitter.emit_trace(&format!(
+                    "{step_prefix} empty model response, requesting tool use or concrete final answer"
+                ));
+                messages.push(Message::User {
+                    content: "No tool calls and no final answer were returned. Continue solving: use tools if needed or return the concrete final deliverable.".to_string(),
+                });
+                continue;
+            }
+            if force_subtask {
+                emitter.emit_trace(&format!(
+                    "{step_prefix} recursion policy blocked shallow final answer; requesting subtask"
+                ));
+                messages.push(Message::User {
+                    content: delegation_policy_message(
+                        depth,
+                        required_depth,
+                        config.acceptance_criteria,
+                    ),
+                });
+                continue;
+            }
+            if is_meta_final_text(&turn.text, objective) {
+                loop_metrics.final_rejections += 1;
+                emitter.emit_trace(&format!(
+                    "{step_prefix} rejected meta final answer; requesting concrete deliverable"
+                ));
+                messages.push(Message::User {
+                    content: "Your previous response was process/meta commentary rather than a concrete final answer. Continue solving: use tools if needed and return a direct final deliverable.".to_string(),
+                });
+                continue;
+            }
+            let phase = LoopPhase::Finalize;
+            increment_phase(&mut loop_metrics, &phase);
+            loop_metrics.termination_reason = "success".into();
+            emitter.emit_loop_health(
+                depth,
+                step as u32,
+                Some(conversation_path.clone()),
+                phase.clone(),
+                loop_metrics.clone(),
+                true,
+            );
+            emitter.emit_step(StepEvent {
+                depth,
+                step: step as u32,
+                conversation_path: Some(conversation_path.clone()),
+                tool_name: None,
+                tokens: TokenUsage {
+                    input_tokens: turn.input_tokens,
+                    output_tokens: turn.output_tokens,
+                },
+                elapsed_ms: step_start.elapsed().as_millis() as u64,
+                is_final: true,
+                loop_phase: Some(phase),
+                loop_metrics: Some(loop_metrics.clone()),
+            });
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "finalize",
+                config,
+                &cancel,
+                emitter,
+            )
+            .await;
+            tools.cleanup();
+            return SolveFrameOutcome::final_result(turn.text, loop_metrics);
+        }
+
+        if force_subtask
+            && (turn.tool_calls.len() != 1 || turn.tool_calls[0].name.as_str() != "subtask")
+        {
+            emitter.emit_trace(&format!(
+                "{step_prefix} recursion policy blocked non-subtask action below required depth {required_depth}"
+            ));
+            messages.push(Message::User {
+                content: delegation_policy_message(depth, required_depth, config.acceptance_criteria),
+            });
+            continue;
+        }
+
+        loop_metrics.tool_calls += turn.tool_calls.len() as u32;
+
+        let mut indexed_observations: Vec<(usize, String, String, String, String, bool)> = Vec::new();
+        let mut delegated = Vec::new();
+        for tc in turn.tool_calls.iter().cloned().enumerate() {
+            let (index, tool_call) = tc;
+            if matches!(tool_call.name.as_str(), "subtask" | "execute") {
+                let child_path = format!("{conversation_path}.{}", next_child_index);
+                next_child_index += 1;
+                delegated.push((index, child_path, tool_call));
+                continue;
+            }
+
+            if cancel.is_cancelled() {
+                tools.cleanup();
+                loop_metrics.termination_reason = "cancelled".into();
+                flush_pending_curator_checkpoint(
+                    &mut pending_curator_deltas,
+                    "cancelled",
+                    config,
+                    &cancel,
+                    emitter,
+                )
+                .await;
+                return SolveFrameOutcome::cancelled(Some(loop_metrics));
+            }
+
+            emitter.emit_trace(&format!("{} executing tool: {} ({})", step_prefix, tool_call.name, tool_call.id));
+            let result = tools.execute(&tool_call.name, &tool_call.arguments).await;
+            if result.is_error {
+                emitter.emit_trace(&format!(
+                    "{} tool {} error: {}",
+                    step_prefix,
+                    tool_call.name,
+                    safe_prefix(&result.content, 200)
+                ));
+            }
+            indexed_observations.push((
+                index,
+                tool_call.id,
+                tool_call.name,
+                tool_call.arguments,
+                result.content,
+                result.is_error,
+            ));
+        }
+
+        if !delegated.is_empty() {
+            let delegated_results = join_all(delegated.into_iter().map(|(index, child_path, tool_call)| {
+                let cancel = cancel.clone();
+                let chrome_mcp = chrome_mcp.clone();
+                let current_model_name = current_model_name.clone();
+                async move {
+                    let result = execute_recursive_tool_call(
+                        &tool_call,
+                        config,
+                        emitter,
+                        cancel,
+                        chrome_mcp,
+                        depth,
+                        child_path,
+                        &current_model_name,
+                        current_reasoning_effort,
+                    )
+                    .await;
+                    (
+                        index,
+                        tool_call.id,
+                        tool_call.name,
+                        tool_call.arguments,
+                        result.content,
+                        result.is_error,
+                    )
+                }
+            }))
+            .await;
+            indexed_observations.extend(delegated_results);
+        }
+
+        indexed_observations.sort_by_key(|entry| entry.0);
+        let mut tool_observations = Vec::new();
+        for (_, tool_call_id, tool_name, arguments, content, is_error) in indexed_observations {
+            messages.push(Message::Tool {
+                tool_call_id: tool_call_id.clone(),
+                content: content.clone(),
+            });
+            tool_observations.push((tool_call_id, tool_name, arguments, content, is_error));
+        }
+
+        if !delegation_requirement_satisfied
+            && turn.tool_calls.len() == 1
+            && turn.tool_calls[0].name == "subtask"
+            && tool_observations.first().is_some_and(|(_, _, _, _, is_error)| !*is_error)
+        {
+            delegation_requirement_satisfied = true;
+        }
+
+        let phase = classify_loop_phase(&turn.tool_calls, false);
+        if let Some(checkpoint) = take_curator_phase_checkpoint(
+            &mut pending_curator_deltas,
+            &mut active_curator_phase,
+            phase.clone(),
+        ) {
+            emit_curator_checkpoint(checkpoint, config, &cancel, emitter).await;
+        }
+
+        if let Some(delta) =
+            build_state_delta(step as u32, phase.clone(), objective, &tool_observations)
+        {
+            pending_curator_deltas.push(delta);
+        }
+        if matches!(phase, LoopPhase::Investigate) {
+            loop_metrics.recon_streak += 1;
+        } else {
+            loop_metrics.recon_streak = 0;
+            last_guardrail_streak = 0;
+        }
+        loop_metrics.max_recon_streak =
+            loop_metrics.max_recon_streak.max(loop_metrics.recon_streak);
+        increment_phase(&mut loop_metrics, &phase);
+        if matches!(phase, LoopPhase::Investigate)
+            && should_emit_recon_guardrail(loop_metrics.recon_streak, last_guardrail_streak)
+        {
+            loop_metrics.guardrail_warnings += 1;
+            last_guardrail_streak = loop_metrics.recon_streak;
+            emitter.emit_trace(&format!(
+                "{step_prefix} soft guardrail: multiple consecutive recon steps without artifacts; nudging toward implementation"
+            ));
+            messages.push(Message::User {
+                content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs.".to_string(),
+            });
+        }
+        step_records.push(build_step_progress_record(
+            &turn.tool_calls,
+            &tool_observations,
+            phase.clone(),
+        ));
+        emitter.emit_loop_health(
+            depth,
+            step as u32,
+            Some(conversation_path.clone()),
+            phase.clone(),
+            loop_metrics.clone(),
+            false,
+        );
+        let first_tool = turn.tool_calls.first().map(|tc| tc.name.clone());
+        emitter.emit_step(StepEvent {
+            depth,
+            step: step as u32,
+            conversation_path: Some(conversation_path.clone()),
+            tool_name: first_tool,
+            tokens: TokenUsage {
+                input_tokens: turn.input_tokens,
+                output_tokens: turn.output_tokens,
+            },
+            elapsed_ms: step_start.elapsed().as_millis() as u64,
+            is_final: false,
+            loop_phase: Some(phase),
+            loop_metrics: Some(loop_metrics.clone()),
+        });
+
+        let remaining = active_step_budget.saturating_sub(step);
+        if remaining == active_step_budget / 2 {
+            emitter.emit_trace(&format!(
+                "{step_prefix} step budget: {remaining}/{active_step_budget} steps remaining (50%)"
+            ));
+        } else if remaining == active_step_budget / 4 {
+            emitter.emit_trace(&format!(
+                "{step_prefix} step budget: {remaining}/{active_step_budget} steps remaining (25%)"
+            ));
+        }
+
+        if step >= active_step_budget {
+            let (eligible, evaluation) =
+                evaluate_budget_extension(&step_records, loop_metrics.recon_streak);
+            loop_metrics.extension_eligible_checks += 1;
+            emitter.emit_trace(&format!(
+                "{step_prefix} budget boundary reached: eligible={} evaluation={}",
+                eligible,
+                Value::Object(evaluation.clone())
+            ));
+            let can_extend = config.budget_extension_enabled
+                && loop_metrics.extensions_granted < config.budget_extension_max_blocks as u32
+                && eligible;
+            if can_extend {
+                loop_metrics.extensions_granted += 1;
+                active_step_budget += config.budget_extension_block_steps.max(1) as usize;
+                messages.push(Message::User {
+                    content: "Progress-based budget extension granted. You have a small number of extra steps. Finish the deliverable now and avoid repeating the same loop.".to_string(),
+                });
+                continue;
+            }
+
+            if loop_metrics.extensions_granted >= config.budget_extension_max_blocks as u32 {
+                loop_metrics.extension_denials_cap += 1;
+                loop_metrics.termination_reason = "budget_cap".into();
+            } else {
+                loop_metrics.extension_denials_no_progress += 1;
+                loop_metrics.termination_reason = "budget_no_progress".into();
+            }
+
+            tools.cleanup();
+            flush_pending_curator_checkpoint(
+                &mut pending_curator_deltas,
+                "budget_exhausted",
+                config,
+                &cancel,
+                emitter,
+            )
+            .await;
+            let completion = CompletionMeta {
+                kind: "partial".into(),
+                reason: loop_metrics.termination_reason.clone(),
+                steps_used: loop_metrics.steps,
+                max_steps: active_step_budget as u32,
+                extensions_granted: loop_metrics.extensions_granted,
+                extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
+                extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
+            };
+            return SolveFrameOutcome::partial(
+                build_partial_completion_text(objective, &loop_metrics, &step_records),
+                loop_metrics,
+                completion,
+            );
+        }
+    }
+
+    tools.cleanup();
+    loop_metrics.termination_reason = "budget_cap".into();
+    flush_pending_curator_checkpoint(
+        &mut pending_curator_deltas,
+        "budget_exhausted",
+        config,
+        &cancel,
+        emitter,
+    )
+    .await;
+    let completion = CompletionMeta {
+        kind: "partial".into(),
+        reason: loop_metrics.termination_reason.clone(),
+        steps_used: loop_metrics.steps,
+        max_steps: active_step_budget as u32,
+        extensions_granted: loop_metrics.extensions_granted,
+        extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
+        extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
+    };
+    SolveFrameOutcome::partial(
+        build_partial_completion_text(objective, &loop_metrics, &step_records),
+        loop_metrics,
+        completion,
+    )
+}
+
 /// Real solve flow with a multi-step agentic loop.
 ///
 /// Calls the model with tool definitions. If the model returns tool calls,
@@ -871,400 +1763,29 @@ pub async fn solve_with_initial_context_and_chrome_mcp(
     if config.demo {
         return demo_solve(objective, emitter, cancel).await;
     }
-
-    // 1. Build model
-    let model = match build_model(config) {
-        Ok(m) => m,
-        Err(e) => {
-            emitter.emit_error(&e.to_string());
-            return;
-        }
-    };
-
-    let provider = model.provider_name().to_string();
-    emitter.emit_trace(&format!("Solving with {}/{}", provider, model.model_name()));
-
-    // 2. Build tools and messages
-    let dynamic_tool_defs = if let Some(manager) = chrome_mcp.as_ref() {
-        match manager.list_tools(false).await {
-            Ok(defs) => defs,
-            Err(err) => {
-                emitter.emit_trace(&format!(
-                    "[chrome-mcp] unavailable; continuing with built-in tools only: {err}"
-                ));
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    let tool_defs = build_tool_defs(&provider, &dynamic_tool_defs);
-    let mut tools = WorkspaceTools::new(config, chrome_mcp);
-
-    let system_prompt =
-        build_system_prompt(config.recursive, config.acceptance_criteria, config.demo);
-    let initial_user_message = match build_initial_user_message(
+    let outcome = solve_frame(
         objective,
         config,
-        initial_context.as_ref(),
-    ) {
-        Ok(message) => message,
-        Err(err) => {
-            emitter.emit_trace(&format!(
-                "[solve] failed to serialize initial context; falling back to plain objective: {err}"
-            ));
-            objective.to_string()
-        }
-    };
-    let mut messages = vec![
-        Message::System {
-            content: system_prompt,
-        },
-        Message::User {
-            content: initial_user_message,
-        },
-    ];
-
-    let mut loop_metrics = LoopMetrics::default();
-    let mut last_guardrail_streak = 0u32;
-    let mut active_curator_phase: Option<LoopPhase> = None;
-    let mut pending_curator_deltas: Vec<CuratorStateDelta> = Vec::new();
-    let mut step_records: Vec<StepProgressRecord> = Vec::new();
-    let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
-    let max_total_steps = active_step_budget
-        + if config.budget_extension_enabled {
-            (config.budget_extension_block_steps.max(1) * config.budget_extension_max_blocks.max(0))
-                as usize
-        } else {
-            0
-        };
-
-    // 4. Agentic loop
-    for step in 1..=max_total_steps {
-        if cancel.is_cancelled() {
-            tools.cleanup();
-            loop_metrics.termination_reason = "cancelled".into();
-            flush_pending_curator_checkpoint(
-                &mut pending_curator_deltas,
-                "cancelled",
-                config,
-                &cancel,
-                emitter,
-            )
-            .await;
-            emitter.emit_error("Cancelled");
-            return;
-        }
-
-        let step_start = std::time::Instant::now();
-
-        // Compact context if it's grown too large (~100k token budget)
-        compact_messages(&mut messages, 100_000);
-
-        // Call model with streaming
-        let turn = match chat_stream_with_rate_limit_retries(
-            model.as_ref(),
-            &messages,
-            &tool_defs,
-            &|delta| emitter.emit_delta(delta),
-            &cancel,
-            config,
-            emitter,
-            step,
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                let msg = e.to_string();
-                tools.cleanup();
-                loop_metrics.termination_reason = if msg == "Cancelled" {
-                    "cancelled".into()
-                } else {
-                    "model_error".into()
-                };
-                flush_pending_curator_checkpoint(
-                    &mut pending_curator_deltas,
-                    if msg == "Cancelled" {
-                        "cancelled"
-                    } else {
-                        "model_error"
-                    },
-                    config,
-                    &cancel,
-                    emitter,
-                )
-                .await;
-                if msg == "Cancelled" {
-                    emitter.emit_error("Cancelled");
-                } else {
-                    emitter.emit_error(&msg);
-                }
-                return;
-            }
-        };
-
-        loop_metrics.steps = step as u32;
-        loop_metrics.model_turns += 1;
-
-        // Append assistant message to conversation
-        let tool_calls_opt = if turn.tool_calls.is_empty() {
-            None
-        } else {
-            Some(turn.tool_calls.clone())
-        };
-        messages.push(Message::Assistant {
-            content: turn.text.clone(),
-            tool_calls: tool_calls_opt,
-        });
-
-        // No tool calls → final answer (unless rejected by governance)
-        if turn.tool_calls.is_empty() {
-            if turn.text.trim().is_empty() {
-                emitter.emit_trace(&format!(
-                    "[d0/s{step}] empty model response, requesting tool use or concrete final answer"
-                ));
-                messages.push(Message::User {
-                    content: "No tool calls and no final answer were returned. Continue solving: use tools if needed or return the concrete final deliverable.".to_string(),
-                });
-                continue;
-            }
-            if is_meta_final_text(&turn.text, objective) {
-                loop_metrics.final_rejections += 1;
-                emitter.emit_trace(&format!(
-                    "[d0/s{step}] rejected meta final answer; requesting concrete deliverable"
-                ));
-                messages.push(Message::User {
-                    content: "Your previous response was process/meta commentary rather than a concrete final answer. Continue solving: use tools if needed and return a direct final deliverable.".to_string(),
-                });
-                continue;
-            }
-            let phase = LoopPhase::Finalize;
-            increment_phase(&mut loop_metrics, &phase);
-            loop_metrics.termination_reason = "success".into();
-            emitter.emit_loop_health(0, step as u32, phase.clone(), loop_metrics.clone(), true);
-            let tool_name = None;
-            emitter.emit_step(StepEvent {
-                depth: 0,
-                step: step as u32,
-                tool_name,
-                tokens: TokenUsage {
-                    input_tokens: turn.input_tokens,
-                    output_tokens: turn.output_tokens,
-                },
-                elapsed_ms: step_start.elapsed().as_millis() as u64,
-                is_final: true,
-                loop_phase: Some(phase),
-                loop_metrics: Some(loop_metrics.clone()),
-            });
-            flush_pending_curator_checkpoint(
-                &mut pending_curator_deltas,
-                "finalize",
-                config,
-                &cancel,
-                emitter,
-            )
-            .await;
-            emitter.emit_complete(&turn.text, Some(loop_metrics.clone()), None);
-            tools.cleanup();
-            return;
-        }
-
-        loop_metrics.tool_calls += turn.tool_calls.len() as u32;
-
-        // Execute each tool call and collect results
-        let mut tool_observations: Vec<(String, String, String, String, bool)> = Vec::new();
-        for tc in &turn.tool_calls {
-            if cancel.is_cancelled() {
-                tools.cleanup();
-                flush_pending_curator_checkpoint(
-                    &mut pending_curator_deltas,
-                    "cancelled",
-                    config,
-                    &cancel,
-                    emitter,
-                )
-                .await;
-                emitter.emit_error("Cancelled");
-                return;
-            }
-
-            emitter.emit_trace(&format!("Executing tool: {} ({})", tc.name, tc.id));
-            let result = tools.execute(&tc.name, &tc.arguments).await;
-            let result_content = result.content;
-            let result_is_error = result.is_error;
-
-            if result_is_error {
-                emitter.emit_trace(&format!(
-                    "Tool {} error: {}",
-                    tc.name,
-                    safe_prefix(&result_content, 200)
-                ));
-            }
-
-            messages.push(Message::Tool {
-                tool_call_id: tc.id.clone(),
-                content: result_content.clone(),
-            });
-            tool_observations.push((
-                tc.id.clone(),
-                tc.name.clone(),
-                tc.arguments.clone(),
-                result_content,
-                result_is_error,
-            ));
-        }
-
-        let phase = classify_loop_phase(&turn.tool_calls, false);
-        if let Some(checkpoint) = take_curator_phase_checkpoint(
-            &mut pending_curator_deltas,
-            &mut active_curator_phase,
-            phase.clone(),
-        ) {
-            emit_curator_checkpoint(checkpoint, config, &cancel, emitter).await;
-        }
-
-        if let Some(delta) =
-            build_state_delta(step as u32, phase.clone(), objective, &tool_observations)
-        {
-            pending_curator_deltas.push(delta);
-        }
-        if matches!(phase, LoopPhase::Investigate) {
-            loop_metrics.recon_streak += 1;
-        } else {
-            loop_metrics.recon_streak = 0;
-            last_guardrail_streak = 0;
-        }
-        loop_metrics.max_recon_streak =
-            loop_metrics.max_recon_streak.max(loop_metrics.recon_streak);
-        increment_phase(&mut loop_metrics, &phase);
-        if matches!(phase, LoopPhase::Investigate)
-            && should_emit_recon_guardrail(loop_metrics.recon_streak, last_guardrail_streak)
-        {
-            loop_metrics.guardrail_warnings += 1;
-            last_guardrail_streak = loop_metrics.recon_streak;
-            emitter.emit_trace(&format!(
-                "[d0/s{step}] soft guardrail: multiple consecutive recon steps without artifacts; nudging toward implementation"
-            ));
-            messages.push(Message::User {
-                content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs.".to_string(),
-            });
-        }
-        step_records.push(build_step_progress_record(
-            &turn.tool_calls,
-            &tool_observations,
-            phase.clone(),
-        ));
-        emitter.emit_loop_health(0, step as u32, phase.clone(), loop_metrics.clone(), false);
-
-        // Emit step (non-final) AFTER tools execute so the frontend
-        // can refresh the wiki graph with newly written files.
-        let first_tool = turn.tool_calls.first().map(|tc| tc.name.clone());
-        emitter.emit_step(StepEvent {
-            depth: 0,
-            step: step as u32,
-            tool_name: first_tool,
-            tokens: TokenUsage {
-                input_tokens: turn.input_tokens,
-                output_tokens: turn.output_tokens,
-            },
-            elapsed_ms: step_start.elapsed().as_millis() as u64,
-            is_final: false,
-            loop_phase: Some(phase),
-            loop_metrics: Some(loop_metrics.clone()),
-        });
-
-        // Budget warnings
-        let remaining = active_step_budget.saturating_sub(step);
-        if remaining == active_step_budget / 2 {
-            emitter.emit_trace(&format!(
-                "Step budget: {remaining}/{active_step_budget} steps remaining (50%)"
-            ));
-        } else if remaining == active_step_budget / 4 {
-            emitter.emit_trace(&format!(
-                "Step budget: {remaining}/{active_step_budget} steps remaining (25%)"
-            ));
-        }
-
-        if step >= active_step_budget {
-            let (eligible, evaluation) =
-                evaluate_budget_extension(&step_records, loop_metrics.recon_streak);
-            loop_metrics.extension_eligible_checks += 1;
-            emitter.emit_trace(&format!(
-                "[d0/s{step}] budget boundary reached: eligible={} evaluation={}",
-                eligible,
-                Value::Object(evaluation.clone())
-            ));
-            let can_extend = config.budget_extension_enabled
-                && loop_metrics.extensions_granted < config.budget_extension_max_blocks as u32
-                && eligible;
-            if can_extend {
-                loop_metrics.extensions_granted += 1;
-                active_step_budget += config.budget_extension_block_steps.max(1) as usize;
-                messages.push(Message::User {
-                    content: "Progress-based budget extension granted. You have a small number of extra steps. Finish the deliverable now and avoid repeating the same loop.".to_string(),
-                });
-                continue;
-            }
-
-            if loop_metrics.extensions_granted >= config.budget_extension_max_blocks as u32 {
-                loop_metrics.extension_denials_cap += 1;
-                loop_metrics.termination_reason = "budget_cap".into();
-            } else {
-                loop_metrics.extension_denials_no_progress += 1;
-                loop_metrics.termination_reason = "budget_no_progress".into();
-            }
-
-            tools.cleanup();
-            flush_pending_curator_checkpoint(
-                &mut pending_curator_deltas,
-                "budget_exhausted",
-                config,
-                &cancel,
-                emitter,
-            )
-            .await;
-            emitter.emit_complete(
-                &build_partial_completion_text(objective, &loop_metrics, &step_records),
-                Some(loop_metrics.clone()),
-                Some(CompletionMeta {
-                    kind: "partial".into(),
-                    reason: loop_metrics.termination_reason.clone(),
-                    steps_used: loop_metrics.steps,
-                    max_steps: active_step_budget as u32,
-                    extensions_granted: loop_metrics.extensions_granted,
-                    extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
-                    extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
-                }),
-            );
-            return;
-        }
-    }
-
-    // Budget exhausted
-    tools.cleanup();
-    loop_metrics.termination_reason = "budget_cap".into();
-    flush_pending_curator_checkpoint(
-        &mut pending_curator_deltas,
-        "budget_exhausted",
-        config,
-        &cancel,
         emitter,
+        cancel,
+        initial_context.as_ref(),
+        chrome_mcp,
+        0,
+        "0".to_string(),
+        false,
     )
     .await;
-    emitter.emit_complete(
-        &build_partial_completion_text(objective, &loop_metrics, &step_records),
-        Some(loop_metrics.clone()),
-        Some(CompletionMeta {
-            kind: "partial".into(),
-            reason: loop_metrics.termination_reason.clone(),
-            steps_used: loop_metrics.steps,
-            max_steps: active_step_budget as u32,
-            extensions_granted: loop_metrics.extensions_granted,
-            extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
-            extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
-        }),
-    );
+    match outcome.status {
+        SolveFrameStatus::Final | SolveFrameStatus::Partial => {
+            emitter.emit_complete(
+                &outcome.result,
+                outcome.loop_metrics,
+                outcome.completion,
+            );
+        }
+        SolveFrameStatus::Error => emitter.emit_error(&outcome.result),
+        SolveFrameStatus::Cancelled => emitter.emit_error("Cancelled"),
+    }
 }
 
 #[cfg(test)]
@@ -1747,8 +2268,21 @@ mod tests {
     #[test]
     fn test_build_initial_user_message_preserves_plain_objective_without_context() {
         let config = AgentConfig::default();
-        let message = build_initial_user_message("just objective", &config, None).unwrap();
-        assert_eq!(message, "just objective");
+        let message = build_initial_user_message(
+            "just objective",
+            &config,
+            None,
+            0,
+            "0",
+            0,
+            false,
+            true,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(parsed["objective"], "just objective");
+        assert_eq!(parsed["depth"], 0);
+        assert_eq!(parsed["conversation_path"], "0");
     }
 
     #[test]
@@ -1780,6 +2314,11 @@ mod tests {
                     "evidence_index": {},
                 })),
             }),
+            0,
+            "0",
+            1,
+            false,
+            true,
         )
         .unwrap();
 
@@ -1806,6 +2345,7 @@ mod tests {
             parsed["max_steps_per_call"],
             Value::from(config.max_steps_per_call)
         );
+        assert_eq!(parsed["required_subtask_depth"], 1);
     }
 
     #[test]
@@ -1822,6 +2362,11 @@ mod tests {
                 continuity_reason: None,
                 question_reasoning_packet: None,
             }),
+            0,
+            "0",
+            0,
+            false,
+            true,
         )
         .unwrap();
 
@@ -1854,6 +2399,11 @@ mod tests {
                 continuity_reason: Some("follow_up_cue".to_string()),
                 question_reasoning_packet: None,
             }),
+            0,
+            "0",
+            0,
+            false,
+            true,
         )
         .unwrap();
 
@@ -1885,6 +2435,11 @@ mod tests {
                 continuity_reason: None,
                 question_reasoning_packet: None,
             }),
+            0,
+            "0",
+            0,
+            false,
+            true,
         )
         .unwrap();
 

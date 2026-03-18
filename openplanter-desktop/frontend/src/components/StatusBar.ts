@@ -1,6 +1,11 @@
 /** Status bar: model, provider, tokens, reasoning, mode, session. */
 import { appState } from "../state/store";
 
+function formatModeLabel(recursive: boolean, policy: string, minDepth: number, maxDepth: number): string {
+  if (!recursive) return "flat";
+  return `recursive:${policy.replace(/_/g, "-")} min:${minDepth} max:${maxDepth}`;
+}
+
 export function createStatusBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.className = "status-bar";
@@ -48,22 +53,29 @@ export function createStatusBar(): HTMLElement {
     zaiPlanEl.textContent =
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
-    modeEl.textContent = s.recursive ? "recursive" : "flat";
+    modeEl.textContent = formatModeLabel(
+      s.recursive,
+      s.recursionPolicy,
+      s.minSubtaskDepth,
+      s.maxDepth,
+    );
     sessionEl.textContent = s.sessionId ? `session ${s.sessionId.slice(0, 8)}` : "";
 
     if (s.isRunning && s.currentStep > 0) {
       const health = s.loopHealth;
+      const path = health?.conversation_path ?? s.currentConversationPath;
+      const pathText = path ? ` path ${path}` : "";
       if (health) {
         const guardrailText =
           health.metrics.guardrail_warnings > 0
             ? ` guard:${health.metrics.guardrail_warnings}`
             : "";
         sessionEl.textContent =
-          `step ${s.currentStep} depth ${s.currentDepth} ` +
+          `step ${s.currentStep} depth ${s.currentDepth}${pathText} ` +
           `${health.phase} recon:${health.metrics.recon_streak} ` +
           `reject:${health.metrics.final_rejections}${guardrailText}`;
       } else {
-        sessionEl.textContent = `step ${s.currentStep} depth ${s.currentDepth}`;
+        sessionEl.textContent = `step ${s.currentStep} depth ${s.currentDepth}${pathText}`;
       }
     }
 

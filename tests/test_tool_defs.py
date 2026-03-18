@@ -50,11 +50,11 @@ class GetToolDefinitionsTests(unittest.TestCase):
         defs = get_tool_definitions(include_subtask=True)
         names = [d["name"] for d in defs]
         self.assertIn("subtask", names)
-        self.assertNotIn("execute", names)
+        self.assertIn("execute", names)
         self.assertNotIn("list_artifacts", names)
         self.assertNotIn("read_artifact", names)
-        # Excludes execute, list_artifacts, read_artifact (3).
-        self.assertEqual(len(defs), len(TOOL_DEFINITIONS) - 3)
+        # Excludes list_artifacts, read_artifact (2).
+        self.assertEqual(len(defs), len(TOOL_DEFINITIONS) - 2)
 
     def test_include_subtask_false(self) -> None:
         defs = get_tool_definitions(include_subtask=False)
@@ -70,6 +70,11 @@ class GetToolDefinitionsTests(unittest.TestCase):
         defs = get_tool_definitions()
         names = [d["name"] for d in defs]
         self.assertIn("subtask", names)
+        self.assertIn("execute", names)
+
+    def test_delegation_only_includes_only_subtask(self) -> None:
+        defs = get_tool_definitions(include_subtask=True, delegation_only=True)
+        self.assertEqual([d["name"] for d in defs], ["subtask"])
 
     def test_dynamic_defs_are_merged(self) -> None:
         defs = get_tool_definitions(

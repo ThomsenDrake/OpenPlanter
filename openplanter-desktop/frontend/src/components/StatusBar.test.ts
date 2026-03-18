@@ -77,7 +77,7 @@ describe("createStatusBar", () => {
   it("renders recursive mode", () => {
     appState.update((s) => ({ ...s, recursive: true }));
     const bar = createStatusBar();
-    expect(bar.querySelector(".mode")!.textContent).toBe("recursive");
+    expect(bar.querySelector(".mode")!.textContent).toBe("recursive:auto min:0 max:4");
   });
 
   it("renders flat mode", () => {
@@ -113,6 +113,7 @@ describe("createStatusBar", () => {
       loopHealth: {
         depth: 0,
         step: 4,
+        conversation_path: "0",
         phase: "investigate",
         metrics: {
           steps: 4,
@@ -137,7 +138,7 @@ describe("createStatusBar", () => {
     }));
     const bar = createStatusBar();
     expect(bar.querySelector(".session")!.textContent).toBe(
-      "step 4 depth 0 investigate recon:3 reject:2 guard:1"
+      "step 4 depth 0 path 0 investigate recon:3 reject:2 guard:1"
     );
   });
 

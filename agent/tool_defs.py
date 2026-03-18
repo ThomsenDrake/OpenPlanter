@@ -533,19 +533,23 @@ def _strip_acceptance_criteria(defs: list[dict[str, Any]]) -> list[dict[str, Any
 
 def get_tool_definitions(
     include_subtask: bool = True,
+    delegation_only: bool = False,
     include_artifacts: bool = False,
     include_acceptance_criteria: bool = False,
     dynamic_defs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return tool definitions based on mode.
 
-    - ``include_subtask=True`` (normal recursive) → everything except execute, artifact tools.
+    - ``include_subtask=True`` (normal recursive) → everything except artifact tools.
     - ``include_subtask=False`` (flat / executor) → no subtask, no execute, no artifact tools.
+    - ``delegation_only=True`` → only subtask (no execute, no artifact tools).
     - ``include_artifacts=True`` → add list_artifacts + read_artifact.
     - ``include_acceptance_criteria=False`` → strip acceptance_criteria from schemas.
     """
-    if include_subtask:
-        defs = [d for d in TOOL_DEFINITIONS if d["name"] not in ("execute",) and d["name"] not in _ARTIFACT_TOOLS]
+    if delegation_only:
+        defs = [d for d in TOOL_DEFINITIONS if d["name"] == "subtask"]
+    elif include_subtask:
+        defs = [d for d in TOOL_DEFINITIONS if d["name"] not in _ARTIFACT_TOOLS]
     else:
         defs = [d for d in TOOL_DEFINITIONS if d["name"] not in _DELEGATION_TOOLS]
 

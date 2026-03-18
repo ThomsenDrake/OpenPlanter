@@ -1,7 +1,8 @@
 use crate::state::AppState;
 use op_core::config::{
     has_openai_auth, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-    normalize_continuity_mode, normalize_web_search_provider, normalize_zai_plan,
+    normalize_continuity_mode, normalize_recursion_policy, normalize_web_search_provider,
+    normalize_zai_plan,
     resolve_zai_base_url,
 };
 use op_core::credentials::credentials_from_env;
@@ -34,6 +35,8 @@ async fn make_config_view(
         workspace: cfg.workspace.display().to_string(),
         session_id,
         recursive: cfg.recursive,
+        recursion_policy: cfg.recursion_policy.clone(),
+        min_subtask_depth: cfg.min_subtask_depth,
         max_depth: cfg.max_depth,
         max_steps_per_call: cfg.max_steps_per_call,
         demo: cfg.demo,
@@ -70,6 +73,10 @@ fn merge_settings(
             .web_search_provider
             .or(existing.web_search_provider),
         continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
+        recursive: incoming.recursive.or(existing.recursive),
+        recursion_policy: incoming.recursion_policy.or(existing.recursion_policy),
+        min_subtask_depth: incoming.min_subtask_depth.or(existing.min_subtask_depth),
+        max_depth: incoming.max_depth.or(existing.max_depth),
         chrome_mcp_enabled: incoming.chrome_mcp_enabled.or(existing.chrome_mcp_enabled),
         chrome_mcp_auto_connect: incoming
             .chrome_mcp_auto_connect
@@ -128,6 +135,19 @@ pub async fn update_config(
     }
     if let Some(mode) = partial.continuity_mode {
         cfg.continuity_mode = normalize_continuity_mode(Some(&mode));
+    }
+    if let Some(recursive) = partial.recursive {
+        cfg.recursive = recursive;
+    }
+    if let Some(policy) = partial.recursion_policy {
+        cfg.recursion_policy = normalize_recursion_policy(Some(&policy));
+    }
+    if let Some(max_depth) = partial.max_depth {
+        cfg.max_depth = max_depth.max(0);
+        cfg.min_subtask_depth = cfg.min_subtask_depth.clamp(0, cfg.max_depth);
+    }
+    if let Some(min_subtask_depth) = partial.min_subtask_depth {
+        cfg.min_subtask_depth = min_subtask_depth.clamp(0, cfg.max_depth);
     }
     if let Some(enabled) = partial.chrome_mcp_enabled {
         cfg.chrome_mcp_enabled = enabled;

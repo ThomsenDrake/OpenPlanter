@@ -139,6 +139,7 @@ impl SolveEmitter for TauriEmitter {
         &self,
         depth: u32,
         step: u32,
+        conversation_path: Option<String>,
         phase: LoopPhase,
         metrics: LoopMetrics,
         is_final: bool,
@@ -148,6 +149,7 @@ impl SolveEmitter for TauriEmitter {
             LoopHealthEvent {
                 depth,
                 step,
+                conversation_path,
                 phase,
                 metrics,
                 is_final,
@@ -369,6 +371,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: None,
             step_number: Some(event.step),
+            step_depth: Some(event.depth),
+            conversation_path: event.conversation_path.clone(),
             step_tokens_in: Some(event.tokens.input_tokens),
             step_tokens_out: Some(event.tokens.output_tokens),
             step_elapsed: Some(event.elapsed_ms),
@@ -419,6 +423,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: Some(true),
             step_number: None,
+            step_depth: None,
+            conversation_path: None,
             step_tokens_in: None,
             step_tokens_out: None,
             step_elapsed: None,
@@ -447,12 +453,13 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         &self,
         depth: u32,
         step: u32,
+        conversation_path: Option<String>,
         phase: LoopPhase,
         metrics: LoopMetrics,
         is_final: bool,
     ) {
         self.inner
-            .emit_loop_health(depth, step, phase, metrics, is_final);
+            .emit_loop_health(depth, step, conversation_path, phase, metrics, is_final);
     }
 
     fn emit_curator_update(&self, summary: &str, files_changed: u32) {
@@ -465,6 +472,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: None,
             step_number: None,
+            step_depth: None,
+            conversation_path: None,
             step_tokens_in: None,
             step_tokens_out: None,
             step_elapsed: None,
@@ -568,6 +577,8 @@ mod tests {
                 tool_name: None,
                 is_rendered: None,
                 step_number: None,
+                step_depth: None,
+                conversation_path: None,
                 step_tokens_in: None,
                 step_tokens_out: None,
                 step_elapsed: None,
@@ -637,6 +648,7 @@ mod tests {
         emitter.emit_step(StepEvent {
             depth: 0,
             step: 1,
+            conversation_path: Some("0".into()),
             tool_name: None,
             tokens: Default::default(),
             elapsed_ms: 1,
@@ -687,6 +699,7 @@ mod tests {
         emitter.emit_step(StepEvent {
             depth: 0,
             step: 1,
+            conversation_path: Some("0".into()),
             tool_name: Some("read_file".into()),
             tokens: Default::default(),
             elapsed_ms: 1,

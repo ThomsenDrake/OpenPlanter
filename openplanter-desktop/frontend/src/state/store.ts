@@ -66,6 +66,8 @@ export interface ChatMessage {
   stepElapsed?: number;
   stepToolCalls?: StepToolCall[];
   stepModelPreview?: string;
+  stepDepth?: number;
+  conversationPath?: string;
 }
 
 export interface AppState {
@@ -89,11 +91,14 @@ export interface AppState {
   messages: ChatMessage[];
   reasoningEffort: string | null;
   recursive: boolean;
+  recursionPolicy: string;
   workspace: string;
+  minSubtaskDepth: number;
   maxDepth: number;
   maxStepsPerCall: number;
   currentStep: number;
   currentDepth: number;
+  currentConversationPath: string | null;
   loopHealth: LoopHealthEvent | null;
   lastLoopMetrics: LoopMetrics | null;
   lastCompletion: CompletionMeta | null;
@@ -134,11 +139,14 @@ export const appState = new Store<AppState>({
   messages: [],
   reasoningEffort: null,
   recursive: true,
+  recursionPolicy: "auto",
   workspace: "",
+  minSubtaskDepth: 0,
   maxDepth: 4,
   maxStepsPerCall: 100,
   currentStep: 0,
   currentDepth: 0,
+  currentConversationPath: null,
   loopHealth: null,
   lastLoopMetrics: null,
   lastCompletion: null,

@@ -32,11 +32,20 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "ollama": "llama3.2",
 }
 
+VALID_RECURSION_POLICIES: set[str] = {"auto", "force_max"}
+
 def normalize_zai_plan(value: str | None) -> str:
     text = (value or "").strip().lower()
     if text in {"paygo", "coding"}:
         return text
     return "paygo"
+
+
+def normalize_recursion_policy(value: str | None) -> str:
+    cleaned = (value or "").strip().lower()
+    if cleaned in VALID_RECURSION_POLICIES:
+        return cleaned
+    return "auto"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -193,6 +202,7 @@ class AgentConfig:
     rate_limit_backoff_max_sec: float = 60.0
     rate_limit_retry_after_cap_sec: float = 120.0
     recursive: bool = True
+    recursion_policy: str = "auto"
     min_subtask_depth: int = 0
     acceptance_criteria: bool = True
     max_plan_chars: int = 40_000
@@ -219,6 +229,9 @@ class AgentConfig:
         self.chrome_mcp_channel = normalize_chrome_mcp_channel(self.chrome_mcp_channel)
         self.chrome_mcp_connect_timeout_sec = max(1, int(self.chrome_mcp_connect_timeout_sec))
         self.chrome_mcp_rpc_timeout_sec = max(1, int(self.chrome_mcp_rpc_timeout_sec))
+        self.recursion_policy = normalize_recursion_policy(self.recursion_policy)
+        self.max_depth = max(0, int(self.max_depth))
+        self.min_subtask_depth = max(0, min(int(self.min_subtask_depth), self.max_depth))
 
     @classmethod
     def from_env(cls, workspace: str | Path) -> "AgentConfig":
@@ -397,6 +410,9 @@ class AgentConfig:
             rate_limit_backoff_max_sec=float(os.getenv("OPENPLANTER_RATE_LIMIT_BACKOFF_MAX_SEC", "60.0")),
             rate_limit_retry_after_cap_sec=float(os.getenv("OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC", "120.0")),
             recursive=os.getenv("OPENPLANTER_RECURSIVE", "true").strip().lower() in ("1", "true", "yes"),
+            recursion_policy=normalize_recursion_policy(
+                os.getenv("OPENPLANTER_RECURSION_POLICY", "auto")
+            ),
             min_subtask_depth=int(os.getenv("OPENPLANTER_MIN_SUBTASK_DEPTH", "0")),
             acceptance_criteria=os.getenv("OPENPLANTER_ACCEPTANCE_CRITERIA", "true").strip().lower() in ("1", "true", "yes"),
             max_plan_chars=int(os.getenv("OPENPLANTER_MAX_PLAN_CHARS", "40000")),

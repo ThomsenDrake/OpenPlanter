@@ -2,7 +2,8 @@ use std::env;
 
 use crate::config::{
     AgentConfig, FOUNDRY_OPENAI_API_KEY_PLACEHOLDER, normalize_continuity_mode,
-    normalize_web_search_provider, normalize_zai_plan, resolve_openai_api_key,
+    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
+    resolve_openai_api_key,
     resolve_zai_base_url,
 };
 use crate::credentials::CredentialBundle;
@@ -108,6 +109,32 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
         if let Some(mode) = settings.continuity_mode.as_deref() {
             cfg.continuity_mode = normalize_continuity_mode(Some(mode));
         }
+    }
+
+    if !has_env_value(&["OPENPLANTER_RECURSIVE"]) {
+        if let Some(recursive) = settings.recursive {
+            cfg.recursive = recursive;
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_RECURSION_POLICY"]) {
+        if let Some(policy) = settings.recursion_policy.as_deref() {
+            cfg.recursion_policy = normalize_recursion_policy(Some(policy));
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_MAX_DEPTH"]) {
+        if let Some(max_depth) = settings.max_depth {
+            cfg.max_depth = max_depth.max(0);
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_MIN_SUBTASK_DEPTH"]) {
+        if let Some(min_depth) = settings.min_subtask_depth {
+            cfg.min_subtask_depth = min_depth.clamp(0, cfg.max_depth);
+        }
+    } else {
+        cfg.min_subtask_depth = cfg.min_subtask_depth.clamp(0, cfg.max_depth);
     }
 
     if !has_env_value(&["OPENPLANTER_CHROME_MCP_ENABLED"]) {
