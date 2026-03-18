@@ -1189,9 +1189,11 @@ pub async fn audio_transcribe(
 mod tests {
     use super::*;
     use axum::{Json, Router, body::Bytes, routing::post};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use tempfile::tempdir;
     use tokio::net::TcpListener;
+
+    static PATH_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     async fn capture_transcription(body: Bytes) -> Json<Value> {
         Json(json!({
@@ -1344,6 +1346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_transcribe_chunks_oversize_audio() {
+        let _path_guard = PATH_TEST_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         install_fake_media_tools(dir.path());
         let original_path = std::env::var_os("PATH");
@@ -1436,6 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_transcribe_preserves_byte_budgeted_chunk_size() {
+        let _path_guard = PATH_TEST_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         install_budget_sensitive_media_tools(dir.path(), 35.0);
         let original_path = std::env::var_os("PATH");

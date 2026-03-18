@@ -58,7 +58,8 @@ describe("createApp", () => {
     __setHandler("list_sessions", () => [SESSION_B, SESSION_A]);
     __setHandler("get_credentials_status", () => ({
       openai: true, anthropic: true, openrouter: false,
-      cerebras: false, zai: true, ollama: true, exa: false, firecrawl: true, brave: false, tavily: true, voyage: true, mistral_transcription: true,
+      cerebras: false, zai: true, ollama: true, exa: false, firecrawl: true, brave: false, tavily: true, voyage: true,
+      mistral: true, mistral_document_ai: false, mistral_transcription: true,
     }));
     __setHandler("open_session", () => ({
       id: "20260227-120000-cccc3333",
@@ -68,6 +69,36 @@ describe("createApp", () => {
     }));
     __setHandler("delete_session", () => {});
     __setHandler("get_session_history", () => []);
+    __setHandler("update_config", ({ partial }: any) => ({
+      provider: "anthropic",
+      model: "anthropic-foundry/claude-opus-4-6",
+      reasoning_effort: null,
+      zai_plan: "paygo",
+      web_search_provider: "exa",
+      continuity_mode: "auto",
+      mistral_document_ai_use_shared_key:
+        partial.mistral_document_ai_use_shared_key ?? true,
+      chrome_mcp_enabled: false,
+      chrome_mcp_auto_connect: true,
+      chrome_mcp_browser_url: null,
+      chrome_mcp_channel: "stable",
+      chrome_mcp_connect_timeout_sec: 15,
+      chrome_mcp_rpc_timeout_sec: 45,
+      chrome_mcp_status: "disabled",
+      chrome_mcp_status_detail: "disabled",
+      workspace: ".",
+      session_id: null,
+      recursive: true,
+      max_depth: 4,
+      max_steps_per_call: 100,
+      demo: false,
+    }));
+    __setHandler("save_settings", () => {});
+    __setHandler("save_credential", () => ({
+      openai: true, anthropic: true, openrouter: false,
+      cerebras: false, zai: true, ollama: true, exa: false, firecrawl: true, brave: false, tavily: true, voyage: true,
+      mistral: true, mistral_document_ai: false, mistral_transcription: true,
+    }));
   });
 
   afterEach(() => {
@@ -113,9 +144,113 @@ describe("createApp", () => {
 
     await vi.waitFor(() => {
       const creds = root.querySelector(".cred-status");
-      expect(creds!.children.length).toBe(12);
+      expect(creds!.children.length).toBe(14);
       expect(creds!.querySelector(".cred-ok")!.textContent).toContain("openai");
       expect(creds!.querySelector(".cred-missing")!.textContent).toContain("openrouter");
+    });
+  });
+
+  it("saves the Mistral credential from the sidebar editor", async () => {
+    let saved: { service: string; value: string | null } | null = null;
+    __setHandler("save_credential", ({ service, value }: any) => {
+      saved = { service, value };
+      return {
+        openai: true, anthropic: true, openrouter: false,
+        cerebras: false, zai: true, ollama: true, exa: false, firecrawl: true, brave: false, tavily: true, voyage: true,
+        mistral: true, mistral_document_ai: false, mistral_transcription: true,
+      };
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    createApp(root);
+
+    const sections = [...root.querySelectorAll(".cred-editor-section")];
+    const transcriptionSection = sections.find((section) => {
+      return (
+        section.querySelector(".cred-editor-title")?.textContent ===
+        "Mistral transcription"
+      );
+    }) as HTMLElement | undefined;
+    expect(transcriptionSection).toBeDefined();
+
+    const input = transcriptionSection!.querySelector(
+      ".cred-editor-input"
+    ) as HTMLInputElement;
+    const saveBtn = transcriptionSection!.querySelector(
+      ".cred-editor-actions button"
+    ) as HTMLButtonElement;
+    input.value = "mistral-key";
+    saveBtn.click();
+
+    await vi.waitFor(() => {
+      expect(saved).toEqual({
+        service: "mistral_transcription",
+        value: "mistral-key",
+      });
+    });
+
+    await vi.waitFor(() => {
+      const feedback = transcriptionSection!.querySelector(
+        ".cred-editor-feedback"
+      ) as HTMLElement;
+      expect(feedback.textContent).toContain("Saved workspace key.");
+    });
+  });
+
+  it("saves the Document AI key mode from the sidebar", async () => {
+    let savedPartial: any = null;
+    let savedSettings: any = null;
+    __setHandler("update_config", ({ partial }: any) => {
+      savedPartial = partial;
+      return {
+        provider: "anthropic",
+        model: "anthropic-foundry/claude-opus-4-6",
+        reasoning_effort: null,
+        zai_plan: "paygo",
+        web_search_provider: "exa",
+        continuity_mode: "auto",
+        mistral_document_ai_use_shared_key: false,
+        chrome_mcp_enabled: false,
+        chrome_mcp_auto_connect: true,
+        chrome_mcp_browser_url: null,
+        chrome_mcp_channel: "stable",
+        chrome_mcp_connect_timeout_sec: 15,
+        chrome_mcp_rpc_timeout_sec: 45,
+        chrome_mcp_status: "disabled",
+        chrome_mcp_status_detail: "disabled",
+        workspace: ".",
+        session_id: null,
+        recursive: true,
+        max_depth: 4,
+        max_steps_per_call: 100,
+        demo: false,
+      };
+    });
+    __setHandler("save_settings", ({ settings }: any) => {
+      savedSettings = settings;
+    });
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    createApp(root);
+
+    const select = root.querySelector(".settings-select") as HTMLSelectElement;
+    const saveBtn = root.querySelector(
+      ".settings-control .cred-editor-actions button"
+    ) as HTMLButtonElement;
+
+    select.value = "override";
+    saveBtn.click();
+
+    await vi.waitFor(() => {
+      expect(savedPartial).toEqual({
+        mistral_document_ai_use_shared_key: false,
+      });
+      expect(savedSettings).toEqual({
+        mistral_document_ai_use_shared_key: false,
+      });
+      expect(appState.get().mistralDocumentAiUseSharedKey).toBe(false);
     });
   });
 
@@ -188,7 +323,36 @@ describe("session delete confirmation flow", () => {
     deletedIds = [];
     appState.set({ ...originalState, messages: [], sessionId: null });
     __setHandler("list_sessions", () => [SESSION_A]);
-    __setHandler("get_credentials_status", () => ({}));
+    __setHandler("get_credentials_status", () => ({
+      mistral: false,
+      mistral_document_ai: false,
+      mistral_transcription: false,
+    }));
+    __setHandler("update_config", ({ partial }: any) => ({
+      provider: "anthropic",
+      model: "anthropic-foundry/claude-opus-4-6",
+      reasoning_effort: null,
+      zai_plan: "paygo",
+      web_search_provider: "exa",
+      continuity_mode: "auto",
+      mistral_document_ai_use_shared_key:
+        partial.mistral_document_ai_use_shared_key ?? true,
+      chrome_mcp_enabled: false,
+      chrome_mcp_auto_connect: true,
+      chrome_mcp_browser_url: null,
+      chrome_mcp_channel: "stable",
+      chrome_mcp_connect_timeout_sec: 15,
+      chrome_mcp_rpc_timeout_sec: 45,
+      chrome_mcp_status: "disabled",
+      chrome_mcp_status_detail: "disabled",
+      workspace: ".",
+      session_id: null,
+      recursive: true,
+      max_depth: 4,
+      max_steps_per_call: 100,
+      demo: false,
+    }));
+    __setHandler("save_settings", () => {});
     __setHandler("open_session", () => ({
       id: "new-session",
       created_at: "2026-02-27T12:00:00Z",

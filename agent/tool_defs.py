@@ -201,6 +201,107 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "document_ocr",
+        "description": (
+            "Run Mistral Document AI OCR on a local PDF or image file and return "
+            "structured text plus OCR metadata."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the local PDF or image file.",
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Whether to request extracted image data in the OCR response.",
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional zero-based page indexes to process.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional OCR model override.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "document_annotations",
+        "description": (
+            "Run Mistral Document AI annotations on a local document or image using "
+            "one or both JSON schemas for document-level or bbox-level extraction."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the local PDF or image file.",
+                },
+                "document_schema": {
+                    "type": "object",
+                    "description": "Optional JSON schema for whole-document structured extraction.",
+                    "additionalProperties": True,
+                },
+                "bbox_schema": {
+                    "type": "object",
+                    "description": "Optional JSON schema for extracted image or bbox annotations.",
+                    "additionalProperties": True,
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "Optional high-level guidance prompt for document annotations.",
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional zero-based page indexes to process.",
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Whether to request extracted image data in the OCR response.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional OCR model override.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "document_qa",
+        "description": (
+            "Ask a question about a local PDF document using Mistral Document AI Q&A."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the local PDF file.",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "Natural-language question to ask about the document.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional chat model override.",
+                },
+            },
+            "required": ["path", "question"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "write_file",
         "description": "Create or overwrite a file in the workspace with the given content.",
         "parameters": {

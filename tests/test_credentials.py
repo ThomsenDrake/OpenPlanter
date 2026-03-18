@@ -29,6 +29,7 @@ class CredentialTests(unittest.TestCase):
                         "FIRECRAWL_API_KEY=fc-key",
                         "BRAVE_API_KEY=brave-key",
                         "OPENPLANTER_TAVILY_API_KEY=tavily-key",
+                        "OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY=mistral-doc-key",
                         "MISTRAL_API_KEY=mistral-key",
                     ]
                 ),
@@ -44,6 +45,8 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(creds.firecrawl_api_key, "fc-key")
             self.assertEqual(creds.brave_api_key, "brave-key")
             self.assertEqual(creds.tavily_api_key, "tavily-key")
+            self.assertEqual(creds.mistral_api_key, "mistral-key")
+            self.assertEqual(creds.mistral_document_ai_api_key, "mistral-doc-key")
             self.assertEqual(creds.mistral_transcription_api_key, "mistral-key")
 
     def test_parse_env_assignments_preserves_generic_workspace_keys(self) -> None:
@@ -76,6 +79,8 @@ class CredentialTests(unittest.TestCase):
                 firecrawl_api_key="fc",
                 brave_api_key="brave",
                 tavily_api_key="tavily",
+                mistral_api_key="mistral-shared",
+                mistral_document_ai_api_key="mistral-doc",
                 mistral_transcription_api_key="mistral",
             )
             store.save(creds)

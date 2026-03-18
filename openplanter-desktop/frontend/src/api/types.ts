@@ -191,6 +191,7 @@ export interface ConfigView {
   zai_plan: string;
   web_search_provider: string;
   continuity_mode: string;
+  mistral_document_ai_use_shared_key: boolean;
   chrome_mcp_enabled: boolean;
   chrome_mcp_auto_connect: boolean;
   chrome_mcp_browser_url: string | null;
@@ -214,6 +215,7 @@ export interface PartialConfig {
   zai_plan?: string;
   web_search_provider?: string;
   continuity_mode?: string;
+  mistral_document_ai_use_shared_key?: boolean;
   chrome_mcp_enabled?: boolean;
   chrome_mcp_auto_connect?: boolean;
   chrome_mcp_browser_url?: string | null;
@@ -247,6 +249,7 @@ export interface PersistentSettings {
   zai_plan?: string | null;
   web_search_provider?: string | null;
   continuity_mode?: string | null;
+  mistral_document_ai_use_shared_key?: boolean | null;
   chrome_mcp_enabled?: boolean | null;
   chrome_mcp_auto_connect?: boolean | null;
   chrome_mcp_browser_url?: string | null;
@@ -254,6 +257,23 @@ export interface PersistentSettings {
   chrome_mcp_connect_timeout_sec?: number | null;
   chrome_mcp_rpc_timeout_sec?: number | null;
 }
+
+export type CredentialService =
+  | "openai"
+  | "anthropic"
+  | "openrouter"
+  | "cerebras"
+  | "zai"
+  | "exa"
+  | "firecrawl"
+  | "brave"
+  | "tavily"
+  | "voyage"
+  | "mistral"
+  | "mistral_document_ai"
+  | "mistral_transcription";
+
+export type CredentialStatusMap = Record<string, boolean>;
 
 export interface SlashResult {
   output: string;

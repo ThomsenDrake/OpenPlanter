@@ -16,6 +16,11 @@ pub const ZAI_PAYGO_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 pub const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const BRAVE_BASE_URL: &str = "https://api.search.brave.com/res/v1";
 pub const TAVILY_BASE_URL: &str = "https://api.tavily.com";
+pub const MISTRAL_DOCUMENT_AI_BASE_URL: &str = "https://api.mistral.ai";
+pub const MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL: &str = "mistral-ocr-latest";
+pub const MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL: &str = "mistral-small-latest";
+pub const MISTRAL_DOCUMENT_AI_MAX_BYTES: i64 = 50 * 1024 * 1024;
+pub const MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC: i64 = 180;
 pub const MISTRAL_TRANSCRIPTION_BASE_URL: &str = "https://api.mistral.ai";
 pub const MISTRAL_TRANSCRIPTION_DEFAULT_MODEL: &str = "voxtral-mini-latest";
 pub const MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS: i64 = 900;
@@ -228,6 +233,7 @@ pub struct AgentConfig {
     pub firecrawl_base_url: String,
     pub brave_base_url: String,
     pub tavily_base_url: String,
+    pub mistral_document_ai_base_url: String,
     pub mistral_transcription_base_url: String,
 
     // API keys
@@ -245,6 +251,13 @@ pub struct AgentConfig {
     pub web_search_provider: String,
     pub continuity_mode: String,
     pub voyage_api_key: Option<String>,
+    pub mistral_api_key: Option<String>,
+    pub mistral_document_ai_api_key: Option<String>,
+    pub mistral_document_ai_use_shared_key: bool,
+    pub mistral_document_ai_ocr_model: String,
+    pub mistral_document_ai_qa_model: String,
+    pub mistral_document_ai_max_bytes: i64,
+    pub mistral_document_ai_request_timeout_sec: i64,
     pub mistral_transcription_api_key: Option<String>,
     pub mistral_transcription_model: String,
     pub mistral_transcription_max_bytes: i64,
@@ -309,6 +322,7 @@ impl Default for AgentConfig {
             firecrawl_base_url: "https://api.firecrawl.dev/v1".into(),
             brave_base_url: BRAVE_BASE_URL.into(),
             tavily_base_url: TAVILY_BASE_URL.into(),
+            mistral_document_ai_base_url: MISTRAL_DOCUMENT_AI_BASE_URL.into(),
             mistral_transcription_base_url: MISTRAL_TRANSCRIPTION_BASE_URL.into(),
             api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
             openai_api_key: Some(FOUNDRY_OPENAI_API_KEY_PLACEHOLDER.into()),
@@ -324,6 +338,13 @@ impl Default for AgentConfig {
             web_search_provider: "exa".into(),
             continuity_mode: "auto".into(),
             voyage_api_key: None,
+            mistral_api_key: None,
+            mistral_document_ai_api_key: None,
+            mistral_document_ai_use_shared_key: true,
+            mistral_document_ai_ocr_model: MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL.into(),
+            mistral_document_ai_qa_model: MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL.into(),
+            mistral_document_ai_max_bytes: MISTRAL_DOCUMENT_AI_MAX_BYTES,
+            mistral_document_ai_request_timeout_sec: MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC,
             mistral_transcription_api_key: None,
             mistral_transcription_model: MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into(),
             mistral_transcription_max_bytes: 100 * 1024 * 1024,
@@ -400,6 +421,10 @@ impl AgentConfig {
 
         let voyage_api_key =
             env_opt("OPENPLANTER_VOYAGE_API_KEY").or_else(|| env_opt("VOYAGE_API_KEY"));
+        let mistral_api_key =
+            env_opt("OPENPLANTER_MISTRAL_API_KEY").or_else(|| env_opt("MISTRAL_API_KEY"));
+        let mistral_document_ai_api_key = env_opt("OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY")
+            .or_else(|| env_opt("MISTRAL_DOCUMENT_AI_API_KEY"));
         let mistral_transcription_api_key = env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
             .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_API_KEY"))
             .or_else(|| env_opt("MISTRAL_API_KEY"));
@@ -471,6 +496,10 @@ impl AgentConfig {
             ),
             brave_base_url: env_or("OPENPLANTER_BRAVE_BASE_URL", BRAVE_BASE_URL),
             tavily_base_url: env_or("OPENPLANTER_TAVILY_BASE_URL", TAVILY_BASE_URL),
+            mistral_document_ai_base_url: env_opt("OPENPLANTER_MISTRAL_DOCUMENT_AI_BASE_URL")
+                .or_else(|| env_opt("MISTRAL_DOCUMENT_AI_BASE_URL"))
+                .or_else(|| env_opt("MISTRAL_BASE_URL"))
+                .unwrap_or_else(|| MISTRAL_DOCUMENT_AI_BASE_URL.into()),
             mistral_transcription_base_url: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL")
                 .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_BASE_URL"))
                 .or_else(|| env_opt("MISTRAL_BASE_URL"))
@@ -488,6 +517,26 @@ impl AgentConfig {
             web_search_provider,
             continuity_mode,
             voyage_api_key,
+            mistral_api_key,
+            mistral_document_ai_api_key,
+            mistral_document_ai_use_shared_key: env_bool(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_USE_SHARED_KEY",
+                true,
+            ),
+            mistral_document_ai_ocr_model: env_opt("OPENPLANTER_MISTRAL_DOCUMENT_AI_OCR_MODEL")
+                .or_else(|| env_opt("MISTRAL_DOCUMENT_AI_OCR_MODEL"))
+                .unwrap_or_else(|| MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL.into()),
+            mistral_document_ai_qa_model: env_opt("OPENPLANTER_MISTRAL_DOCUMENT_AI_QA_MODEL")
+                .or_else(|| env_opt("MISTRAL_DOCUMENT_AI_QA_MODEL"))
+                .unwrap_or_else(|| MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL.into()),
+            mistral_document_ai_max_bytes: env_int(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_MAX_BYTES",
+                MISTRAL_DOCUMENT_AI_MAX_BYTES,
+            ),
+            mistral_document_ai_request_timeout_sec: env_int(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC",
+                MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC,
+            ),
             mistral_transcription_api_key,
             mistral_transcription_model: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")
                 .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_MODEL"))
@@ -705,6 +754,18 @@ mod tests {
             "OPENPLANTER_TAVILY_API_KEY",
             "TAVILY_API_KEY",
             "OPENPLANTER_TAVILY_BASE_URL",
+            "OPENPLANTER_MISTRAL_API_KEY",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY",
+            "MISTRAL_DOCUMENT_AI_API_KEY",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_USE_SHARED_KEY",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_BASE_URL",
+            "MISTRAL_DOCUMENT_AI_BASE_URL",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_OCR_MODEL",
+            "MISTRAL_DOCUMENT_AI_OCR_MODEL",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_QA_MODEL",
+            "MISTRAL_DOCUMENT_AI_QA_MODEL",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_MAX_BYTES",
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC",
             "OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY",
             "MISTRAL_TRANSCRIPTION_API_KEY",
             "MISTRAL_API_KEY",
@@ -758,6 +819,26 @@ mod tests {
         assert!(cfg.zai_api_key.is_none());
         assert!(cfg.brave_api_key.is_none());
         assert!(cfg.tavily_api_key.is_none());
+        assert!(cfg.mistral_api_key.is_none());
+        assert!(cfg.mistral_document_ai_api_key.is_none());
+        assert!(cfg.mistral_document_ai_use_shared_key);
+        assert_eq!(
+            cfg.mistral_document_ai_base_url,
+            MISTRAL_DOCUMENT_AI_BASE_URL
+        );
+        assert_eq!(
+            cfg.mistral_document_ai_ocr_model,
+            MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL
+        );
+        assert_eq!(
+            cfg.mistral_document_ai_qa_model,
+            MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL
+        );
+        assert_eq!(cfg.mistral_document_ai_max_bytes, MISTRAL_DOCUMENT_AI_MAX_BYTES);
+        assert_eq!(
+            cfg.mistral_document_ai_request_timeout_sec,
+            MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC
+        );
         assert!(cfg.mistral_transcription_api_key.is_none());
         assert_eq!(cfg.openai_base_url, FOUNDRY_OPENAI_BASE_URL);
         assert_eq!(cfg.anthropic_base_url, FOUNDRY_ANTHROPIC_BASE_URL);
@@ -809,6 +890,28 @@ mod tests {
             env::set_var("BRAVE_API_KEY", "brave-test123");
             env::set_var("TAVILY_API_KEY", "tavily-test123");
             env::set_var("MISTRAL_API_KEY", "mistral-test123");
+            env::set_var(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY",
+                "docai-override-456",
+            );
+            env::set_var("OPENPLANTER_MISTRAL_DOCUMENT_AI_USE_SHARED_KEY", "false");
+            env::set_var(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_BASE_URL",
+                "https://docai.example",
+            );
+            env::set_var(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_OCR_MODEL",
+                "mistral-ocr-test",
+            );
+            env::set_var(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_QA_MODEL",
+                "mistral-small-test",
+            );
+            env::set_var("OPENPLANTER_MISTRAL_DOCUMENT_AI_MAX_BYTES", "4096");
+            env::set_var(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC",
+                "300",
+            );
             env::set_var("OPENPLANTER_WEB_SEARCH_PROVIDER", "tavily");
             env::set_var(
                 "OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL",
@@ -853,6 +956,17 @@ mod tests {
         assert_eq!(cfg.zai_api_key, Some("zai-test123".into()));
         assert_eq!(cfg.brave_api_key, Some("brave-test123".into()));
         assert_eq!(cfg.tavily_api_key, Some("tavily-test123".into()));
+        assert_eq!(cfg.mistral_api_key, Some("mistral-test123".into()));
+        assert_eq!(
+            cfg.mistral_document_ai_api_key,
+            Some("docai-override-456".into())
+        );
+        assert!(!cfg.mistral_document_ai_use_shared_key);
+        assert_eq!(cfg.mistral_document_ai_base_url, "https://docai.example");
+        assert_eq!(cfg.mistral_document_ai_ocr_model, "mistral-ocr-test");
+        assert_eq!(cfg.mistral_document_ai_qa_model, "mistral-small-test");
+        assert_eq!(cfg.mistral_document_ai_max_bytes, 4096);
+        assert_eq!(cfg.mistral_document_ai_request_timeout_sec, 300);
         assert_eq!(
             cfg.mistral_transcription_api_key,
             Some("mistral-test123".into())

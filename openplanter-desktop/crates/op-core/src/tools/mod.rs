@@ -4,6 +4,7 @@
 /// (files-read set, background jobs) and routes tool calls to the appropriate module.
 pub mod audio;
 pub mod chrome_mcp;
+pub mod document;
 pub mod defs;
 pub mod filesystem;
 pub mod patching;
@@ -65,6 +66,14 @@ pub struct WorkspaceTools {
     brave_base_url: String,
     tavily_api_key: Option<String>,
     tavily_base_url: String,
+    mistral_api_key: Option<String>,
+    mistral_document_ai_api_key: Option<String>,
+    mistral_document_ai_use_shared_key: bool,
+    mistral_document_ai_base_url: String,
+    mistral_document_ai_ocr_model: String,
+    mistral_document_ai_qa_model: String,
+    mistral_document_ai_max_bytes: usize,
+    mistral_document_ai_request_timeout_sec: u64,
     mistral_transcription_api_key: Option<String>,
     mistral_transcription_base_url: String,
     mistral_transcription_model: String,
@@ -111,6 +120,15 @@ impl WorkspaceTools {
             brave_base_url: config.brave_base_url.clone(),
             tavily_api_key: config.tavily_api_key.clone(),
             tavily_base_url: config.tavily_base_url.clone(),
+            mistral_api_key: config.mistral_api_key.clone(),
+            mistral_document_ai_api_key: config.mistral_document_ai_api_key.clone(),
+            mistral_document_ai_use_shared_key: config.mistral_document_ai_use_shared_key,
+            mistral_document_ai_base_url: config.mistral_document_ai_base_url.clone(),
+            mistral_document_ai_ocr_model: config.mistral_document_ai_ocr_model.clone(),
+            mistral_document_ai_qa_model: config.mistral_document_ai_qa_model.clone(),
+            mistral_document_ai_max_bytes: config.mistral_document_ai_max_bytes as usize,
+            mistral_document_ai_request_timeout_sec: config
+                .mistral_document_ai_request_timeout_sec as u64,
             mistral_transcription_api_key: config.mistral_transcription_api_key.clone(),
             mistral_transcription_base_url: config.mistral_transcription_base_url.clone(),
             mistral_transcription_model: config.mistral_transcription_model.clone(),
@@ -153,6 +171,15 @@ impl WorkspaceTools {
             brave_base_url: config.brave_base_url.clone(),
             tavily_api_key: config.tavily_api_key.clone(),
             tavily_base_url: config.tavily_base_url.clone(),
+            mistral_api_key: config.mistral_api_key.clone(),
+            mistral_document_ai_api_key: config.mistral_document_ai_api_key.clone(),
+            mistral_document_ai_use_shared_key: config.mistral_document_ai_use_shared_key,
+            mistral_document_ai_base_url: config.mistral_document_ai_base_url.clone(),
+            mistral_document_ai_ocr_model: config.mistral_document_ai_ocr_model.clone(),
+            mistral_document_ai_qa_model: config.mistral_document_ai_qa_model.clone(),
+            mistral_document_ai_max_bytes: config.mistral_document_ai_max_bytes as usize,
+            mistral_document_ai_request_timeout_sec: config
+                .mistral_document_ai_request_timeout_sec as u64,
             mistral_transcription_api_key: config.mistral_transcription_api_key.clone(),
             mistral_transcription_base_url: config.mistral_transcription_base_url.clone(),
             mistral_transcription_model: config.mistral_transcription_model.clone(),
@@ -341,6 +368,118 @@ impl WorkspaceTools {
                 )
                 .await
             }
+            "document_ocr" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let include_images = args.get("include_images").and_then(|v| v.as_bool());
+                let pages: Option<Vec<i64>> = args
+                    .get("pages")
+                    .and_then(|v| v.as_array())
+                    .map(|values| values.iter().filter_map(|value| value.as_i64()).collect())
+                    .filter(|values: &Vec<i64>| !values.is_empty());
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                document::document_ocr(
+                    &self.root,
+                    self.mistral_api_key.as_deref(),
+                    self.mistral_document_ai_api_key.as_deref(),
+                    self.mistral_document_ai_use_shared_key,
+                    &self.mistral_document_ai_base_url,
+                    &self.mistral_document_ai_ocr_model,
+                    self.mistral_document_ai_max_bytes,
+                    path,
+                    include_images,
+                    pages.as_deref(),
+                    model,
+                    self.max_file_chars.min(self.max_observation_chars),
+                    self.mistral_document_ai_request_timeout_sec,
+                    &mut self.files_read,
+                )
+                .await
+            }
+            "document_annotations" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let document_schema = args.get("document_schema").and_then(|value| {
+                    if value.is_object() {
+                        Some(value.clone())
+                    } else {
+                        value.as_str().and_then(|raw| serde_json::from_str(raw).ok())
+                    }
+                });
+                let bbox_schema = args.get("bbox_schema").and_then(|value| {
+                    if value.is_object() {
+                        Some(value.clone())
+                    } else {
+                        value.as_str().and_then(|raw| serde_json::from_str(raw).ok())
+                    }
+                });
+                let instruction = args
+                    .get("instruction")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let include_images = args.get("include_images").and_then(|v| v.as_bool());
+                let pages: Option<Vec<i64>> = args
+                    .get("pages")
+                    .and_then(|v| v.as_array())
+                    .map(|values| values.iter().filter_map(|value| value.as_i64()).collect())
+                    .filter(|values: &Vec<i64>| !values.is_empty());
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                document::document_annotations(
+                    &self.root,
+                    self.mistral_api_key.as_deref(),
+                    self.mistral_document_ai_api_key.as_deref(),
+                    self.mistral_document_ai_use_shared_key,
+                    &self.mistral_document_ai_base_url,
+                    &self.mistral_document_ai_ocr_model,
+                    self.mistral_document_ai_max_bytes,
+                    path,
+                    document_schema.as_ref(),
+                    bbox_schema.as_ref(),
+                    instruction,
+                    include_images,
+                    pages.as_deref(),
+                    model,
+                    self.max_file_chars.min(self.max_observation_chars),
+                    self.mistral_document_ai_request_timeout_sec,
+                    &mut self.files_read,
+                )
+                .await
+            }
+            "document_qa" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let question = args
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                document::document_qa(
+                    &self.root,
+                    self.mistral_api_key.as_deref(),
+                    self.mistral_document_ai_api_key.as_deref(),
+                    self.mistral_document_ai_use_shared_key,
+                    &self.mistral_document_ai_base_url,
+                    &self.mistral_document_ai_qa_model,
+                    self.mistral_document_ai_max_bytes,
+                    path,
+                    question,
+                    model,
+                    self.max_file_chars.min(self.max_observation_chars),
+                    self.mistral_document_ai_request_timeout_sec,
+                    &mut self.files_read,
+                )
+                .await
+            }
 
             // Shell
             "run_shell" => {
@@ -453,9 +592,9 @@ impl WorkspaceTools {
                         Ok(tools) if tools.iter().any(|tool| tool.name == name) => {
                             match manager.call_tool(name, &args).await {
                                 Ok(content) => ToolResult::ok(content),
-                                Err(err) => {
-                                    ToolResult::error(format!("Chrome DevTools MCP unavailable: {err}"))
-                                }
+                                Err(err) => ToolResult::error(format!(
+                                    "Chrome DevTools MCP unavailable: {err}"
+                                )),
                             }
                         }
                         Ok(_) => ToolResult::error(format!("Unknown tool: {name}")),

@@ -517,6 +517,9 @@ fn is_recon_tool(name: &str) -> bool {
             | "read_file"
             | "read_image"
             | "audio_transcribe"
+            | "document_ocr"
+            | "document_annotations"
+            | "document_qa"
             | "list_artifacts"
             | "read_artifact"
     )
