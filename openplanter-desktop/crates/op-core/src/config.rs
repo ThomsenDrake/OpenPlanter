@@ -105,6 +105,13 @@ pub fn normalize_continuity_mode(value: Option<&str>) -> String {
     }
 }
 
+pub fn normalize_recursion_policy(value: Option<&str>) -> String {
+    match value.unwrap_or_default().trim().to_lowercase().as_str() {
+        "force-max" | "force_max" => "force_max".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
 pub fn normalize_chrome_mcp_channel(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "beta" => "beta".to_string(),
@@ -294,6 +301,7 @@ pub struct AgentConfig {
     pub rate_limit_retry_after_cap_sec: f64,
     pub zai_stream_max_retries: i64,
     pub recursive: bool,
+    pub recursion_policy: String,
     pub min_subtask_depth: i64,
     pub acceptance_criteria: bool,
     pub max_plan_chars: i64,
@@ -380,6 +388,7 @@ impl Default for AgentConfig {
             rate_limit_retry_after_cap_sec: 120.0,
             zai_stream_max_retries: 10,
             recursive: true,
+            recursion_policy: "auto".into(),
             min_subtask_depth: 0,
             acceptance_criteria: true,
             max_plan_chars: 40_000,
@@ -464,8 +473,13 @@ impl AgentConfig {
             normalize_web_search_provider(env_opt("OPENPLANTER_WEB_SEARCH_PROVIDER").as_deref());
         let continuity_mode =
             normalize_continuity_mode(env_opt("OPENPLANTER_CONTINUITY_MODE").as_deref());
+        let recursion_policy =
+            normalize_recursion_policy(env_opt("OPENPLANTER_RECURSION_POLICY").as_deref());
         let chrome_mcp_enabled = env_bool("OPENPLANTER_CHROME_MCP_ENABLED", false);
         let chrome_mcp_auto_connect = env_bool("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", true);
+        let max_depth = env_int("OPENPLANTER_MAX_DEPTH", 4).max(0);
+        let min_subtask_depth =
+            env_int("OPENPLANTER_MIN_SUBTASK_DEPTH", 0).clamp(0, max_depth);
 
         Self {
             workspace: ws,
@@ -579,7 +593,7 @@ impl AgentConfig {
                 CHROME_MCP_RPC_TIMEOUT_SEC,
             )
             .max(1),
-            max_depth: env_int("OPENPLANTER_MAX_DEPTH", 4),
+            max_depth,
             max_steps_per_call: env_int("OPENPLANTER_MAX_STEPS", 100),
             budget_extension_enabled: env_bool("OPENPLANTER_BUDGET_EXTENSION_ENABLED", true),
             budget_extension_block_steps: env_int("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", 20)
@@ -605,7 +619,8 @@ impl AgentConfig {
             ),
             zai_stream_max_retries: env_int("OPENPLANTER_ZAI_STREAM_MAX_RETRIES", 10),
             recursive: env_bool("OPENPLANTER_RECURSIVE", true),
-            min_subtask_depth: env_int("OPENPLANTER_MIN_SUBTASK_DEPTH", 0),
+            recursion_policy,
+            min_subtask_depth,
             acceptance_criteria: env_bool("OPENPLANTER_ACCEPTANCE_CRITERIA", true),
             max_plan_chars: env_int("OPENPLANTER_MAX_PLAN_CHARS", 40_000),
             max_turn_summaries: env_int("OPENPLANTER_MAX_TURN_SUMMARIES", 50),
@@ -695,6 +710,8 @@ mod tests {
         assert_eq!(cfg.rate_limit_backoff_max_sec, 60.0);
         assert_eq!(cfg.rate_limit_retry_after_cap_sec, 120.0);
         assert!(cfg.recursive);
+        assert_eq!(cfg.recursion_policy, "auto");
+        assert_eq!(cfg.min_subtask_depth, 0);
         assert!(cfg.acceptance_criteria);
         assert!(!cfg.demo);
     }
@@ -745,6 +762,8 @@ mod tests {
             "OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS",
             "OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS",
             "OPENPLANTER_RECURSIVE",
+            "OPENPLANTER_RECURSION_POLICY",
+            "OPENPLANTER_MIN_SUBTASK_DEPTH",
             "OPENPLANTER_DEMO",
             "OPENPLANTER_WEB_SEARCH_PROVIDER",
             "OPENPLANTER_CONTINUITY_MODE",
@@ -807,6 +826,8 @@ mod tests {
         assert_eq!(cfg.budget_extension_block_steps, 20);
         assert_eq!(cfg.budget_extension_max_blocks, 2);
         assert!(cfg.recursive);
+        assert_eq!(cfg.recursion_policy, "auto");
+        assert_eq!(cfg.min_subtask_depth, 0);
         assert!(!cfg.demo);
         assert_eq!(
             cfg.openai_api_key.as_deref(),
@@ -884,6 +905,8 @@ mod tests {
             env::set_var("OPENPLANTER_BUDGET_EXTENSION_BLOCK_STEPS", "9");
             env::set_var("OPENPLANTER_BUDGET_EXTENSION_MAX_BLOCKS", "1");
             env::set_var("OPENPLANTER_RECURSIVE", "false");
+            env::set_var("OPENPLANTER_RECURSION_POLICY", "force-max");
+            env::set_var("OPENPLANTER_MIN_SUBTASK_DEPTH", "12");
             env::set_var("OPENPLANTER_DEMO", "true");
             env::set_var("OPENAI_API_KEY", "sk-test123");
             env::set_var("ZAI_API_KEY", "zai-test123");
@@ -951,6 +974,8 @@ mod tests {
         assert_eq!(cfg.budget_extension_block_steps, 9);
         assert_eq!(cfg.budget_extension_max_blocks, 1);
         assert!(!cfg.recursive);
+        assert_eq!(cfg.recursion_policy, "force_max");
+        assert_eq!(cfg.min_subtask_depth, 8);
         assert!(cfg.demo);
         assert_eq!(cfg.openai_api_key, Some("sk-test123".into()));
         assert_eq!(cfg.zai_api_key, Some("zai-test123".into()));
@@ -1040,6 +1065,9 @@ mod tests {
         assert_eq!(normalize_continuity_mode(Some("fresh")), "fresh");
         assert_eq!(normalize_continuity_mode(Some("continue")), "continue");
         assert_eq!(normalize_continuity_mode(Some("other")), "auto");
+        assert_eq!(normalize_recursion_policy(Some("auto")), "auto");
+        assert_eq!(normalize_recursion_policy(Some("force-max")), "force_max");
+        assert_eq!(normalize_recursion_policy(Some("other")), "auto");
         assert!(is_foundry_openai_base_url(FOUNDRY_OPENAI_BASE_URL));
         assert!(is_foundry_anthropic_base_url(FOUNDRY_ANTHROPIC_BASE_URL));
         assert_eq!(

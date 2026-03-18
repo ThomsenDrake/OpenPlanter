@@ -8,6 +8,7 @@ import { handleWebSearchCommand } from "./webSearch";
 import { handleZaiPlanCommand } from "./zaiPlan";
 import { handleInitCommand } from "./init";
 import { handleContinuityCommand } from "./continuity";
+import { handleRecursionCommand } from "./recursion";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -42,6 +43,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /continuity       Show current follow-up continuity mode",
           "  /continuity <mode>  Set mode (auto, fresh, continue)",
           "  /continuity <mode> --save  Set and persist",
+          "  /recursion         Show current recursion settings",
+          "  /recursion <mode>  Set mode (flat, auto, force-max)",
+          "  /recursion <mode> --min <N> --max <N> [--save]  Configure recursion depth policy",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
           "  /chrome             Show current Chrome DevTools MCP status",
@@ -63,6 +67,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           outputTokens: 0,
           currentStep: 0,
           currentDepth: 0,
+          currentConversationPath: null,
           loopHealth: null,
           lastLoopMetrics: null,
           lastCompletion: null,
@@ -103,6 +108,8 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
           ...formatChromeStatusLines(s),
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
+          `Policy:      ${s.recursionPolicy.replace(/_/g, "-")}`,
+          `Min depth:   ${s.minSubtaskDepth}`,
           `Max depth:   ${s.maxDepth}`,
           `Max steps:   ${s.maxStepsPerCall}`,
           `Workspace:   ${s.workspace || "."}`,
@@ -125,6 +132,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/continuity":
       return handleContinuityCommand(args);
+
+    case "/recursion":
+      return handleRecursionCommand(args);
 
     case "/reasoning":
       return handleReasoningCommand(args);

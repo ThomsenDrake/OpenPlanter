@@ -6,6 +6,7 @@
 // LoggingEmitter wraps any SolveEmitter + ReplayLogger to persist messages
 // to replay.jsonl as they stream.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -19,6 +20,7 @@ use op_core::session::replay::{ReplayEntry, ReplayLogger, StepToolCallEntry};
 const MAX_STEP_MODEL_PREVIEW_CHARS: usize = 4 * 1024;
 const MAX_TOOL_ARGS_CAPTURE_CHARS: usize = 16 * 1024;
 const MAX_DELTA_LOG_CHARS: usize = 120;
+const ROOT_CONVERSATION_PATH: &str = "0";
 
 fn preview_text(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
@@ -139,6 +141,7 @@ impl SolveEmitter for TauriEmitter {
         &self,
         depth: u32,
         step: u32,
+        conversation_path: Option<String>,
         phase: LoopPhase,
         metrics: LoopMetrics,
         is_final: bool,
@@ -148,6 +151,7 @@ impl SolveEmitter for TauriEmitter {
             LoopHealthEvent {
                 depth,
                 step,
+                conversation_path,
                 phase,
                 metrics,
                 is_final,
@@ -174,18 +178,8 @@ impl SolveEmitter for TauriEmitter {
 pub struct LoggingEmitter<E: SolveEmitter> {
     inner: E,
     replay: Arc<tokio::sync::Mutex<ReplayLogger>>,
-    /// Accumulated streaming text for the current step (std::sync for non-async ops).
-    streaming_buf: Mutex<String>,
-    /// Whether the current step preview was truncated.
-    streaming_truncated: Mutex<bool>,
-    /// Tool calls accumulated during the current step.
-    step_tool_calls: Mutex<Vec<PendingToolCall>>,
-    /// Name of the tool currently being generated.
-    current_tool: Mutex<String>,
-    /// Accumulated args JSON for the current tool.
-    current_args_buf: Mutex<String>,
-    /// Whether the current tool args buffer was truncated.
-    current_args_truncated: Mutex<bool>,
+    /// Per-conversation-path streaming state used to build replay step summaries.
+    step_states: Mutex<HashMap<String, StepCaptureState>>,
     /// Final completion payload emitted during the solve.
     completion: Mutex<Option<CompletionSnapshot>>,
 }
@@ -195,6 +189,16 @@ struct PendingToolCall {
     name: String,
     key_arg: String,
     start_time: std::time::Instant,
+}
+
+#[derive(Default)]
+struct StepCaptureState {
+    streaming_buf: String,
+    streaming_truncated: bool,
+    step_tool_calls: Vec<PendingToolCall>,
+    current_tool: String,
+    current_args_buf: String,
+    current_args_truncated: bool,
 }
 
 #[derive(Clone)]
@@ -276,12 +280,7 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
         Self {
             inner,
             replay: Arc::new(tokio::sync::Mutex::new(replay)),
-            streaming_buf: Mutex::new(String::new()),
-            streaming_truncated: Mutex::new(false),
-            step_tool_calls: Mutex::new(Vec::new()),
-            current_tool: Mutex::new(String::new()),
-            current_args_buf: Mutex::new(String::new()),
-            current_args_truncated: Mutex::new(false),
+            step_states: Mutex::new(HashMap::new()),
             completion: Mutex::new(None),
         }
     }
@@ -298,68 +297,76 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
 
     fn emit_delta(&self, event: DeltaEvent) {
         // Accumulate streaming data for step summary logging (sync — no I/O)
+        let mut step_states = self.step_states.lock().unwrap();
+        let state = step_states
+            .entry(ROOT_CONVERSATION_PATH.to_string())
+            .or_default();
         match event.kind {
             DeltaKind::Text => {
-                let mut truncated = self.streaming_truncated.lock().unwrap();
                 append_with_cap(
-                    &mut self.streaming_buf.lock().unwrap(),
+                    &mut state.streaming_buf,
                     &event.text,
                     MAX_STEP_MODEL_PREVIEW_CHARS,
-                    &mut truncated,
+                    &mut state.streaming_truncated,
                 );
             }
             DeltaKind::ToolCallStart => {
                 let tool_name = event.text.clone();
-                *self.current_tool.lock().unwrap() = tool_name.clone();
-                *self.current_args_buf.lock().unwrap() = String::new();
-                *self.current_args_truncated.lock().unwrap() = false;
-                self.step_tool_calls.lock().unwrap().push(PendingToolCall {
+                state.current_tool = tool_name.clone();
+                state.current_args_buf = String::new();
+                state.current_args_truncated = false;
+                state.step_tool_calls.push(PendingToolCall {
                     name: tool_name,
                     key_arg: String::new(),
                     start_time: std::time::Instant::now(),
                 });
             }
             DeltaKind::ToolCallArgs => {
-                let mut buf = self.current_args_buf.lock().unwrap();
-                let mut truncated = self.current_args_truncated.lock().unwrap();
                 append_with_cap(
-                    &mut buf,
+                    &mut state.current_args_buf,
                     &event.text,
                     MAX_TOOL_ARGS_CAPTURE_CHARS,
-                    &mut truncated,
+                    &mut state.current_args_truncated,
                 );
-                let tool_name = self.current_tool.lock().unwrap().clone();
-                if let Some(key_arg) = extract_key_arg(&tool_name, &buf) {
-                    let mut calls = self.step_tool_calls.lock().unwrap();
-                    if let Some(last) = calls.last_mut() {
+                if let Some(key_arg) =
+                    extract_key_arg(&state.current_tool, &state.current_args_buf)
+                {
+                    if let Some(last) = state.step_tool_calls.last_mut() {
                         last.key_arg = key_arg;
                     }
                 }
             }
             DeltaKind::Thinking => {}
         }
+        drop(step_states);
 
         self.inner.emit_delta(event);
     }
 
     fn emit_step(&self, event: StepEvent) {
-        // Collect accumulated data (sync)
-        let model_preview = {
-            let buf = self.streaming_buf.lock().unwrap();
-            format_model_preview(&buf, *self.streaming_truncated.lock().unwrap())
-        };
+        let conversation_path = event
+            .conversation_path
+            .clone()
+            .unwrap_or_else(|| ROOT_CONVERSATION_PATH.to_string());
+        let state = self
+            .step_states
+            .lock()
+            .unwrap()
+            .remove(&conversation_path)
+            .unwrap_or_default();
 
-        let step_tools: Vec<StepToolCallEntry> = {
-            let calls = self.step_tool_calls.lock().unwrap();
-            calls
-                .iter()
-                .map(|tc| StepToolCallEntry {
-                    name: tc.name.clone(),
-                    key_arg: tc.key_arg.clone(),
-                    elapsed: tc.start_time.elapsed().as_millis() as u64,
-                })
-                .collect()
-        };
+        let model_preview =
+            format_model_preview(&state.streaming_buf, state.streaming_truncated);
+
+        let step_tools: Vec<StepToolCallEntry> = state
+            .step_tool_calls
+            .iter()
+            .map(|tc| StepToolCallEntry {
+                name: tc.name.clone(),
+                key_arg: tc.key_arg.clone(),
+                elapsed: tc.start_time.elapsed().as_millis() as u64,
+            })
+            .collect();
 
         let entry = ReplayEntry {
             seq: 0,
@@ -369,6 +376,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: None,
             step_number: Some(event.step),
+            step_depth: Some(event.depth),
+            conversation_path: Some(conversation_path),
             step_tokens_in: Some(event.tokens.input_tokens),
             step_tokens_out: Some(event.tokens.output_tokens),
             step_elapsed: Some(event.elapsed_ms),
@@ -389,14 +398,6 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                 }
             });
         });
-
-        // Reset buffers for next step
-        self.streaming_buf.lock().unwrap().clear();
-        *self.streaming_truncated.lock().unwrap() = false;
-        self.step_tool_calls.lock().unwrap().clear();
-        self.current_tool.lock().unwrap().clear();
-        self.current_args_buf.lock().unwrap().clear();
-        *self.current_args_truncated.lock().unwrap() = false;
 
         self.inner.emit_step(event);
     }
@@ -419,6 +420,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: Some(true),
             step_number: None,
+            step_depth: None,
+            conversation_path: None,
             step_tokens_in: None,
             step_tokens_out: None,
             step_elapsed: None,
@@ -447,12 +450,13 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         &self,
         depth: u32,
         step: u32,
+        conversation_path: Option<String>,
         phase: LoopPhase,
         metrics: LoopMetrics,
         is_final: bool,
     ) {
         self.inner
-            .emit_loop_health(depth, step, phase, metrics, is_final);
+            .emit_loop_health(depth, step, conversation_path, phase, metrics, is_final);
     }
 
     fn emit_curator_update(&self, summary: &str, files_changed: u32) {
@@ -465,6 +469,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             tool_name: None,
             is_rendered: None,
             step_number: None,
+            step_depth: None,
+            conversation_path: None,
             step_tokens_in: None,
             step_tokens_out: None,
             step_elapsed: None,
@@ -568,6 +574,8 @@ mod tests {
                 tool_name: None,
                 is_rendered: None,
                 step_number: None,
+                step_depth: None,
+                conversation_path: None,
                 step_tokens_in: None,
                 step_tokens_out: None,
                 step_elapsed: None,
@@ -637,6 +645,7 @@ mod tests {
         emitter.emit_step(StepEvent {
             depth: 0,
             step: 1,
+            conversation_path: Some("0".into()),
             tool_name: None,
             tokens: Default::default(),
             elapsed_ms: 1,
@@ -681,12 +690,16 @@ mod tests {
             text: filler.clone(),
         });
 
-        assert!(emitter.current_args_buf.lock().unwrap().len() <= MAX_TOOL_ARGS_CAPTURE_CHARS);
-        assert!(*emitter.current_args_truncated.lock().unwrap());
+        let step_states = emitter.step_states.lock().unwrap();
+        let root_state = step_states.get(ROOT_CONVERSATION_PATH).unwrap();
+        assert!(root_state.current_args_buf.len() <= MAX_TOOL_ARGS_CAPTURE_CHARS);
+        assert!(root_state.current_args_truncated);
+        drop(step_states);
 
         emitter.emit_step(StepEvent {
             depth: 0,
             step: 1,
+            conversation_path: Some("0".into()),
             tool_name: Some("read_file".into()),
             tokens: Default::default(),
             elapsed_ms: 1,
@@ -706,5 +719,67 @@ mod tests {
         let captured = deltas.lock().unwrap();
         assert_eq!(captured.len(), 3);
         assert_eq!(captured[2].text, filler);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_logging_emitter_keeps_root_buffers_when_child_step_arrives() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay);
+
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::Text,
+            text: "root preview".into(),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "read_file".into(),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"path":"root.txt"}"#.into(),
+        });
+
+        emitter.emit_step(StepEvent {
+            depth: 1,
+            step: 1,
+            conversation_path: Some("0.1".into()),
+            tool_name: None,
+            tokens: Default::default(),
+            elapsed_ms: 1,
+            is_final: false,
+            loop_phase: None,
+            loop_metrics: None,
+        });
+
+        emitter.emit_step(StepEvent {
+            depth: 0,
+            step: 2,
+            conversation_path: Some(ROOT_CONVERSATION_PATH.into()),
+            tool_name: None,
+            tokens: Default::default(),
+            elapsed_ms: 1,
+            is_final: false,
+            loop_phase: None,
+            loop_metrics: None,
+        });
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        let child = entries
+            .iter()
+            .find(|entry| entry.conversation_path.as_deref() == Some("0.1"))
+            .unwrap();
+        assert!(child.step_model_preview.is_none());
+        assert!(child.step_tool_calls.is_none());
+
+        let root = entries
+            .iter()
+            .find(|entry| entry.conversation_path.as_deref() == Some(ROOT_CONVERSATION_PATH))
+            .unwrap();
+        assert_eq!(root.step_model_preview.as_deref(), Some("root preview"));
+        let tool_calls = root.step_tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "read_file");
+        assert_eq!(tool_calls[0].key_arg, "root.txt");
     }
 }

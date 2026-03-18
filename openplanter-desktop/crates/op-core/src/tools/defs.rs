@@ -12,7 +12,7 @@ struct ToolDef {
     parameters: Value,
 }
 
-fn mvp_tool_defs() -> Vec<ToolDef> {
+fn workspace_tool_defs() -> Vec<ToolDef> {
     vec![
         // ── Filesystem ──
         ToolDef {
@@ -450,17 +450,97 @@ fn mvp_tool_defs() -> Vec<ToolDef> {
     ]
 }
 
-fn merged_tool_defs(dynamic_defs: &[ChromeMcpToolDef]) -> Vec<(String, String, Value)> {
-    let mut defs: Vec<(String, String, Value)> = mvp_tool_defs()
-        .into_iter()
-        .map(|def| {
-            (
-                def.name.to_string(),
-                def.description.to_string(),
-                def.parameters,
-            )
-        })
-        .collect();
+fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
+    let acceptance_description = if include_acceptance_criteria {
+        "Required, specific, verifiable checks the child result must satisfy."
+    } else {
+        "Optional, specific, verifiable checks the child result should satisfy."
+    };
+    let acceptance_required = if include_acceptance_criteria {
+        vec!["objective", "acceptance_criteria"]
+    } else {
+        vec!["objective"]
+    };
+
+    vec![
+        ToolDef {
+            name: "subtask",
+            description: "Delegate a bounded recursive subtask to an equal-tier or lower-tier child agent that can continue using recursive tools.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "Concrete child objective."
+                    },
+                    "acceptance_criteria": {
+                        "type": "string",
+                        "description": acceptance_description
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional same-tier or lower-tier model override for this child."
+                    },
+                    "reasoning_effort": {
+                        "type": "string",
+                        "description": "Optional reasoning effort override for the child model."
+                    }
+                },
+                "required": acceptance_required,
+                "additionalProperties": false
+            }),
+        },
+        ToolDef {
+            name: "execute",
+            description: "Delegate a bounded leaf task to the lowest-tier executor child. Executor children run flat and cannot recurse further.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "Concrete leaf objective."
+                    },
+                    "acceptance_criteria": {
+                        "type": "string",
+                        "description": acceptance_description
+                    }
+                },
+                "required": acceptance_required,
+                "additionalProperties": false
+            }),
+        },
+    ]
+}
+
+fn merged_tool_defs(
+    dynamic_defs: &[ChromeMcpToolDef],
+    include_delegation: bool,
+    delegation_only: bool,
+    include_acceptance_criteria: bool,
+) -> Vec<(String, String, Value)> {
+    let mut defs: Vec<(String, String, Value)> = if delegation_only {
+        delegation_tool_defs(include_acceptance_criteria)
+            .into_iter()
+            .take(1)
+            .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters))
+            .collect()
+    } else {
+        let mut defs: Vec<(String, String, Value)> = workspace_tool_defs()
+            .into_iter()
+            .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters))
+            .collect();
+        if include_delegation {
+            defs.extend(
+                delegation_tool_defs(include_acceptance_criteria)
+                    .into_iter()
+                    .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters)),
+            );
+        }
+        defs
+    };
+    if delegation_only {
+        return defs;
+    }
     let mut existing: std::collections::HashSet<String> =
         defs.iter().map(|(name, _, _)| name.clone()).collect();
     for def in dynamic_defs {
@@ -554,11 +634,25 @@ fn strict_fixup(schema: &mut Value) {
 
 /// Convert to OpenAI tools format: `[{ type: "function", function: { name, description, parameters, strict } }]`
 pub fn to_openai_tools() -> Vec<Value> {
-    to_openai_tools_with_dynamic(&[])
+    to_openai_tools_with_options(&[], false, false, false)
 }
 
 pub fn to_openai_tools_with_dynamic(dynamic_defs: &[ChromeMcpToolDef]) -> Vec<Value> {
-    merged_tool_defs(dynamic_defs)
+    to_openai_tools_with_options(dynamic_defs, false, false, false)
+}
+
+pub fn to_openai_tools_with_options(
+    dynamic_defs: &[ChromeMcpToolDef],
+    include_delegation: bool,
+    delegation_only: bool,
+    include_acceptance_criteria: bool,
+) -> Vec<Value> {
+    merged_tool_defs(
+        dynamic_defs,
+        include_delegation,
+        delegation_only,
+        include_acceptance_criteria,
+    )
         .into_iter()
         .map(|def| {
             let (name, description, mut params) = def;
@@ -578,11 +672,25 @@ pub fn to_openai_tools_with_dynamic(dynamic_defs: &[ChromeMcpToolDef]) -> Vec<Va
 
 /// Convert to Anthropic tools format: `[{ name, description, input_schema }]`
 pub fn to_anthropic_tools() -> Vec<Value> {
-    to_anthropic_tools_with_dynamic(&[])
+    to_anthropic_tools_with_options(&[], false, false, false)
 }
 
 pub fn to_anthropic_tools_with_dynamic(dynamic_defs: &[ChromeMcpToolDef]) -> Vec<Value> {
-    merged_tool_defs(dynamic_defs)
+    to_anthropic_tools_with_options(dynamic_defs, false, false, false)
+}
+
+pub fn to_anthropic_tools_with_options(
+    dynamic_defs: &[ChromeMcpToolDef],
+    include_delegation: bool,
+    delegation_only: bool,
+    include_acceptance_criteria: bool,
+) -> Vec<Value> {
+    merged_tool_defs(
+        dynamic_defs,
+        include_delegation,
+        delegation_only,
+        include_acceptance_criteria,
+    )
         .into_iter()
         .map(|def| {
             let (name, description, parameters) = def;
@@ -596,16 +704,36 @@ pub fn to_anthropic_tools_with_dynamic(dynamic_defs: &[ChromeMcpToolDef]) -> Vec
 }
 
 /// Build tool definitions for the given provider.
-pub fn build_tool_defs(provider: &str, dynamic_defs: &[ChromeMcpToolDef]) -> Vec<Value> {
+pub fn build_tool_defs(
+    provider: &str,
+    dynamic_defs: &[ChromeMcpToolDef],
+    include_delegation: bool,
+    delegation_only: bool,
+    include_acceptance_criteria: bool,
+) -> Vec<Value> {
     match provider {
-        "anthropic" => to_anthropic_tools_with_dynamic(dynamic_defs),
-        _ => to_openai_tools_with_dynamic(dynamic_defs),
+        "anthropic" => to_anthropic_tools_with_options(
+            dynamic_defs,
+            include_delegation,
+            delegation_only,
+            include_acceptance_criteria,
+        ),
+        _ => to_openai_tools_with_options(
+            dynamic_defs,
+            include_delegation,
+            delegation_only,
+            include_acceptance_criteria,
+        ),
     }
 }
 
 /// List of all known tool names.
 pub fn tool_names() -> Vec<&'static str> {
-    mvp_tool_defs().iter().map(|d| d.name).collect()
+    workspace_tool_defs()
+        .iter()
+        .chain(delegation_tool_defs(true).iter())
+        .map(|d| d.name)
+        .collect()
 }
 
 /// Build curator-restricted tool definitions for the given provider.
@@ -614,7 +742,7 @@ pub fn tool_names() -> Vec<&'static str> {
 pub fn build_curator_tool_defs(provider: &str) -> Vec<Value> {
     use crate::engine::curator::CURATOR_TOOL_NAMES;
 
-    let filtered: Vec<ToolDef> = mvp_tool_defs()
+    let filtered: Vec<ToolDef> = workspace_tool_defs()
         .into_iter()
         .filter(|d| CURATOR_TOOL_NAMES.contains(&d.name))
         .collect();
@@ -705,19 +833,42 @@ mod tests {
         assert!(names.contains(&"web_search"));
         assert!(names.contains(&"think"));
         assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"subtask"));
+        assert!(names.contains(&"execute"));
     }
 
     #[test]
     fn test_build_tool_defs_anthropic() {
-        let tools = build_tool_defs("anthropic", &[]);
+        let tools = build_tool_defs("anthropic", &[], false, false, false);
         assert!(tools[0].get("input_schema").is_some());
         assert!(tools[0].get("type").is_none());
     }
 
     #[test]
     fn test_build_tool_defs_openai() {
-        let tools = build_tool_defs("openai", &[]);
+        let tools = build_tool_defs("openai", &[], false, false, false);
         assert_eq!(tools[0]["type"], "function");
+    }
+
+    #[test]
+    fn test_build_tool_defs_recursive_parent_includes_delegation_tools() {
+        let tools = build_tool_defs("openai", &[], true, false, true);
+        let names: Vec<String> = tools
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"subtask".to_string()));
+        assert!(names.contains(&"execute".to_string()));
+    }
+
+    #[test]
+    fn test_build_tool_defs_delegation_only_narrows_to_subtask() {
+        let tools = build_tool_defs("openai", &[], true, true, true);
+        let names: Vec<String> = tools
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["subtask".to_string()]);
     }
 
     #[test]

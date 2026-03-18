@@ -175,6 +175,30 @@ fn parse_chunks(raw_lines: &[&str]) -> Vec<PatchChunk> {
     }
 }
 
+pub(crate) fn collect_write_targets(
+    root: &Path,
+    patch_text: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let ops = parse_agent_patch(patch_text)?;
+    let mut targets = Vec::new();
+
+    for op in ops {
+        match op {
+            PatchOp::Add { path, .. } | PatchOp::Delete { path } => {
+                targets.push(resolve_path(root, &path)?);
+            }
+            PatchOp::Update { path, move_to, .. } => {
+                targets.push(resolve_path(root, &path)?);
+                if let Some(new_path) = move_to {
+                    targets.push(resolve_path(root, &new_path)?);
+                }
+            }
+        }
+    }
+
+    Ok(targets)
+}
+
 fn find_subsequence(haystack: &[String], needle: &[String], start_idx: usize) -> Option<usize> {
     if needle.is_empty() {
         return Some(start_idx.min(haystack.len()));

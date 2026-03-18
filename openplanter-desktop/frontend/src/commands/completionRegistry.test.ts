@@ -26,6 +26,7 @@ describe("completionRegistry", () => {
     expect(values).toContain("/zai-plan");
     expect(values).toContain("/web-search");
     expect(values).toContain("/continuity");
+    expect(values).toContain("/recursion");
     expect(values).toContain("/reasoning");
     expect(values).toContain("/chrome");
     expect(values).toContain("/init");
@@ -103,6 +104,16 @@ describe("completionRegistry", () => {
       "continue",
     ]);
     expect(continuityCmd!.children?.[0].children?.[0].value).toBe("--save");
+  });
+
+  it("/recursion has flat, auto, and force-max children", () => {
+    const recursionCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/recursion");
+    expect(recursionCmd).toBeDefined();
+    expect(recursionCmd!.children?.map((child) => child.value)).toEqual([
+      "flat",
+      "auto",
+      "force-max",
+    ]);
   });
 
   it("/zai-plan has paygo and coding children", () => {

@@ -11,9 +11,9 @@ pub mod patching;
 pub mod shell;
 pub mod web;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::{AgentConfig, normalize_web_search_provider};
 
@@ -44,6 +44,12 @@ impl ToolResult {
 enum ToolScope {
     FullWorkspace,
     CuratorWikiOnly { allowed_root: PathBuf },
+}
+
+#[derive(Clone)]
+pub(crate) struct ParallelWriteScope {
+    pub claims: Arc<Mutex<HashMap<PathBuf, String>>>,
+    pub owner_id: String,
 }
 
 /// Central dispatcher for workspace tools.
@@ -85,6 +91,7 @@ pub struct WorkspaceTools {
     chrome_mcp: Option<Arc<chrome_mcp::ChromeMcpManager>>,
     files_read: HashSet<PathBuf>,
     bg_jobs: shell::BgJobs,
+    parallel_write_scopes: Vec<ParallelWriteScope>,
 }
 
 fn clip(text: &str, max_chars: usize) -> String {
@@ -100,6 +107,14 @@ impl WorkspaceTools {
     pub fn new(
         config: &AgentConfig,
         chrome_mcp: Option<Arc<chrome_mcp::ChromeMcpManager>>,
+    ) -> Self {
+        Self::new_with_parallel_write_scopes(config, chrome_mcp, Vec::new())
+    }
+
+    pub(crate) fn new_with_parallel_write_scopes(
+        config: &AgentConfig,
+        chrome_mcp: Option<Arc<chrome_mcp::ChromeMcpManager>>,
+        parallel_write_scopes: Vec<ParallelWriteScope>,
     ) -> Self {
         Self {
             root: config.workspace.clone(),
@@ -143,6 +158,7 @@ impl WorkspaceTools {
             chrome_mcp,
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
+            parallel_write_scopes,
         }
     }
 
@@ -194,16 +210,15 @@ impl WorkspaceTools {
             chrome_mcp: None,
             files_read: HashSet::new(),
             bg_jobs: shell::BgJobs::new(),
+            parallel_write_scopes: Vec::new(),
         }
     }
 
-    fn enforce_write_scope(&self, raw_path: &str) -> Result<(), ToolResult> {
+    fn enforce_write_scope_resolved(&self, resolved: &std::path::Path) -> Result<(), ToolResult> {
         match &self.scope {
             ToolScope::FullWorkspace => Ok(()),
             ToolScope::CuratorWikiOnly { allowed_root } => {
-                let resolved =
-                    filesystem::resolve_path(&self.root, raw_path).map_err(ToolResult::error)?;
-                if resolved == *allowed_root || resolved.starts_with(allowed_root) {
+                if resolved == allowed_root || resolved.starts_with(allowed_root) {
                     Ok(())
                 } else {
                     Err(ToolResult::error(
@@ -212,6 +227,54 @@ impl WorkspaceTools {
                 }
             }
         }
+    }
+
+    fn rollback_write_claims(&self, inserted: &[(usize, PathBuf)]) {
+        for (scope_idx, target) in inserted.iter().rev() {
+            if let Some(scope) = self.parallel_write_scopes.get(*scope_idx) {
+                let mut claims = scope.claims.lock().unwrap();
+                if claims.get(target) == Some(&scope.owner_id) {
+                    claims.remove(target);
+                }
+            }
+        }
+    }
+
+    fn register_write_targets(&self, targets: &[PathBuf]) -> Result<(), ToolResult> {
+        if self.parallel_write_scopes.is_empty() || targets.is_empty() {
+            return Ok(());
+        }
+
+        let canon_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let mut inserted: Vec<(usize, PathBuf)> = Vec::new();
+
+        for target in targets {
+            for (scope_idx, scope) in self.parallel_write_scopes.iter().enumerate() {
+                let mut claims = scope.claims.lock().unwrap();
+                match claims.get(target) {
+                    Some(owner) if owner == &scope.owner_id => {}
+                    Some(owner) => {
+                        let owner = owner.clone();
+                        let rel = target
+                            .strip_prefix(&canon_root)
+                            .unwrap_or(target)
+                            .to_string_lossy()
+                            .into_owned();
+                        drop(claims);
+                        self.rollback_write_claims(&inserted);
+                        return Err(ToolResult::error(format!(
+                            "Parallel write conflict: '{rel}' is already claimed by sibling task {owner}."
+                        )));
+                    }
+                    None => {
+                        claims.insert(target.clone(), scope.owner_id.clone());
+                        inserted.push((scope_idx, target.clone()));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute a tool by name with JSON arguments string.
@@ -239,7 +302,14 @@ impl WorkspaceTools {
             "write_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(result) = self.enforce_write_scope(path) {
+                let resolved = match filesystem::resolve_workspace_path(&self.root, path) {
+                    Ok(resolved) => resolved,
+                    Err(err) => return ToolResult::error(err),
+                };
+                if let Err(result) = self.enforce_write_scope_resolved(&resolved) {
+                    return result;
+                }
+                if let Err(result) = self.register_write_targets(&[resolved]) {
                     return result;
                 }
                 filesystem::write_file(&self.root, path, content, &mut self.files_read)
@@ -248,7 +318,14 @@ impl WorkspaceTools {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let old_text = args.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
                 let new_text = args.get("new_text").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(result) = self.enforce_write_scope(path) {
+                let resolved = match filesystem::resolve_workspace_path(&self.root, path) {
+                    Ok(resolved) => resolved,
+                    Err(err) => return ToolResult::error(err),
+                };
+                if let Err(result) = self.enforce_write_scope_resolved(&resolved) {
+                    return result;
+                }
+                if let Err(result) = self.register_write_targets(&[resolved]) {
                     return result;
                 }
                 filesystem::edit_file(&self.root, path, old_text, new_text, &mut self.files_read)
@@ -568,6 +645,18 @@ impl WorkspaceTools {
             // Patching
             "apply_patch" => {
                 let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+                let write_targets = match patching::collect_write_targets(&self.root, patch) {
+                    Ok(targets) => targets,
+                    Err(err) => return ToolResult::error(format!("Patch failed: {err}")),
+                };
+                for target in &write_targets {
+                    if let Err(result) = self.enforce_write_scope_resolved(target) {
+                        return result;
+                    }
+                }
+                if let Err(result) = self.register_write_targets(&write_targets) {
+                    return result;
+                }
                 patching::apply_patch(&self.root, patch, &mut self.files_read)
             }
             "hashline_edit" => {
@@ -577,6 +666,16 @@ impl WorkspaceTools {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let resolved = match filesystem::resolve_workspace_path(&self.root, path) {
+                    Ok(resolved) => resolved,
+                    Err(err) => return ToolResult::error(err),
+                };
+                if let Err(result) = self.enforce_write_scope_resolved(&resolved) {
+                    return result;
+                }
+                if let Err(result) = self.register_write_targets(&[resolved]) {
+                    return result;
+                }
                 patching::hashline_edit(&self.root, path, &edits, &mut self.files_read)
             }
 
@@ -721,5 +820,60 @@ mod tests {
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("[truncated"));
         assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_write_scope_rejects_sibling_conflicts() {
+        let tmp = tempdir().unwrap();
+        let cfg = test_config(tmp.path());
+        let claims = Arc::new(Mutex::new(HashMap::new()));
+        std::fs::write(tmp.path().join("shared.txt"), "original").unwrap();
+
+        let mut first = WorkspaceTools::new_with_parallel_write_scopes(
+            &cfg,
+            None,
+            vec![ParallelWriteScope {
+                claims: claims.clone(),
+                owner_id: "0.1".into(),
+            }],
+        );
+        let mut second = WorkspaceTools::new_with_parallel_write_scopes(
+            &cfg,
+            None,
+            vec![ParallelWriteScope {
+                claims,
+                owner_id: "0.2".into(),
+            }],
+        );
+
+        assert!(!first
+            .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
+            .await
+            .is_error);
+        assert!(!second
+            .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
+            .await
+            .is_error);
+
+        let first_result = first
+            .execute(
+                "write_file",
+                r#"{"path":"shared.txt","content":"first child"}"#,
+            )
+            .await;
+        assert!(!first_result.is_error, "unexpected error: {}", first_result.content);
+
+        let second_result = second
+            .execute(
+                "write_file",
+                r#"{"path":"shared.txt","content":"second child"}"#,
+            )
+            .await;
+        assert!(second_result.is_error);
+        assert!(second_result.content.contains("Parallel write conflict"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("shared.txt")).unwrap(),
+            "first child"
+        );
     }
 }

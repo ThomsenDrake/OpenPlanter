@@ -55,6 +55,10 @@ const CREDENTIAL_LABELS: Record<(typeof CREDENTIAL_SERVICES)[number], string> = 
   mistral_transcription: "mistral transcription",
 };
 
+function formatRecursionMode(recursive: boolean, policy: string): string {
+  return recursive ? `recursive (${policy.replace(/_/g, "-")})` : "flat";
+}
+
 export function createApp(root: HTMLElement): void {
   // Status bar
   const statusBar = createStatusBar();
@@ -133,7 +137,9 @@ export function createApp(root: HTMLElement): void {
       `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,
       `<div><span class="label">chrome mcp:</span> <span class="value">${s.chromeMcpStatus} (${s.chromeMcpChannel})</span></div>`,
       `<div><span class="label">reasoning:</span> <span class="value">${s.reasoningEffort ?? "off"}</span></div>`,
-      `<div><span class="label">mode:</span> <span class="value">${s.recursive ? "recursive" : "flat"}</span></div>`,
+      `<div><span class="label">mode:</span> <span class="value">${formatRecursionMode(s.recursive, s.recursionPolicy)}</span></div>`,
+      `<div><span class="label">min subtask depth:</span> <span class="value">${s.minSubtaskDepth}</span></div>`,
+      `<div><span class="label">max depth:</span> <span class="value">${s.maxDepth}</span></div>`,
     ].join("");
   }
   appState.subscribe(renderSettings);
@@ -182,6 +188,7 @@ async function switchToNewSession(sessionList: HTMLElement): Promise<void> {
       outputTokens: 0,
       currentStep: 0,
       currentDepth: 0,
+      currentConversationPath: null,
       loopHealth: null,
       lastLoopMetrics: null,
       lastCompletion: null,
@@ -222,6 +229,8 @@ function replayEntryToMessage(entry: ReplayEntry): ChatMessage {
     stepTokensOut: entry.step_tokens_out ?? undefined,
     stepElapsed: entry.step_elapsed ?? undefined,
     stepModelPreview: entry.step_model_preview ?? undefined,
+    stepDepth: entry.step_depth ?? undefined,
+    conversationPath: entry.conversation_path ?? undefined,
     stepToolCalls: entry.step_tool_calls?.map((tc) => ({
       name: tc.name,
       keyArg: tc.key_arg,
@@ -242,6 +251,7 @@ async function switchToSession(sessionId: string, sessionList: HTMLElement): Pro
       outputTokens: 0,
       currentStep: 0,
       currentDepth: 0,
+      currentConversationPath: null,
       loopHealth: null,
       lastLoopMetrics: null,
       lastCompletion: null,

@@ -14,6 +14,8 @@ pub struct TraceEvent {
 pub struct StepEvent {
     pub depth: u32,
     pub step: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_path: Option<String>,
     pub tool_name: Option<String>,
     pub tokens: TokenUsage,
     pub elapsed_ms: u64,
@@ -123,6 +125,8 @@ pub struct CompleteEvent {
 pub struct LoopHealthEvent {
     pub depth: u32,
     pub step: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_path: Option<String>,
     pub phase: LoopPhase,
     pub metrics: LoopMetrics,
     pub is_final: bool,
@@ -329,6 +333,8 @@ pub struct ConfigView {
     pub workspace: String,
     pub session_id: Option<String>,
     pub recursive: bool,
+    pub recursion_policy: String,
+    pub min_subtask_depth: i64,
     pub max_depth: i64,
     pub max_steps_per_call: i64,
     pub demo: bool,
@@ -343,6 +349,10 @@ pub struct PartialConfig {
     pub zai_plan: Option<String>,
     pub web_search_provider: Option<String>,
     pub continuity_mode: Option<String>,
+    pub recursive: Option<bool>,
+    pub recursion_policy: Option<String>,
+    pub min_subtask_depth: Option<i64>,
+    pub max_depth: Option<i64>,
     pub mistral_document_ai_use_shared_key: Option<bool>,
     pub chrome_mcp_enabled: Option<bool>,
     pub chrome_mcp_auto_connect: Option<bool>,
@@ -569,6 +579,7 @@ mod tests {
         let step = StepEvent {
             depth: 0,
             step: 3,
+            conversation_path: Some("0.2".into()),
             tool_name: Some("read_file".into()),
             tokens: TokenUsage {
                 input_tokens: 1234,

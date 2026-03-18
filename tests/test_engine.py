@@ -129,6 +129,97 @@ class EngineTests(unittest.TestCase):
             result = engine.solve("test flat mode")
             self.assertEqual(result, "flat mode fallback")
 
+    def test_min_subtask_depth_forces_root_delegation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=4,
+                recursive=True,
+                min_subtask_depth=1,
+                acceptance_criteria=False,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="too shallow", stop_reason="end_turn"),
+                    ModelTurn(tool_calls=[_tc("subtask", objective="delegate now")]),
+                    ModelTurn(text="child done", stop_reason="end_turn"),
+                    ModelTurn(text="root done", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("simple objective")
+            self.assertEqual(result, "root done")
+
+    def test_force_max_requires_nested_subtask_until_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=4,
+                recursive=True,
+                recursion_policy="force_max",
+                acceptance_criteria=False,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("subtask", objective="level 1")]),
+                    ModelTurn(text="still too shallow", stop_reason="end_turn"),
+                    ModelTurn(tool_calls=[_tc("subtask", objective="level 2")]),
+                    ModelTurn(text="leaf done", stop_reason="end_turn"),
+                    ModelTurn(text="mid done", stop_reason="end_turn"),
+                    ModelTurn(text="root done", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("force deep recursion")
+            self.assertEqual(result, "root done")
+
+    def test_auto_policy_forces_complex_objective_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=4,
+                recursive=True,
+                acceptance_criteria=False,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="too shallow", stop_reason="end_turn"),
+                    ModelTurn(tool_calls=[_tc("subtask", objective="split the work")]),
+                    ModelTurn(text="child done", stop_reason="end_turn"),
+                    ModelTurn(text="root done", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("analyze frontend and backend and then implement the fix")
+            self.assertEqual(result, "root done")
+
+    def test_auto_policy_does_not_force_simple_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=4,
+                recursive=True,
+                acceptance_criteria=False,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[ModelTurn(text="done directly", stop_reason="end_turn")]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("write hello.txt")
+            self.assertEqual(result, "done directly")
+
     def test_web_search_action_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -307,6 +398,7 @@ class REPLPromptTests(unittest.TestCase):
         prompt = _build_system_prompt(recursive=True)
         for keyword in ("REPL STRUCTURE", "READ", "EVAL", "PRINT", "LOOP"):
             self.assertIn(keyword, prompt)
+        self.assertIn("recursion_policy=auto", prompt)
 
     def test_flat_prompt_excludes_repl(self) -> None:
         prompt = _build_system_prompt(recursive=False)
@@ -323,7 +415,13 @@ class REPLPromptTests(unittest.TestCase):
     def test_recursive_initial_message_has_repl_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=3, recursive=True)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=3,
+                recursive=True,
+                min_subtask_depth=1,
+            )
             tools = WorkspaceTools(root=root)
 
             captured: list[str] = []
@@ -343,6 +441,9 @@ class REPLPromptTests(unittest.TestCase):
             parsed = json.loads(captured[0])
             self.assertIn("repl_hint", parsed)
             self.assertIn("REPL", parsed["repl_hint"])
+            self.assertEqual(parsed["recursion_policy"], "auto")
+            self.assertEqual(parsed["min_subtask_depth"], 1)
+            self.assertEqual(parsed["required_subtask_depth"], 1)
 
     def test_flat_initial_message_no_repl_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

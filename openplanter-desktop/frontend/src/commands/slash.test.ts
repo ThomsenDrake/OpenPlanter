@@ -27,6 +27,8 @@ describe("dispatchSlashCommand", () => {
       chromeMcpStatusDetail: "Connected to Chrome.",
       sessionId: "20260101-120000-deadbeef",
       reasoningEffort: "medium",
+      recursionPolicy: "auto",
+      minSubtaskDepth: 0,
       initGateState: "ready",
     });
   });
@@ -77,6 +79,13 @@ describe("dispatchSlashCommand", () => {
     const result = await dispatchSlashCommand("/status");
     expect(result).not.toBeNull();
     expect(result!.lines.some((l) => l.includes("Session:"))).toBe(true);
+  });
+
+  it("status shows recursion policy and min depth", async () => {
+    const result = await dispatchSlashCommand("/status");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Policy:"))).toBe(true);
+    expect(result!.lines.some((l) => l.includes("Min depth:"))).toBe(true);
   });
 
   it("status shows web search provider", async () => {
@@ -200,11 +209,24 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("/continuity"))).toBe(true);
   });
 
+  it("help includes recursion command", async () => {
+    const result = await dispatchSlashCommand("/help");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("/recursion"))).toBe(true);
+  });
+
   it("chrome dispatches", async () => {
     const result = await dispatchSlashCommand("/chrome");
     expect(result).not.toBeNull();
     expect(result!.action).toBe("handled");
     expect(result!.lines.some((l) => l.includes("Chrome MCP:"))).toBe(true);
+  });
+
+  it("recursion dispatches", async () => {
+    const result = await dispatchSlashCommand("/recursion");
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("handled");
+    expect(result!.lines.some((l) => l.includes("Recursion mode:"))).toBe(true);
   });
 
   it("/init status dispatches", async () => {

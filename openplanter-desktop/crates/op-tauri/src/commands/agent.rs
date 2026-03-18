@@ -256,6 +256,8 @@ pub async fn solve(
         tool_name: None,
         is_rendered: None,
         step_number: None,
+        step_depth: None,
+        conversation_path: None,
         step_tokens_in: None,
         step_tokens_out: None,
         step_elapsed: None,

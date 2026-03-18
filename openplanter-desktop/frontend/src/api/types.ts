@@ -33,6 +33,7 @@ export interface LoopMetrics {
 export interface StepEvent {
   depth: number;
   step: number;
+  conversation_path?: string;
   tool_name: string | null;
   tokens: TokenUsage;
   elapsed_ms: number;
@@ -67,6 +68,7 @@ export interface CompleteEvent {
 export interface LoopHealthEvent {
   depth: number;
   step: number;
+  conversation_path?: string;
   phase: LoopPhase;
   metrics: LoopMetrics;
   is_final: boolean;
@@ -203,6 +205,8 @@ export interface ConfigView {
   workspace: string;
   session_id: string | null;
   recursive: boolean;
+  recursion_policy: string;
+  min_subtask_depth: number;
   max_depth: number;
   max_steps_per_call: number;
   demo: boolean;
@@ -222,6 +226,10 @@ export interface PartialConfig {
   chrome_mcp_channel?: string;
   chrome_mcp_connect_timeout_sec?: number;
   chrome_mcp_rpc_timeout_sec?: number;
+  recursive?: boolean;
+  recursion_policy?: string;
+  min_subtask_depth?: number;
+  max_depth?: number;
 }
 
 export interface ModelInfo {
@@ -256,6 +264,10 @@ export interface PersistentSettings {
   chrome_mcp_channel?: string | null;
   chrome_mcp_connect_timeout_sec?: number | null;
   chrome_mcp_rpc_timeout_sec?: number | null;
+  recursive?: boolean | null;
+  recursion_policy?: string | null;
+  min_subtask_depth?: number | null;
+  max_depth?: number | null;
 }
 
 export type CredentialService =
@@ -375,6 +387,8 @@ export interface ReplayEntry {
   step_elapsed?: number;
   step_model_preview?: string;
   step_tool_calls?: StepToolCallEntry[];
+  step_depth?: number;
+  conversation_path?: string;
 }
 
 export type AgentEvent =
@@ -383,6 +397,7 @@ export type AgentEvent =
       type: "step";
       depth: number;
       step: number;
+      conversation_path?: string;
       tool_name: string | null;
       tokens: TokenUsage;
       elapsed_ms: number;
@@ -394,4 +409,12 @@ export type AgentEvent =
   | { type: "complete"; result: string; loop_metrics?: LoopMetrics; completion?: CompletionMeta }
   | { type: "error"; message: string }
   | { type: "wiki_updated"; nodes: GraphNode[]; edges: GraphEdge[] }
-  | { type: "loop_health"; depth: number; step: number; phase: LoopPhase; metrics: LoopMetrics; is_final: boolean };
+  | {
+      type: "loop_health";
+      depth: number;
+      step: number;
+      conversation_path?: string;
+      phase: LoopPhase;
+      metrics: LoopMetrics;
+      is_final: boolean;
+    };
