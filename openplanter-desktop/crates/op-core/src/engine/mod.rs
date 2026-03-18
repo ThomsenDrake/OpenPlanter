@@ -8,8 +8,9 @@ pub mod curator;
 pub mod investigation_state;
 pub mod judge;
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -25,8 +26,7 @@ use crate::events::{
 };
 use crate::model::{BaseModel, Message, ModelTurn, RateLimitError};
 use crate::prompts::build_system_prompt;
-use crate::tools::ToolResult;
-use crate::tools::WorkspaceTools;
+use crate::tools::{ParallelWriteScope, ToolResult, WorkspaceTools};
 use crate::tools::defs::build_tool_defs;
 
 use self::context::TurnSummary;
@@ -1128,6 +1128,7 @@ async fn execute_recursive_tool_call(
     child_path: String,
     current_model_name: &str,
     current_reasoning_effort: Option<&str>,
+    parallel_write_scopes: Vec<ParallelWriteScope>,
 ) -> ToolResult {
     let args: Value =
         serde_json::from_str(&tool_call.arguments).unwrap_or(Value::Object(Map::new()));
@@ -1186,6 +1187,7 @@ async fn execute_recursive_tool_call(
         depth + 1,
         child_path,
         executor_mode,
+        parallel_write_scopes,
     )
     .await;
 
@@ -1218,6 +1220,7 @@ async fn solve_frame(
     depth: u32,
     conversation_path: String,
     executor_mode: bool,
+    parallel_write_scopes: Vec<ParallelWriteScope>,
 ) -> SolveFrameOutcome {
     let recursive_enabled = config.recursive && !executor_mode;
     let required_depth = required_subtask_depth(config, objective);
@@ -1248,7 +1251,11 @@ async fn solve_frame(
     } else {
         Vec::new()
     };
-    let mut tools = WorkspaceTools::new(config, chrome_mcp.clone());
+    let mut tools = WorkspaceTools::new_with_parallel_write_scopes(
+        config,
+        chrome_mcp.clone(),
+        parallel_write_scopes.clone(),
+    );
 
     let system_prompt =
         build_system_prompt(recursive_enabled, config.acceptance_criteria, config.demo);
@@ -1511,10 +1518,16 @@ async fn solve_frame(
         }
 
         if !delegated.is_empty() {
+            let sibling_write_claims = Arc::new(Mutex::new(HashMap::<PathBuf, String>::new()));
             let delegated_results = join_all(delegated.into_iter().map(|(index, child_path, tool_call)| {
                 let cancel = cancel.clone();
                 let chrome_mcp = chrome_mcp.clone();
                 let current_model_name = current_model_name.clone();
+                let mut child_parallel_write_scopes = parallel_write_scopes.clone();
+                child_parallel_write_scopes.push(ParallelWriteScope {
+                    claims: sibling_write_claims.clone(),
+                    owner_id: child_path.clone(),
+                });
                 async move {
                     let result = execute_recursive_tool_call(
                         &tool_call,
@@ -1526,6 +1539,7 @@ async fn solve_frame(
                         child_path,
                         &current_model_name,
                         current_reasoning_effort,
+                        child_parallel_write_scopes,
                     )
                     .await;
                     (
@@ -1773,6 +1787,7 @@ pub async fn solve_with_initial_context_and_chrome_mcp(
         0,
         "0".to_string(),
         false,
+        Vec::new(),
     )
     .await;
     match outcome.status {

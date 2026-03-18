@@ -35,6 +35,35 @@ function lastLines(text: string, n: number): string {
 }
 
 type ActivityMode = "thinking" | "streaming" | "tool_args" | "tool";
+const ROOT_CONVERSATION_PATH = "0";
+let activeChatPaneCleanup: (() => void) | null = null;
+
+interface PendingStepToolCall {
+  name: string;
+  keyArg: string;
+  startTime: number;
+  elapsed?: number;
+}
+
+interface StepBufferState {
+  thinkingBuf: string;
+  streamingBuf: string;
+  toolArgsBuf: string;
+  currentToolName: string;
+  stepToolCalls: PendingStepToolCall[];
+  stepStartTime: number;
+}
+
+function createStepBufferState(): StepBufferState {
+  return {
+    thinkingBuf: "",
+    streamingBuf: "",
+    toolArgsBuf: "",
+    currentToolName: "",
+    stepToolCalls: [],
+    stepStartTime: Date.now(),
+  };
+}
 
 /**
  * Manages the transient activity indicator shown during streaming.
@@ -212,6 +241,9 @@ function renderToolResultBlock(seg: Extract<ContentSegment, { type: "tool_result
 }
 
 export function createChatPane(): HTMLElement {
+  activeChatPaneCleanup?.();
+  activeChatPaneCleanup = null;
+
   const pane = document.createElement("div");
   pane.className = "chat-pane";
 
@@ -274,20 +306,24 @@ export function createChatPane(): HTMLElement {
 
   // ── Streaming state ──
   let activity: ActivityIndicator | null = null;
-  let thinkingBuf = "";
-  let streamingBuf = "";
-  let toolArgsBuf = "";
-  let currentToolName = "";
-  let stepToolCalls: { name: string; keyArg: string; startTime: number; elapsed?: number }[] = [];
-  let stepStartTime = Date.now();
+  let wasRunning = appState.get().isRunning;
+  const stepBuffers = new Map<string, StepBufferState>();
+
+  function getStepBuffer(path: string): StepBufferState {
+    let buffer = stepBuffers.get(path);
+    if (!buffer) {
+      buffer = createStepBufferState();
+      stepBuffers.set(path, buffer);
+    }
+    return buffer;
+  }
+
+  function resetBuffer(path: string) {
+    stepBuffers.delete(path);
+  }
 
   function resetBuffers() {
-    thinkingBuf = "";
-    streamingBuf = "";
-    toolArgsBuf = "";
-    currentToolName = "";
-    stepToolCalls = [];
-    stepStartTime = Date.now();
+    stepBuffers.clear();
   }
 
   function ensureActivity(): ActivityIndicator {
@@ -487,33 +523,34 @@ export function createChatPane(): HTMLElement {
     autoScroll();
   }
 
-  appState.subscribe(render);
+  const unsubscribeRender = appState.subscribe(render);
 
   // ── Handle streaming deltas ──
 
-  window.addEventListener("agent-delta", ((e: CustomEvent) => {
+  const onAgentDelta = ((e: CustomEvent) => {
     const { kind, text } = e.detail;
+    const buffer = getStepBuffer(ROOT_CONVERSATION_PATH);
 
     if (kind === "thinking") {
-      thinkingBuf += text;
+      buffer.thinkingBuf += text;
       const ai = ensureActivity();
       ai.setMode("thinking");
-      ai.setPreview(thinkingBuf);
+      ai.setPreview(buffer.thinkingBuf);
       autoScroll();
     } else if (kind === "text") {
       // Transition from thinking to streaming
-      if (thinkingBuf && !streamingBuf) {
+      if (buffer.thinkingBuf && !buffer.streamingBuf) {
         // First text delta after thinking — switch mode
       }
-      streamingBuf += text;
+      buffer.streamingBuf += text;
       const ai = ensureActivity();
       ai.setMode("streaming");
-      ai.setPreview(stripToolXml(streamingBuf));
+      ai.setPreview(stripToolXml(buffer.streamingBuf));
       autoScroll();
     } else if (kind === "tool_call_start") {
-      currentToolName = text;
-      toolArgsBuf = "";
-      stepToolCalls.push({
+      buffer.currentToolName = text;
+      buffer.toolArgsBuf = "";
+      buffer.stepToolCalls.push({
         name: text,
         keyArg: "",
         startTime: Date.now(),
@@ -524,49 +561,55 @@ export function createChatPane(): HTMLElement {
       ai.setPreview("");
       autoScroll();
     } else if (kind === "tool_call_args") {
-      toolArgsBuf += text;
+      buffer.toolArgsBuf += text;
       const ai = ensureActivity();
 
       // Always re-extract key arg as more chunks arrive — partial JSON
       // grows with each chunk so the extracted value gets more complete.
-      const keyArg = extractToolCallKeyArg(currentToolName, toolArgsBuf);
+      const keyArg = extractToolCallKeyArg(buffer.currentToolName, buffer.toolArgsBuf);
       if (keyArg) {
-        const current = stepToolCalls[stepToolCalls.length - 1];
+        const current = buffer.stepToolCalls[buffer.stepToolCalls.length - 1];
         if (current) current.keyArg = keyArg;
-        ai.setToolRunning(currentToolName, keyArg);
+        ai.setToolRunning(buffer.currentToolName, keyArg);
       } else {
-        ai.setPreview(toolArgsBuf.slice(-120));
+        ai.setPreview(buffer.toolArgsBuf.slice(-120));
       }
       autoScroll();
     }
-  }) as EventListener);
+  }) as EventListener;
+  window.addEventListener("agent-delta", onAgentDelta);
 
   // ── Handle step events — render step summary ──
 
-  window.addEventListener("agent-step", ((e: CustomEvent) => {
+  const onAgentStep = ((e: CustomEvent) => {
     const event = e.detail;
     const now = Date.now();
+    const conversationPath = event.conversation_path ?? ROOT_CONVERSATION_PATH;
+    const buffer = stepBuffers.get(conversationPath) ?? createStepBufferState();
 
     // Finalize elapsed times for tool calls in this step
-    for (const tc of stepToolCalls) {
+    for (const tc of buffer.stepToolCalls) {
       if (tc.elapsed === undefined || tc.elapsed === 0) {
         tc.elapsed = now - tc.startTime;
       }
     }
 
     // Build step summary tool calls
-    const summaryTools: StepToolCall[] = stepToolCalls.map((tc) => ({
+    const summaryTools: StepToolCall[] = buffer.stepToolCalls.map((tc) => ({
       name: tc.name,
       keyArg: tc.keyArg,
       elapsed: tc.elapsed || now - tc.startTime,
     }));
 
-    // Remove activity indicator
-    removeActivity();
+    if (conversationPath === ROOT_CONVERSATION_PATH) {
+      removeActivity();
+    }
 
     // Create step summary message
-    const stepElapsed = now - stepStartTime;
-    const modelPreview = streamingBuf.trim();
+    const stepElapsed = stepBuffers.has(conversationPath)
+      ? now - buffer.stepStartTime
+      : event.elapsed_ms;
+    const modelPreview = buffer.streamingBuf.trim();
 
     appState.update((s) => ({
       ...s,
@@ -579,7 +622,7 @@ export function createChatPane(): HTMLElement {
           timestamp: now,
           stepNumber: event.step,
           stepDepth: event.depth,
-          conversationPath: event.conversation_path ?? "0",
+          conversationPath,
           stepTokensIn: event.tokens.input_tokens,
           stepTokensOut: event.tokens.output_tokens,
           stepElapsed: stepElapsed,
@@ -590,25 +633,43 @@ export function createChatPane(): HTMLElement {
     }));
 
     // Reset buffers for next step
-    resetBuffers();
-  }) as EventListener);
+    resetBuffer(conversationPath);
+  }) as EventListener;
+  window.addEventListener("agent-step", onAgentStep);
 
   // ── When complete event fires, clean up ──
-  appState.subscribe(() => {
-    if (!appState.get().isRunning) {
+  const unsubscribeCompletion = appState.subscribe(() => {
+    const isRunning = appState.get().isRunning;
+    if (wasRunning && !isRunning) {
       removeActivity();
       resetBuffers();
     }
+    wasRunning = isRunning;
   });
 
   // ── Clear messages DOM when session changes ──
-  window.addEventListener("session-changed", () => {
+  const onSessionChanged = () => {
     messagesEl.innerHTML = "";
     renderedCount = 0;
     removeActivity();
     resetBuffers();
     render(); // re-render current messages (e.g. splash + user msg on lazy session create)
-  });
+  };
+  window.addEventListener("session-changed", onSessionChanged);
+
+  activeChatPaneCleanup = () => {
+    window.removeEventListener("agent-delta", onAgentDelta);
+    window.removeEventListener("agent-step", onAgentStep);
+    window.removeEventListener("session-changed", onSessionChanged);
+    messagesEl.removeEventListener("click", handleWikiLinkClick);
+    unsubscribeRender();
+    unsubscribeCompletion();
+    removeActivity();
+    resetBuffers();
+    if (activeChatPaneCleanup) {
+      activeChatPaneCleanup = null;
+    }
+  };
 
   return pane;
 }

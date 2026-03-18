@@ -421,6 +421,66 @@ describe("createChatPane", () => {
     document.body.removeChild(pane);
   });
 
+  it("keeps root buffers intact when a child step event arrives first", () => {
+    const pane = createChatPane();
+    document.body.appendChild(pane);
+
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", { detail: { kind: "text", text: "Root preview" } })
+    );
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", { detail: { kind: "tool_call_start", text: "read_file" } })
+    );
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", { detail: { kind: "tool_call_args", text: '{"path": "/src/root.ts"}' } })
+    );
+
+    window.dispatchEvent(
+      new CustomEvent("agent-step", {
+        detail: {
+          step: 1,
+          depth: 1,
+          conversation_path: "0.1",
+          tokens: { input_tokens: 1000, output_tokens: 100 },
+          elapsed_ms: 200,
+          is_final: false,
+          tool_name: null,
+        },
+      })
+    );
+
+    expect(pane.querySelector(".activity-indicator")).not.toBeNull();
+    const summariesAfterChild = pane.querySelectorAll(".message.step-summary");
+    expect(summariesAfterChild.length).toBe(1);
+    expect(summariesAfterChild[0].textContent).toContain("Path 0.1");
+    expect(summariesAfterChild[0].querySelector(".step-model-text")).toBeNull();
+    expect(summariesAfterChild[0].querySelectorAll(".step-tool-line").length).toBe(0);
+
+    window.dispatchEvent(
+      new CustomEvent("agent-step", {
+        detail: {
+          step: 2,
+          depth: 0,
+          conversation_path: "0",
+          tokens: { input_tokens: 2000, output_tokens: 200 },
+          elapsed_ms: 400,
+          is_final: false,
+          tool_name: null,
+        },
+      })
+    );
+
+    expect(pane.querySelector(".activity-indicator")).toBeNull();
+    const summaries = pane.querySelectorAll(".message.step-summary");
+    expect(summaries.length).toBe(2);
+    expect(summaries[1].textContent).toContain("Path 0");
+    expect(summaries[1].textContent).toContain("Root preview");
+    expect(summaries[1].querySelectorAll(".step-tool-line").length).toBe(1);
+    expect(summaries[1].querySelector(".tool-arg")!.textContent).toContain("/src/root.ts");
+
+    document.body.removeChild(pane);
+  });
+
   it("updates key arg as more chunks arrive (no early lock-in)", () => {
     const pane = createChatPane();
     document.body.appendChild(pane);
