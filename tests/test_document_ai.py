@@ -136,6 +136,67 @@ class TestDocumentAiTools:
         assert body["document_annotation_prompt"] == "Extract the invoice number."
         assert body["document_annotation_format"]["type"] == "json_schema"
 
+    def test_document_annotations_truncates_oversized_annotation_fields(
+        self, tmp_path: Path
+    ) -> None:
+        pdf = tmp_path / "sample.pdf"
+        _write_pdf(pdf)
+        tools = _make_tools(
+            tmp_path,
+            max_file_chars=700,
+            max_observation_chars=700,
+        )
+
+        def fake_request(*, url: str, body: dict[str, object], request_label: str) -> dict[str, object]:
+            return {
+                "document_annotation": json.dumps(
+                    {
+                        "invoice_number": "INV-42",
+                        "notes": "x" * 4_000,
+                    }
+                ),
+                "pages": [
+                    {
+                        "index": 0,
+                        "images": [
+                            {
+                                "bbox_annotation": {
+                                    "label": "stamp",
+                                    "details": "y" * 3_000,
+                                }
+                            }
+                        ],
+                    }
+                ],
+                "model": "mistral-ocr-latest",
+            }
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tools, "_mistral_document_ai_request", fake_request)
+            raw = tools.document_annotations(
+                "sample.pdf",
+                document_schema={
+                    "type": "object",
+                    "properties": {"invoice_number": {"type": "string"}},
+                },
+                bbox_schema={
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}},
+                },
+            )
+
+        assert len(raw) <= 700
+        parsed = json.loads(raw)
+        assert parsed["truncation"]["applied"] is True
+        assert "bbox_annotations" not in parsed
+        assert "document_annotation" not in parsed
+        assert (
+            parsed["truncation"].get("details_omitted", 0) > 0
+            or parsed["truncation"].get("omitted_document_annotation_json_chars", 0) > 0
+        )
+        if "response" in parsed:
+            assert "document_annotation" not in parsed["response"]
+
     def test_document_qa_requires_pdf(self, tmp_path: Path) -> None:
         image = tmp_path / "receipt.png"
         _write_png(image)

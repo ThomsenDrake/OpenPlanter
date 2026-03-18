@@ -4,7 +4,11 @@ use op_core::config::{
     normalize_continuity_mode, normalize_web_search_provider, normalize_zai_plan,
     resolve_zai_base_url,
 };
-use op_core::credentials::{CredentialBundle, CredentialStore, credentials_from_env};
+use op_core::config_hydration::merge_credentials_into_config;
+use op_core::credentials::{
+    credentials_from_env, discover_env_candidates, parse_env_file, CredentialBundle,
+    CredentialStore,
+};
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
 use op_core::settings::{PersistentSettings, SettingsStore};
 use std::collections::HashMap;
@@ -313,6 +317,24 @@ fn set_runtime_credential_value(
     Ok(())
 }
 
+fn apply_runtime_credential_fallbacks_from_sources(
+    cfg: &mut op_core::config::AgentConfig,
+    env_creds: &CredentialBundle,
+    file_creds: &CredentialBundle,
+) {
+    merge_credentials_into_config(cfg, env_creds, file_creds);
+}
+
+fn apply_runtime_credential_fallbacks(cfg: &mut op_core::config::AgentConfig) {
+    let env_creds = credentials_from_env();
+    let file_creds = discover_env_candidates(&cfg.workspace)
+        .into_iter()
+        .next()
+        .map(|path| parse_env_file(&path))
+        .unwrap_or_default();
+    apply_runtime_credential_fallbacks_from_sources(cfg, &env_creds, &file_creds);
+}
+
 fn merged_credential_status(
     cfg: &op_core::config::AgentConfig,
     env_creds: &CredentialBundle,
@@ -371,7 +393,8 @@ fn merged_credential_status(
     );
     status.insert(
         "mistral_document_ai".to_string(),
-        cfg.mistral_document_ai_api_key.is_some() || env_creds.mistral_document_ai_api_key.is_some(),
+        cfg.mistral_document_ai_api_key.is_some()
+            || env_creds.mistral_document_ai_api_key.is_some(),
     );
     status.insert(
         "mistral_transcription".to_string(),
@@ -427,6 +450,7 @@ pub async fn save_credential(
     set_stored_credential_value(&mut creds, &service, normalized.clone())?;
     store.save(&creds).map_err(|e| e.to_string())?;
     set_runtime_credential_value(&mut cfg, &service, normalized)?;
+    apply_runtime_credential_fallbacks(&mut cfg);
     let env_creds = credentials_from_env();
     Ok(merged_credential_status(&cfg, &env_creds))
 }
@@ -445,6 +469,7 @@ pub async fn get_credentials_status(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use tempfile::tempdir;
 
     // ── known_models_for_provider ──
 
@@ -683,6 +708,50 @@ mod tests {
         assert_eq!(
             cfg.mistral_transcription_api_key,
             Some("mistral-test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_runtime_credential_fallbacks_prefers_env_bundle() {
+        let dir = tempdir().unwrap();
+        let mut cfg = op_core::config::AgentConfig::from_env(dir.path());
+        cfg.workspace = dir.path().to_path_buf();
+        cfg.mistral_api_key = Some("workspace-key".to_string());
+        set_runtime_credential_value(&mut cfg, "mistral", None).unwrap();
+
+        let env_creds = CredentialBundle {
+            mistral_api_key: Some("env-key".to_string()),
+            ..CredentialBundle::default()
+        };
+        let file_creds = CredentialBundle {
+            mistral_api_key: Some("dotenv-key".to_string()),
+            ..CredentialBundle::default()
+        };
+
+        apply_runtime_credential_fallbacks_from_sources(&mut cfg, &env_creds, &file_creds);
+
+        assert_eq!(cfg.mistral_api_key.as_deref(), Some("env-key"));
+    }
+
+    #[test]
+    fn test_apply_runtime_credential_fallbacks_restores_dotenv_after_clear() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY=dotenv-docai-key\n",
+        )
+        .unwrap();
+
+        let mut cfg = op_core::config::AgentConfig::from_env(dir.path());
+        cfg.workspace = dir.path().to_path_buf();
+        cfg.mistral_document_ai_api_key = Some("workspace-docai-key".to_string());
+        set_runtime_credential_value(&mut cfg, "mistral_document_ai", None).unwrap();
+
+        apply_runtime_credential_fallbacks(&mut cfg);
+
+        assert_eq!(
+            cfg.mistral_document_ai_api_key.as_deref(),
+            Some("dotenv-docai-key")
         );
     }
 

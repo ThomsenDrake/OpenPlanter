@@ -946,6 +946,74 @@ class WorkspaceTools:
     def _document_json_length(self, payload: dict[str, Any]) -> int:
         return len(json.dumps(payload, indent=2, ensure_ascii=True))
 
+    def _document_value_is_empty(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if value == "":
+            return True
+        if isinstance(value, (list, dict, tuple, set)) and not value:
+            return True
+        return False
+
+    def _note_document_omission(
+        self,
+        truncation: dict[str, Any],
+        *,
+        label: str,
+        value: Any,
+    ) -> None:
+        if isinstance(value, dict):
+            truncation[f"omitted_{label}_keys"] = len(value)
+        elif isinstance(value, list):
+            truncation[f"omitted_{label}_items"] = len(value)
+        elif isinstance(value, str):
+            truncation[f"omitted_{label}_chars"] = len(value)
+        else:
+            truncation[f"omitted_{label}_type"] = type(value).__name__
+        try:
+            truncation[f"omitted_{label}_json_chars"] = len(
+                json.dumps(value, ensure_ascii=True)
+            )
+        except TypeError:
+            pass
+
+    def _omit_document_payload_field(
+        self,
+        payload: dict[str, Any],
+        *,
+        field: str,
+        label: str,
+    ) -> bool:
+        if field not in payload:
+            return False
+        value = payload.pop(field)
+        if not self._document_value_is_empty(value):
+            self._note_document_omission(
+                payload.setdefault("truncation", {}),
+                label=label,
+                value=value,
+            )
+        return True
+
+    def _omit_document_response_field(
+        self,
+        payload: dict[str, Any],
+        *,
+        field: str,
+        label: str,
+    ) -> bool:
+        response = payload.get("response")
+        if not isinstance(response, dict) or field not in response:
+            return False
+        value = response.pop(field)
+        if not self._document_value_is_empty(value):
+            self._note_document_omission(
+                payload.setdefault("truncation", {}),
+                label=label,
+                value=value,
+            )
+        return True
+
     def _truncate_document_text(
         self,
         payload: dict[str, Any],
@@ -974,6 +1042,16 @@ class WorkspaceTools:
         omitted = len(text) - low
         if omitted > 0:
             payload.setdefault("truncation", {})["text_truncated_chars"] = omitted
+
+    def _compact_document_truncation(self, payload: dict[str, Any]) -> None:
+        truncation = payload.get("truncation")
+        if not isinstance(truncation, dict):
+            return
+        detail_count = sum(1 for key in truncation if key != "applied")
+        payload["truncation"] = {
+            "applied": bool(truncation.get("applied")),
+            "details_omitted": detail_count,
+        }
 
     def _strip_document_image_base64(self, response: dict[str, Any]) -> int:
         omitted = 0
@@ -1050,7 +1128,38 @@ class WorkspaceTools:
                 if isinstance(response.get("pages"), list):
                     truncation["omitted_response_pages"] = len(response["pages"])
                     response.pop("pages", None)
+            if self._document_json_length(payload) > max_chars:
+                self._omit_document_response_field(
+                    payload,
+                    field="document_annotation",
+                    label="response_document_annotation",
+                )
 
+        if self._document_json_length(payload) > max_chars:
+            self._omit_document_payload_field(
+                payload,
+                field="bbox_annotations",
+                label="bbox_annotations",
+            )
+        if self._document_json_length(payload) > max_chars:
+            self._omit_document_payload_field(
+                payload,
+                field="document_annotation",
+                label="document_annotation",
+            )
+
+        if self._document_json_length(payload) > max_chars:
+            self._truncate_document_text(payload, max_chars=max_chars)
+        if self._document_json_length(payload) > max_chars:
+            self._omit_document_payload_field(
+                payload,
+                field="response",
+                label="response",
+            )
+        if self._document_json_length(payload) > max_chars:
+            self._truncate_document_text(payload, max_chars=max_chars)
+        if self._document_json_length(payload) > max_chars:
+            self._compact_document_truncation(payload)
         if self._document_json_length(payload) > max_chars:
             self._truncate_document_text(payload, max_chars=max_chars)
 

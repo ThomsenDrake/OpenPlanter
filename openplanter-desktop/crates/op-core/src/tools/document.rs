@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Map, Value, json};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde_json::{json, Map, Value};
 
-use super::{ToolResult, filesystem};
+use super::{filesystem, ToolResult};
 
 const DOCUMENT_PDF_EXTENSIONS: &[&str] = &[".pdf"];
 const DOCUMENT_IMAGE_EXTENSIONS: &[&str] = &[".avif", ".jpg", ".jpeg", ".png", ".webp"];
@@ -119,8 +119,12 @@ fn build_data_url(
             supported.join(", ")
         ));
     }
-    let metadata = std::fs::metadata(resolved)
-        .map_err(|error| format!("Failed to inspect document file {}: {error}", resolved.display()))?;
+    let metadata = std::fs::metadata(resolved).map_err(|error| {
+        format!(
+            "Failed to inspect document file {}: {error}",
+            resolved.display()
+        )
+    })?;
     if metadata.len() as usize > max_bytes {
         return Err(format!(
             "Document file too large: {} bytes (max {} bytes)",
@@ -128,20 +132,25 @@ fn build_data_url(
             max_bytes
         ));
     }
-    let bytes = std::fs::read(resolved)
-        .map_err(|error| format!("Failed to read document file {}: {error}", resolved.display()))?;
+    let bytes = std::fs::read(resolved).map_err(|error| {
+        format!(
+            "Failed to read document file {}: {error}",
+            resolved.display()
+        )
+    })?;
     let media_type = document_media_type(resolved).to_string();
-    let data_url = format!(
-        "data:{};base64,{}",
-        media_type,
-        STANDARD.encode(bytes)
-    );
+    let data_url = format!("data:{};base64,{}", media_type, STANDARD.encode(bytes));
     let source_type = if DOCUMENT_IMAGE_EXTENSIONS.iter().any(|value| *value == ext) {
         "image_url"
     } else {
         "document_url"
     };
-    Ok((data_url, source_type.to_string(), media_type, metadata.len() as usize))
+    Ok((
+        data_url,
+        source_type.to_string(),
+        media_type,
+        metadata.len() as usize,
+    ))
 }
 
 fn build_response_format(schema: &Value, name: &str) -> Value {
@@ -166,6 +175,89 @@ fn json_length(payload: &Value) -> usize {
     serde_json::to_string_pretty(payload)
         .unwrap_or_else(|_| payload.to_string())
         .len()
+}
+
+fn is_empty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+fn note_omitted_field(truncation: &mut Map<String, Value>, label: &str, value: &Value) {
+    match value {
+        Value::Array(items) => {
+            truncation.insert(format!("omitted_{label}_items"), json!(items.len()));
+        }
+        Value::Object(map) => {
+            truncation.insert(format!("omitted_{label}_keys"), json!(map.len()));
+        }
+        Value::String(text) => {
+            truncation.insert(format!("omitted_{label}_chars"), json!(text.len()));
+        }
+        other => {
+            truncation.insert(
+                format!("omitted_{label}_type"),
+                Value::String(other_type_name(other).to_string()),
+            );
+        }
+    }
+    if let Ok(serialized) = serde_json::to_string(value) {
+        truncation.insert(
+            format!("omitted_{label}_json_chars"),
+            json!(serialized.len()),
+        );
+    }
+}
+
+fn other_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn omit_payload_field(payload: &mut Value, field: &str, label: &str) -> bool {
+    let removed = {
+        let Some(object) = payload.as_object_mut() else {
+            return false;
+        };
+        object.remove(field)
+    };
+    let Some(value) = removed else {
+        return false;
+    };
+    if !is_empty_value(&value) {
+        if let Some(truncation) = payload.get_mut("truncation").and_then(Value::as_object_mut) {
+            note_omitted_field(truncation, label, &value);
+        }
+    }
+    true
+}
+
+fn omit_response_field(payload: &mut Value, field: &str, label: &str) -> bool {
+    let removed = {
+        let Some(response) = payload.get_mut("response").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        response.remove(field)
+    };
+    let Some(value) = removed else {
+        return false;
+    };
+    if !is_empty_value(&value) {
+        if let Some(truncation) = payload.get_mut("truncation").and_then(Value::as_object_mut) {
+            note_omitted_field(truncation, label, &value);
+        }
+    }
+    true
 }
 
 fn coerce_jsonish_value(value: &Value) -> Value {
@@ -294,6 +386,23 @@ fn truncate_text(payload: &mut Value, max_chars: usize) {
     }
 }
 
+fn compact_truncation(payload: &mut Value) {
+    let detail_count = payload
+        .get("truncation")
+        .and_then(Value::as_object)
+        .map(|truncation| {
+            truncation
+                .keys()
+                .filter(|key| key.as_str() != "applied")
+                .count()
+        })
+        .unwrap_or(0);
+    payload["truncation"] = json!({
+        "applied": payload["truncation"]["applied"].as_bool().unwrap_or(false),
+        "details_omitted": detail_count,
+    });
+}
+
 fn strip_image_base64(response: &mut Value) -> usize {
     let mut omitted = 0usize;
     let Some(pages) = response.get_mut("pages").and_then(Value::as_array_mut) else {
@@ -385,6 +494,38 @@ fn serialize_document_envelope(mut payload: Value, max_chars: usize) -> String {
     }
 
     if json_length(&payload) > max_chars {
+        let _ = omit_response_field(
+            &mut payload,
+            "document_annotation",
+            "response_document_annotation",
+        );
+    }
+
+    if json_length(&payload) > max_chars {
+        let _ = omit_payload_field(&mut payload, "bbox_annotations", "bbox_annotations");
+    }
+
+    if json_length(&payload) > max_chars {
+        let _ = omit_payload_field(&mut payload, "document_annotation", "document_annotation");
+    }
+
+    if json_length(&payload) > max_chars {
+        truncate_text(&mut payload, max_chars);
+    }
+
+    if json_length(&payload) > max_chars {
+        let _ = omit_payload_field(&mut payload, "response", "response");
+    }
+
+    if json_length(&payload) > max_chars {
+        truncate_text(&mut payload, max_chars);
+    }
+
+    if json_length(&payload) > max_chars {
+        compact_truncation(&mut payload);
+    }
+
+    if json_length(&payload) > max_chars {
         truncate_text(&mut payload, max_chars);
     }
 
@@ -469,11 +610,11 @@ pub async fn document_ocr(
             supported.join(", ")
         ));
     }
-    let api_key =
-        match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key) {
-            Ok(value) => value,
-            Err(error) => return ToolResult::error(error),
-        };
+    let api_key = match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key)
+    {
+        Ok(value) => value,
+        Err(error) => return ToolResult::error(error),
+    };
     let chosen_model = model.unwrap_or(default_model).trim();
     if chosen_model.is_empty() {
         return ToolResult::error("No Mistral Document AI OCR model configured".into());
@@ -500,7 +641,10 @@ pub async fn document_ocr(
         Value::Bool(include_images.unwrap_or(false)),
     );
     if let Some(pages) = normalized_pages.as_ref() {
-        body.insert("pages".into(), Value::Array(pages.iter().map(|page| json!(page)).collect()));
+        body.insert(
+            "pages".into(),
+            Value::Array(pages.iter().map(|page| json!(page)).collect()),
+        );
     }
 
     let parsed = match request_json(
@@ -590,11 +734,11 @@ pub async fn document_annotations(
             supported.join(", ")
         ));
     }
-    let api_key =
-        match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key) {
-            Ok(value) => value,
-            Err(error) => return ToolResult::error(error),
-        };
+    let api_key = match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key)
+    {
+        Ok(value) => value,
+        Err(error) => return ToolResult::error(error),
+    };
     let chosen_model = model.unwrap_or(default_model).trim();
     if chosen_model.is_empty() {
         return ToolResult::error("No Mistral Document AI OCR model configured".into());
@@ -621,7 +765,10 @@ pub async fn document_annotations(
         Value::Bool(include_images.unwrap_or(false)),
     );
     if let Some(pages) = normalized_pages.as_ref() {
-        body.insert("pages".into(), Value::Array(pages.iter().map(|page| json!(page)).collect()));
+        body.insert(
+            "pages".into(),
+            Value::Array(pages.iter().map(|page| json!(page)).collect()),
+        );
     }
     if let Some(schema) = document_schema {
         body.insert(
@@ -729,11 +876,11 @@ pub async fn document_qa(
     if !is_pdf_extension(&ext) {
         return ToolResult::error("document_qa supports only local PDF files in v1".into());
     }
-    let api_key =
-        match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key) {
-            Ok(value) => value,
-            Err(error) => return ToolResult::error(error),
-        };
+    let api_key = match effective_document_ai_key(shared_api_key, override_api_key, use_shared_key)
+    {
+        Ok(value) => value,
+        Err(error) => return ToolResult::error(error),
+    };
     let chosen_model = model.unwrap_or(default_model).trim();
     if chosen_model.is_empty() {
         return ToolResult::error("No Mistral Document AI Q&A model configured".into());
@@ -794,7 +941,7 @@ pub async fn document_qa(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, body::Bytes, routing::post};
+    use axum::{body::Bytes, routing::post, Json, Router};
     use tempfile::tempdir;
     use tokio::net::TcpListener;
 
@@ -838,6 +985,57 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{}", addr)
+    }
+
+    #[test]
+    fn test_serialize_document_envelope_omits_large_annotation_fields() {
+        let payload = json!({
+            "provider": "mistral",
+            "service": "document_ai",
+            "operation": "annotations",
+            "path": "sample.pdf",
+            "text": "z".repeat(4_000),
+            "document_annotation": {
+                "invoice_number": "INV-42",
+                "notes": "x".repeat(4_000),
+            },
+            "bbox_annotations": [{
+                "page_index": 0,
+                "bbox_annotation": {
+                    "label": "stamp",
+                    "details": "y".repeat(3_000),
+                }
+            }],
+            "response": {
+                "document_annotation": "{\"invoice_number\":\"INV-42\",\"notes\":\"".to_string()
+                    + &"x".repeat(4_000)
+                    + "\"}",
+                "pages": [{
+                    "index": 0,
+                    "images": [{
+                        "image_base64": "b".repeat(2_000),
+                        "bbox_annotation": {
+                            "label": "stamp",
+                            "details": "y".repeat(3_000),
+                        }
+                    }]
+                }]
+            }
+        });
+
+        let serialized = serialize_document_envelope(payload, 900);
+
+        assert!(
+            serialized.len() <= 900,
+            "serialized envelope exceeded max_chars"
+        );
+        let parsed: Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed["truncation"]["applied"], Value::Bool(true));
+        assert!(parsed.get("bbox_annotations").is_none());
+        assert!(parsed.get("document_annotation").is_none());
+        if let Some(response) = parsed.get("response") {
+            assert!(response.get("document_annotation").is_none());
+        }
     }
 
     #[tokio::test]
