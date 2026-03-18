@@ -285,6 +285,207 @@ fn collect_document_text(parsed: &Value) -> String {
         .join("\n\n")
 }
 
+fn document_pages_suffix(pages: Option<&[i64]>) -> String {
+    let Some(pages) = pages else {
+        return String::new();
+    };
+    if pages.is_empty() {
+        return String::new();
+    }
+    let mut one_based: Vec<i64> = pages.iter().map(|page| page + 1).collect();
+    one_based.sort_unstable();
+    let mut segments = Vec::new();
+    let mut start = one_based[0];
+    let mut end = start;
+    for page in one_based.into_iter().skip(1) {
+        if page == end + 1 {
+            end = page;
+            continue;
+        }
+        if start == end {
+            segments.push(start.to_string());
+        } else {
+            segments.push(format!("{start}-{end}"));
+        }
+        start = page;
+        end = page;
+    }
+    if start == end {
+        segments.push(start.to_string());
+    } else {
+        segments.push(format!("{start}-{end}"));
+    }
+    format!(".pages-{}", segments.join("_"))
+}
+
+fn document_ocr_sidecar_paths(resolved: &Path, pages: Option<&[i64]>) -> (PathBuf, PathBuf) {
+    let base_name = format!(
+        "{}.ocr{}",
+        resolved.file_name().unwrap_or_default().to_string_lossy(),
+        document_pages_suffix(pages)
+    );
+    (
+        resolved.with_file_name(format!("{base_name}.md")),
+        resolved.with_file_name(format!("{base_name}.json")),
+    )
+}
+
+fn strip_document_image_base64(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("image_base64");
+            for child in map.values_mut() {
+                strip_document_image_base64(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                strip_document_image_base64(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_document_ocr_markdown(
+    rel_source_path: &str,
+    model: &str,
+    pages: Option<&[i64]>,
+    parsed: &Value,
+    json_rel_path: &str,
+) -> String {
+    let page_label = pages
+        .map(|values| {
+            values
+                .iter()
+                .map(|page| (page + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "all".to_string());
+    let mut lines = vec![
+        "<!-- OpenPlanter document_ocr artifact -->".to_string(),
+        format!("<!-- source: {rel_source_path} -->"),
+        format!("<!-- model: {model} -->"),
+        format!("<!-- pages: {page_label} -->"),
+        format!("<!-- json_sidecar: {json_rel_path} -->"),
+        String::new(),
+    ];
+
+    let mut appended_page = false;
+    if let Some(raw_pages) = parsed.get("pages").and_then(Value::as_array) {
+        for (fallback_index, page) in raw_pages.iter().enumerate() {
+            let Some(markdown) = page.get("markdown").and_then(Value::as_str) else {
+                continue;
+            };
+            let markdown = markdown.trim();
+            if markdown.is_empty() {
+                continue;
+            }
+            let page_number = page
+                .get("index")
+                .and_then(Value::as_i64)
+                .filter(|index| *index >= 0)
+                .map(|index| index + 1)
+                .unwrap_or((fallback_index + 1) as i64);
+            lines.push(format!("## Page {page_number}"));
+            lines.push(String::new());
+            lines.push(markdown.to_string());
+            lines.push(String::new());
+            appended_page = true;
+        }
+    }
+
+    if !appended_page {
+        let text = collect_document_text(parsed);
+        if text.trim().is_empty() {
+            lines.push("<!-- no OCR text returned -->".to_string());
+            lines.push(String::new());
+        } else {
+            lines.push(text);
+            lines.push(String::new());
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn write_document_ocr_sidecars(
+    root: &Path,
+    resolved: &Path,
+    media_type: &str,
+    size_bytes: usize,
+    source_type: &str,
+    model: &str,
+    include_images: bool,
+    pages: Option<&[i64]>,
+    text: &str,
+    parsed: &Value,
+) -> Result<Value, String> {
+    let (markdown_path, json_path) = document_ocr_sidecar_paths(resolved, pages);
+    if let Some(parent) = markdown_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to prepare OCR sidecar directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let markdown_rel = rel_path(root, &markdown_path);
+    let json_rel = rel_path(root, &json_path);
+    let artifacts = json!({
+        "markdown_path": markdown_rel,
+        "json_path": json_rel,
+    });
+
+    let mut response_copy = parsed.clone();
+    strip_document_image_base64(&mut response_copy);
+    let sidecar_envelope = json!({
+        "provider": "mistral",
+        "service": "document_ai",
+        "operation": "ocr",
+        "path": rel_path(root, resolved),
+        "file": {
+            "media_type": media_type,
+            "size_bytes": size_bytes,
+            "source_type": source_type,
+        },
+        "model": model,
+        "options": {
+            "include_images": include_images,
+            "pages": pages,
+        },
+        "artifacts": artifacts,
+        "text": text,
+        "response": response_copy,
+    });
+    let markdown = render_document_ocr_markdown(
+        &rel_path(root, resolved),
+        model,
+        pages,
+        parsed,
+        sidecar_envelope["artifacts"]["json_path"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    std::fs::write(&markdown_path, markdown).map_err(|error| {
+        format!(
+            "Failed to write OCR markdown sidecar {}: {error}",
+            markdown_path.display()
+        )
+    })?;
+    let json_text = serde_json::to_string_pretty(&sidecar_envelope)
+        .map_err(|error| format!("Failed to serialize OCR sidecar JSON: {error}"))?;
+    std::fs::write(&json_path, json_text).map_err(|error| {
+        format!(
+            "Failed to write OCR JSON sidecar {}: {error}",
+            json_path.display()
+        )
+    })?;
+    Ok(artifacts)
+}
+
 fn collect_bbox_annotations(parsed: &Value) -> Vec<Value> {
     let mut out = Vec::new();
     let Some(pages) = parsed.get("pages").and_then(Value::as_array) else {
@@ -660,6 +861,23 @@ pub async fn document_ocr(
         Err(error) => return ToolResult::error(error),
     };
 
+    let text = collect_document_text(&parsed);
+    let artifacts = match write_document_ocr_sidecars(
+        root,
+        &resolved,
+        &media_type,
+        size_bytes,
+        &source_type,
+        chosen_model,
+        include_images.unwrap_or(false),
+        normalized_pages.as_deref(),
+        &text,
+        &parsed,
+    ) {
+        Ok(value) => value,
+        Err(error) => return ToolResult::error(error),
+    };
+
     let envelope = json!({
         "provider": "mistral",
         "service": "document_ai",
@@ -675,7 +893,8 @@ pub async fn document_ocr(
             "include_images": include_images.unwrap_or(false),
             "pages": normalized_pages,
         },
-        "text": collect_document_text(&parsed),
+        "artifacts": artifacts,
+        "text": text,
         "response": parsed,
     });
     ToolResult::ok(serialize_document_envelope(envelope, max_chars))
@@ -948,7 +1167,14 @@ mod tests {
     async fn capture_ocr(body: Bytes) -> Json<Value> {
         Json(json!({
             "model": "mistral-ocr-latest",
-            "pages": [{"index": 0, "markdown": "# Title\nHello world", "images": []}],
+            "pages": [{
+                "index": 0,
+                "markdown": "# Title\nHello world",
+                "images": [{
+                    "id": "img-1",
+                    "image_base64": "abc123"
+                }]
+            }],
             "usage_info": {"pages_processed": 1},
             "raw_body": String::from_utf8_lossy(&body).to_string(),
         }))
@@ -1067,6 +1293,28 @@ mod tests {
         assert_eq!(parsed["operation"], "ocr");
         assert_eq!(parsed["path"], "sample.pdf");
         assert_eq!(parsed["options"]["pages"], json!([0, 2]));
+        assert_eq!(
+            parsed["artifacts"]["markdown_path"],
+            json!("sample.pdf.ocr.pages-1_3.md")
+        );
+        assert_eq!(
+            parsed["artifacts"]["json_path"],
+            json!("sample.pdf.ocr.pages-1_3.json")
+        );
+        let markdown_artifact = dir.path().join("sample.pdf.ocr.pages-1_3.md");
+        let json_artifact = dir.path().join("sample.pdf.ocr.pages-1_3.json");
+        assert!(markdown_artifact.exists());
+        assert!(json_artifact.exists());
+        let markdown = std::fs::read_to_string(&markdown_artifact).unwrap();
+        assert!(markdown.contains("# Title\nHello world"));
+        let saved_payload: Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_artifact).unwrap()).unwrap();
+        assert_eq!(saved_payload["text"], json!("# Title\nHello world"));
+        assert!(
+            saved_payload["response"]["pages"][0]["images"][0]
+                .get("image_base64")
+                .is_none()
+        );
         assert!(parsed["response"]["raw_body"]
             .as_str()
             .unwrap()

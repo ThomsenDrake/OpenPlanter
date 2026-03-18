@@ -204,7 +204,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "document_ocr",
         "description": (
             "Run Mistral Document AI OCR on a local PDF or image file and return "
-            "structured text plus OCR metadata."
+            "structured text plus OCR metadata. The tool automatically saves OCR "
+            "sidecar artifacts (.md and .json) next to the source file for reuse."
         ),
         "parameters": {
             "type": "object",

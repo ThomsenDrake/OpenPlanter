@@ -43,6 +43,12 @@ class ToolDefinitionsTests(unittest.TestCase):
         names = [d["name"] for d in TOOL_DEFINITIONS]
         self.assertEqual(len(names), len(set(names)))
 
+    def test_document_ocr_description_mentions_persisting_results(self) -> None:
+        document_ocr = next(d for d in TOOL_DEFINITIONS if d["name"] == "document_ocr")
+        description = document_ocr["description"].lower()
+        self.assertIn("automatically saves", description)
+        self.assertIn(".md and .json", description)
+
 
 class GetToolDefinitionsTests(unittest.TestCase):
     """Tests for get_tool_definitions() filtering."""

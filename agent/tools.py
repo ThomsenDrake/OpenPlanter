@@ -892,6 +892,153 @@ class WorkspaceTools:
                 parts.append(markdown)
         return "\n\n".join(parts)
 
+    def _document_pages_suffix(self, pages: list[int] | None) -> str:
+        if not pages:
+            return ""
+        one_based = [page + 1 for page in pages]
+        parts: list[str] = []
+        start = one_based[0]
+        end = start
+        for page in one_based[1:]:
+            if page == end + 1:
+                end = page
+                continue
+            parts.append(f"{start}-{end}" if start != end else str(start))
+            start = page
+            end = page
+        parts.append(f"{start}-{end}" if start != end else str(start))
+        return f".pages-{'_'.join(parts)}"
+
+    def _document_ocr_sidecar_paths(
+        self,
+        resolved: Path,
+        pages: list[int] | None,
+    ) -> tuple[Path, Path]:
+        suffix = self._document_pages_suffix(pages)
+        base_name = f"{resolved.name}.ocr{suffix}"
+        return (
+            resolved.with_name(f"{base_name}.md"),
+            resolved.with_name(f"{base_name}.json"),
+        )
+
+    def _strip_document_image_base64(self, value: Any) -> None:
+        if isinstance(value, dict):
+            value.pop("image_base64", None)
+            for child in value.values():
+                self._strip_document_image_base64(child)
+            return
+        if isinstance(value, list):
+            for child in value:
+                self._strip_document_image_base64(child)
+
+    def _render_document_ocr_markdown(
+        self,
+        *,
+        rel_path: str,
+        model: str,
+        pages: list[int] | None,
+        parsed: dict[str, Any],
+        json_rel_path: str,
+    ) -> str:
+        page_label = (
+            ", ".join(str(page + 1) for page in pages)
+            if pages
+            else "all"
+        )
+        lines = [
+            "<!-- OpenPlanter document_ocr artifact -->",
+            f"<!-- source: {rel_path} -->",
+            f"<!-- model: {model} -->",
+            f"<!-- pages: {page_label} -->",
+            f"<!-- json_sidecar: {json_rel_path} -->",
+            "",
+        ]
+        appended_page = False
+        raw_pages = parsed.get("pages")
+        if isinstance(raw_pages, list):
+            for fallback_index, page in enumerate(raw_pages, start=1):
+                if not isinstance(page, dict):
+                    continue
+                markdown = str(page.get("markdown", "")).strip()
+                if not markdown:
+                    continue
+                raw_index = page.get("index")
+                page_number = (
+                    raw_index + 1
+                    if isinstance(raw_index, int) and raw_index >= 0
+                    else fallback_index
+                )
+                lines.extend([f"## Page {page_number}", "", markdown, ""])
+                appended_page = True
+        if not appended_page:
+            text = self._collect_document_text(parsed).strip()
+            if text:
+                lines.extend([text, ""])
+            else:
+                lines.extend(["<!-- no OCR text returned -->", ""])
+        return "\n".join(lines)
+
+    def _write_document_ocr_sidecars(
+        self,
+        *,
+        resolved: Path,
+        rel_path: str,
+        media_type: str,
+        size_bytes: int,
+        source_type: str,
+        model: str,
+        include_images: bool,
+        pages: list[int] | None,
+        text: str,
+        parsed: dict[str, Any],
+    ) -> dict[str, str]:
+        markdown_path, json_path = self._document_ocr_sidecar_paths(resolved, pages)
+        self._register_write_target(markdown_path)
+        self._register_write_target(json_path)
+        markdown_rel = markdown_path.relative_to(self.root).as_posix()
+        json_rel = json_path.relative_to(self.root).as_posix()
+        response_copy = copy.deepcopy(parsed)
+        self._strip_document_image_base64(response_copy)
+        artifacts = {
+            "markdown_path": markdown_rel,
+            "json_path": json_rel,
+        }
+        sidecar_envelope = {
+            "provider": "mistral",
+            "service": "document_ai",
+            "operation": "ocr",
+            "path": rel_path,
+            "file": {
+                "media_type": media_type,
+                "size_bytes": size_bytes,
+                "source_type": source_type,
+            },
+            "model": model,
+            "options": {
+                "include_images": include_images,
+                "pages": pages,
+            },
+            "artifacts": artifacts,
+            "text": text,
+            "response": response_copy,
+        }
+        markdown_content = self._render_document_ocr_markdown(
+            rel_path=rel_path,
+            model=model,
+            pages=pages,
+            parsed=response_copy,
+            json_rel_path=json_rel,
+        )
+        try:
+            markdown_path.write_text(markdown_content, encoding="utf-8")
+            json_path.write_text(
+                json.dumps(sidecar_envelope, indent=2, ensure_ascii=True),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise ToolError(f"Failed to write OCR sidecar artifacts: {exc}") from exc
+        return artifacts
+
     def _collect_bbox_annotations(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
         pages = parsed.get("pages")
@@ -1200,6 +1347,19 @@ class WorkspaceTools:
                 body=request_body,
                 request_label="Mistral Document AI OCR",
             )
+            text = self._collect_document_text(parsed)
+            artifacts = self._write_document_ocr_sidecars(
+                resolved=resolved,
+                rel_path=rel,
+                media_type=media_type,
+                size_bytes=size,
+                source_type=source_type,
+                model=chosen_model,
+                include_images=bool(include_images),
+                pages=normalized_pages,
+                text=text,
+                parsed=parsed,
+            )
             envelope = {
                 "provider": "mistral",
                 "service": "document_ai",
@@ -1215,7 +1375,8 @@ class WorkspaceTools:
                     "include_images": bool(include_images),
                     "pages": normalized_pages,
                 },
-                "text": self._collect_document_text(parsed),
+                "artifacts": artifacts,
+                "text": text,
                 "response": parsed,
             }
             return self._serialize_document_envelope(

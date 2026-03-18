@@ -40,6 +40,7 @@ _RECON_TOOL_NAMES = {
     "read_artifact",
 }
 _ARTIFACT_TOOL_NAMES = {
+    "document_ocr",
     "write_file",
     "apply_patch",
     "edit_file",
@@ -1147,7 +1148,9 @@ class RLMEngine:
                     (
                         "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode "
                         "without producing artifacts. Move to implementation now (edit files, run targeted "
-                        "validation, and return concrete outputs)."
+                        "validation, and return concrete outputs). If recent OCR/transcription/API results "
+                        "may be needed again, persist them to workspace files now instead of relying on "
+                        "scrollback."
                     ),
                 )
                 results.append(soft_warning)

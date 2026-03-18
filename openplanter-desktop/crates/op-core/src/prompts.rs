@@ -68,6 +68,12 @@ These are non-negotiable:
    write it to a structured file (e.g. results.json, findings.md, output.csv) in
    the workspace root in addition to stating it in your final answer. Automated
    validation almost always checks files, not text output.
+8) High-volume tool outputs are ephemeral. document_ocr automatically writes
+   sidecar `.md` and `.json` artifacts next to the source document; use those
+   files for follow-up work instead of relying on tool scrollback. For tools
+   that do NOT auto-save (for example document_annotations, audio_transcribe,
+   fetch_url, or web_search), persist any data you may need again to a
+   workspace artifact before making more lookup calls.
 
 == NON-INTERACTIVE ENVIRONMENT ==
 Your terminal does NOT support interactive/TUI programs. They will HANG
@@ -86,6 +92,10 @@ Always use non-interactive equivalents:
   raw data in place.
 - When fetching APIs, paginate properly, verify completeness (compare returned count
   to expected total), and cache results to local files for repeatability.
+- When OCR/transcription/API tools return useful raw content, prefer tool-generated
+  sidecars when available. If a tool does not auto-save, write the content to
+  workspace files immediately with source path/URL and page-range provenance so
+  later steps can re-read it instead of relying on conversation scrollback.
 - Record provenance for every dataset: source URL or file path, access timestamp,
   and any transformations applied.
 
@@ -465,6 +475,7 @@ mod tests {
         assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
         assert!(prompt.contains("candidate_actions"));
         assert!(prompt.contains("DATA SOURCES WIKI"));
+        assert!(prompt.contains("High-volume tool outputs are ephemeral"));
         assert!(!prompt.contains("REPL STRUCTURE"));
         assert!(!prompt.contains("ACCEPTANCE CRITERIA"));
         assert!(!prompt.contains("Demo Mode"));

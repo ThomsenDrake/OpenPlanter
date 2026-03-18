@@ -367,6 +367,31 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(len(warnings), 2)
             self.assertEqual(int(engine.last_loop_metrics.get("guardrail_warnings", 0)), 2)
 
+    def test_document_ocr_counts_as_artifact_for_guardrails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=6, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("document_ocr", path="scan.pdf")]),
+                    ModelTurn(tool_calls=[_tc("document_ocr", path="scan.pdf")]),
+                    ModelTurn(tool_calls=[_tc("document_ocr", path="scan.pdf")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            with patch.object(
+                tools,
+                "document_ocr",
+                return_value='{"operation":"ocr","pages":[{"index":0,"markdown":"Invoice text"}]}',
+            ):
+                engine = RLMEngine(model=model, tools=tools, config=cfg)
+                result, ctx = engine.solve_with_context("OCR this file")
+            self.assertEqual(result, "done")
+            warnings = [obs for obs in ctx.observations if "Soft guardrail" in obs]
+            self.assertEqual(len(warnings), 0)
+            self.assertEqual(int(engine.last_loop_metrics.get("guardrail_warnings", 0)), 0)
+
 
 class CustomSystemPromptTests(unittest.TestCase):
     def test_custom_system_prompt_override(self) -> None:
@@ -411,6 +436,13 @@ class REPLPromptTests(unittest.TestCase):
         self.assertIn("Supported Findings", prompt)
         self.assertIn("candidate_actions", prompt)
         self.assertIn("machine-readable, read-only", prompt)
+
+    def test_prompt_includes_ephemeral_output_persistence_rule(self) -> None:
+        prompt = _build_system_prompt(recursive=False)
+        self.assertIn("High-volume tool outputs are ephemeral", prompt)
+        self.assertIn("document_ocr automatically writes", prompt)
+        self.assertIn("that do NOT auto-save", prompt)
+        self.assertIn("document_annotations, audio_transcribe", prompt)
 
     def test_recursive_initial_message_has_repl_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

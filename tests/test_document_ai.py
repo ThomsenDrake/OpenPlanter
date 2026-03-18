@@ -65,8 +65,18 @@ class TestDocumentAiTools:
         assert parsed["operation"] == "ocr"
         assert parsed["path"] == "sample.pdf"
         assert parsed["text"] == "# Title\nHello world"
+        assert parsed["artifacts"]["markdown_path"] == "sample.pdf.ocr.pages-1_3.md"
+        assert parsed["artifacts"]["json_path"] == "sample.pdf.ocr.pages-1_3.json"
         assert parsed["options"]["include_images"] is True
         assert parsed["options"]["pages"] == [0, 2]
+        markdown_artifact = tmp_path / "sample.pdf.ocr.pages-1_3.md"
+        json_artifact = tmp_path / "sample.pdf.ocr.pages-1_3.json"
+        assert markdown_artifact.exists()
+        assert json_artifact.exists()
+        assert "# Title\nHello world" in markdown_artifact.read_text()
+        saved_payload = json.loads(json_artifact.read_text())
+        assert saved_payload["text"] == "# Title\nHello world"
+        assert saved_payload["artifacts"]["markdown_path"] == "sample.pdf.ocr.pages-1_3.md"
         body = observed["body"]
         assert isinstance(body, dict)
         assert body["document"]["type"] == "document_url"
@@ -90,10 +100,40 @@ class TestDocumentAiTools:
 
         parsed = json.loads(raw)
         assert parsed["file"]["source_type"] == "image_url"
+        assert parsed["artifacts"]["markdown_path"] == "scan.png.ocr.md"
+        assert parsed["artifacts"]["json_path"] == "scan.png.ocr.json"
+        assert (tmp_path / "scan.png.ocr.md").exists()
+        assert (tmp_path / "scan.png.ocr.json").exists()
         body = captured["body"]
         assert isinstance(body, dict)
         assert body["document"]["type"] == "image_url"
         assert str(body["document"]["image_url"]).startswith("data:image/png;base64,")
+
+    def test_document_ocr_sidecar_json_omits_image_base64(self, tmp_path: Path) -> None:
+        pdf = tmp_path / "sample.pdf"
+        _write_pdf(pdf)
+        tools = _make_tools(tmp_path)
+
+        def fake_request(*, url: str, body: dict[str, object], request_label: str) -> dict[str, object]:
+            return {
+                "model": "mistral-ocr-latest",
+                "pages": [
+                    {
+                        "index": 0,
+                        "markdown": "Page text",
+                        "images": [{"image_base64": "abc123", "id": "img-1"}],
+                    }
+                ],
+            }
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tools, "_mistral_document_ai_request", fake_request)
+            raw = tools.document_ocr("sample.pdf", include_images=True)
+
+        parsed = json.loads(raw)
+        sidecar = tmp_path / parsed["artifacts"]["json_path"]
+        saved_payload = json.loads(sidecar.read_text())
+        assert "image_base64" not in json.dumps(saved_payload)
 
     def test_document_annotations_requires_schema(self, tmp_path: Path) -> None:
         pdf = tmp_path / "sample.pdf"

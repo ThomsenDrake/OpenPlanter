@@ -132,7 +132,7 @@ fn workspace_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "document_ocr",
-            description: "Run Mistral Document AI OCR on a local PDF or image file and return structured text plus OCR metadata.",
+            description: "Run Mistral Document AI OCR on a local PDF or image file and return structured text plus OCR metadata. The tool automatically saves OCR sidecar artifacts (.md and .json) next to the source file for reuse.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -835,6 +835,14 @@ mod tests {
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"subtask"));
         assert!(names.contains(&"execute"));
+    }
+
+    #[test]
+    fn test_document_ocr_description_mentions_workspace_artifact() {
+        let defs = workspace_tool_defs();
+        let document_ocr = defs.iter().find(|def| def.name == "document_ocr").unwrap();
+        assert!(document_ocr.description.contains("automatically saves"));
+        assert!(document_ocr.description.contains(".md and .json"));
     }
 
     #[test]

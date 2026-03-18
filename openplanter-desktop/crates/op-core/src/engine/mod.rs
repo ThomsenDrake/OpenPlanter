@@ -785,7 +785,7 @@ fn is_recon_tool(name: &str) -> bool {
 fn is_artifact_tool(name: &str) -> bool {
     matches!(
         name,
-        "write_file" | "apply_patch" | "edit_file" | "hashline_edit"
+        "document_ocr" | "write_file" | "apply_patch" | "edit_file" | "hashline_edit"
     )
 }
 
@@ -1723,7 +1723,7 @@ async fn solve_frame(
                 "{step_prefix} soft guardrail: multiple consecutive recon steps without artifacts; nudging toward implementation"
             ));
             messages.push(Message::User {
-                content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs.".to_string(),
+                content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs. If recent OCR/transcription/API results may be needed again, persist them to workspace files now instead of relying on scrollback.".to_string(),
             });
         }
         step_records.push(build_step_progress_record(
@@ -2911,5 +2911,10 @@ mod tests {
         assert!(!should_emit_recon_guardrail(1, last_guardrail_streak));
         assert!(!should_emit_recon_guardrail(2, last_guardrail_streak));
         assert!(should_emit_recon_guardrail(3, last_guardrail_streak));
+    }
+
+    #[test]
+    fn test_document_ocr_is_artifact_tool() {
+        assert!(is_artifact_tool("document_ocr"));
     }
 }
