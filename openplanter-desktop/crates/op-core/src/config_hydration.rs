@@ -75,6 +75,8 @@ pub fn merge_credentials_into_config(
     merge!(brave_api_key);
     merge!(tavily_api_key);
     merge!(voyage_api_key);
+    merge!(mistral_api_key);
+    merge!(mistral_document_ai_api_key);
     merge!(mistral_transcription_api_key);
 }
 
@@ -136,7 +138,11 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
     } else {
         cfg.min_subtask_depth = cfg.min_subtask_depth.clamp(0, cfg.max_depth);
     }
-
+    if !has_env_value(&["OPENPLANTER_MISTRAL_DOCUMENT_AI_USE_SHARED_KEY"]) {
+        if let Some(value) = settings.mistral_document_ai_use_shared_key {
+            cfg.mistral_document_ai_use_shared_key = value;
+        }
+    }
     if !has_env_value(&["OPENPLANTER_CHROME_MCP_ENABLED"]) {
         if let Some(enabled) = settings.chrome_mcp_enabled {
             cfg.chrome_mcp_enabled = enabled;
@@ -199,9 +205,15 @@ fn has_env_value(keys: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     #[test]
     fn apply_settings_to_config_sets_continuity_when_env_missing() {
+        let saved = env::var("OPENPLANTER_CONTINUITY_MODE").ok();
+        unsafe {
+            env::remove_var("OPENPLANTER_CONTINUITY_MODE");
+        }
+
         let mut cfg = AgentConfig::default();
         let settings = PersistentSettings {
             continuity_mode: Some("continue".into()),
@@ -211,5 +223,12 @@ mod tests {
         apply_settings_to_config(&mut cfg, &settings);
 
         assert_eq!(cfg.continuity_mode, "continue");
+
+        unsafe {
+            match saved {
+                Some(value) => env::set_var("OPENPLANTER_CONTINUITY_MODE", value),
+                None => env::remove_var("OPENPLANTER_CONTINUITY_MODE"),
+            }
+        }
     }
 }

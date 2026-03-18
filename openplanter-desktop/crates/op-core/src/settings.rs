@@ -65,6 +65,7 @@ pub struct PersistentSettings {
     pub recursion_policy: Option<String>,
     pub min_subtask_depth: Option<i64>,
     pub max_depth: Option<i64>,
+    pub mistral_document_ai_use_shared_key: Option<bool>,
     pub chrome_mcp_enabled: Option<bool>,
     pub chrome_mcp_auto_connect: Option<bool>,
     pub chrome_mcp_browser_url: Option<String>,
@@ -147,6 +148,7 @@ impl PersistentSettings {
             recursion_policy,
             min_subtask_depth,
             max_depth,
+            mistral_document_ai_use_shared_key: self.mistral_document_ai_use_shared_key,
             chrome_mcp_enabled: self.chrome_mcp_enabled,
             chrome_mcp_auto_connect: self.chrome_mcp_auto_connect,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
@@ -188,6 +190,10 @@ impl PersistentSettings {
         add!(recursion_policy, "recursion_policy");
         add!(min_subtask_depth, "min_subtask_depth");
         add!(max_depth, "max_depth");
+        add!(
+            mistral_document_ai_use_shared_key,
+            "mistral_document_ai_use_shared_key"
+        );
         add!(chrome_mcp_enabled, "chrome_mcp_enabled");
         add!(chrome_mcp_auto_connect, "chrome_mcp_auto_connect");
         add!(chrome_mcp_browser_url, "chrome_mcp_browser_url");
@@ -230,6 +236,9 @@ impl PersistentSettings {
             recursion_policy: get_str(obj, "recursion_policy"),
             min_subtask_depth: obj.get("min_subtask_depth").and_then(|value| value.as_i64()),
             max_depth: obj.get("max_depth").and_then(|value| value.as_i64()),
+            mistral_document_ai_use_shared_key: normalize_bool(
+                obj.get("mistral_document_ai_use_shared_key"),
+            )?,
             chrome_mcp_enabled: normalize_bool(obj.get("chrome_mcp_enabled"))?,
             chrome_mcp_auto_connect: normalize_bool(obj.get("chrome_mcp_auto_connect"))?,
             chrome_mcp_browser_url: normalize_chrome_mcp_browser_url(
@@ -355,6 +364,7 @@ mod tests {
             zai_plan: Some("coding".into()),
             web_search_provider: Some("firecrawl".into()),
             continuity_mode: Some("continue".into()),
+            mistral_document_ai_use_shared_key: Some(false),
             ..Default::default()
         };
         store.save(&settings).unwrap();
@@ -365,6 +375,7 @@ mod tests {
         assert_eq!(loaded.zai_plan, Some("coding".into()));
         assert_eq!(loaded.web_search_provider, Some("firecrawl".into()));
         assert_eq!(loaded.continuity_mode, Some("continue".into()));
+        assert_eq!(loaded.mistral_document_ai_use_shared_key, Some(false));
     }
 
     #[test]
@@ -397,6 +408,7 @@ mod tests {
             zai_plan: Some("coding".into()),
             web_search_provider: Some("firecrawl".into()),
             continuity_mode: Some("fresh".into()),
+            mistral_document_ai_use_shared_key: Some(false),
             ..Default::default()
         };
         let json_val = serde_json::to_value(settings.to_json()).unwrap();
@@ -408,6 +420,7 @@ mod tests {
         assert_eq!(loaded.zai_plan, Some("coding".into()));
         assert_eq!(loaded.web_search_provider, Some("firecrawl".into()));
         assert_eq!(loaded.continuity_mode, Some("fresh".into()));
+        assert_eq!(loaded.mistral_document_ai_use_shared_key, Some(false));
     }
 
     #[test]

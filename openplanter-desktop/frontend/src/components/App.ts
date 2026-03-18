@@ -4,9 +4,56 @@ import { createChatPane } from "./ChatPane";
 import { createInvestigationPane } from "./InvestigationPane";
 import { createWorkspaceInitGate } from "./WorkspaceInitGate";
 import { appState } from "../state/store";
-import { listSessions, openSession, deleteSession, getCredentialsStatus, getSessionHistory } from "../api/invoke";
+import {
+  listSessions,
+  openSession,
+  deleteSession,
+  getCredentialsStatus,
+  getSessionHistory,
+  saveCredential,
+  saveSettings,
+  updateConfig,
+} from "../api/invoke";
 import type { ChatMessage } from "../state/store";
-import type { ReplayEntry } from "../api/types";
+import type {
+  CredentialService,
+  CredentialStatusMap,
+  ReplayEntry,
+} from "../api/types";
+
+const CREDENTIAL_SERVICES = [
+  "openai",
+  "anthropic",
+  "openrouter",
+  "cerebras",
+  "zai",
+  "ollama",
+  "exa",
+  "firecrawl",
+  "brave",
+  "tavily",
+  "voyage",
+  "mistral",
+  "mistral_document_ai",
+  "mistral_transcription",
+] as const;
+
+const CREDENTIAL_LABELS: Record<(typeof CREDENTIAL_SERVICES)[number], string> = {
+  openai: "openai",
+  anthropic: "anthropic",
+  openrouter: "openrouter",
+  cerebras: "cerebras",
+  zai: "z.ai",
+  ollama: "ollama",
+  exa: "exa",
+  firecrawl: "firecrawl",
+  brave: "brave",
+  tavily: "tavily",
+  voyage: "voyage",
+  mistral: "mistral",
+  mistral_document_ai: "mistral document ai",
+  mistral_transcription: "mistral transcription",
+};
 
 function formatRecursionMode(recursive: boolean, policy: string): string {
   return recursive ? `recursive (${policy.replace(/_/g, "-")})` : "flat";
@@ -47,6 +94,10 @@ export function createApp(root: HTMLElement): void {
   settingsDisplay.className = "settings-display";
   sidebar.appendChild(settingsDisplay);
 
+  const settingsControls = document.createElement("div");
+  settingsControls.className = "settings-controls";
+  sidebar.appendChild(settingsControls);
+
   const credsHeader = document.createElement("h3");
   credsHeader.style.marginTop = "16px";
   credsHeader.textContent = "Credentials";
@@ -55,6 +106,10 @@ export function createApp(root: HTMLElement): void {
   const credsDisplay = document.createElement("div");
   credsDisplay.className = "cred-status";
   sidebar.appendChild(credsDisplay);
+
+  const credEditor = document.createElement("div");
+  credEditor.className = "cred-editor";
+  sidebar.appendChild(credEditor);
 
   root.appendChild(sidebar);
 
@@ -79,6 +134,7 @@ export function createApp(root: HTMLElement): void {
       `<div><span class="label">z.ai plan:</span> <span class="value">${s.zaiPlan || "paygo"}</span></div>`,
       `<div><span class="label">web search:</span> <span class="value">${s.webSearchProvider || "exa"}</span></div>`,
       `<div><span class="label">continuity:</span> <span class="value">${s.continuityMode || "auto"}</span></div>`,
+      `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,
       `<div><span class="label">chrome mcp:</span> <span class="value">${s.chromeMcpStatus} (${s.chromeMcpChannel})</span></div>`,
       `<div><span class="label">reasoning:</span> <span class="value">${s.reasoningEffort ?? "off"}</span></div>`,
       `<div><span class="label">mode:</span> <span class="value">${formatRecursionMode(s.recursive, s.recursionPolicy)}</span></div>`,
@@ -99,6 +155,25 @@ export function createApp(root: HTMLElement): void {
 
   // Load credentials status
   loadCredentials(credsDisplay);
+  createDocumentAiKeyModeControl(settingsControls);
+  createCredentialEditor(credEditor, credsDisplay, {
+    service: "mistral",
+    title: "Mistral shared key",
+    placeholder: "Paste shared Mistral API key",
+    hint: "Used when Document AI key mode is set to shared.",
+  });
+  createCredentialEditor(credEditor, credsDisplay, {
+    service: "mistral_document_ai",
+    title: "Mistral Document AI override",
+    placeholder: "Paste Document AI override key",
+    hint: "Stored in workspace .openplanter/credentials.json",
+  });
+  createCredentialEditor(credEditor, credsDisplay, {
+    service: "mistral_transcription",
+    title: "Mistral transcription",
+    placeholder: "Paste transcription API key",
+    hint: "Stored in workspace .openplanter/credentials.json",
+  });
 }
 
 /** Switch to a new session, clearing chat state. */
@@ -324,16 +399,199 @@ async function loadSessions(container: HTMLElement): Promise<void> {
 async function loadCredentials(container: HTMLElement): Promise<void> {
   try {
     const status = await getCredentialsStatus();
-    container.innerHTML = "";
-    const providers = ["openai", "anthropic", "openrouter", "cerebras", "zai", "ollama", "exa", "firecrawl", "brave", "tavily", "voyage", "mistral_transcription"];
-    for (const p of providers) {
-      const row = document.createElement("div");
-      const hasKey = status[p] ?? false;
-      row.className = hasKey ? "cred-ok" : "cred-missing";
-      row.textContent = `${hasKey ? "\u2713" : "\u2717"} ${p}`;
-      container.appendChild(row);
-    }
+    renderCredentialStatus(container, status);
   } catch (e) {
     console.error("Failed to load credentials:", e);
   }
+}
+
+function renderCredentialStatus(
+  container: HTMLElement,
+  status: CredentialStatusMap
+): void {
+  container.innerHTML = "";
+  for (const service of CREDENTIAL_SERVICES) {
+    const row = document.createElement("div");
+    const hasKey = status[service] ?? false;
+    row.className = hasKey ? "cred-ok" : "cred-missing";
+    row.textContent = `${hasKey ? "\u2713" : "\u2717"} ${CREDENTIAL_LABELS[service]}`;
+    container.appendChild(row);
+  }
+}
+
+function createDocumentAiKeyModeControl(container: HTMLElement): void {
+  const section = document.createElement("div");
+  section.className = "settings-control";
+  container.appendChild(section);
+
+  const title = document.createElement("div");
+  title.className = "settings-control-title";
+  title.textContent = "Document AI key mode";
+  section.appendChild(title);
+
+  const select = document.createElement("select");
+  select.className = "settings-select";
+  select.innerHTML = [
+    `<option value="shared">Use shared Mistral key</option>`,
+    `<option value="override">Use Document AI override key</option>`,
+  ].join("");
+  section.appendChild(select);
+
+  const actions = document.createElement("div");
+  actions.className = "cred-editor-actions";
+  section.appendChild(actions);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.textContent = "Save";
+  actions.appendChild(saveBtn);
+
+  const hint = document.createElement("div");
+  hint.className = "cred-editor-hint";
+  hint.textContent = "Controls which resolved credential the Document AI tools use.";
+  section.appendChild(hint);
+
+  const feedback = document.createElement("div");
+  feedback.className = "cred-editor-feedback";
+  section.appendChild(feedback);
+
+  function sync(): void {
+    select.value = appState.get().mistralDocumentAiUseSharedKey
+      ? "shared"
+      : "override";
+  }
+
+  appState.subscribe(sync);
+  sync();
+
+  saveBtn.addEventListener("click", () => {
+    void (async () => {
+      const useSharedKey = select.value === "shared";
+      saveBtn.disabled = true;
+      feedback.className = "cred-editor-feedback";
+      feedback.textContent = "Saving...";
+
+      try {
+        const config = await updateConfig({
+          mistral_document_ai_use_shared_key: useSharedKey,
+        });
+        appState.update((s) => ({
+          ...s,
+          mistralDocumentAiUseSharedKey:
+            config.mistral_document_ai_use_shared_key,
+        }));
+        await saveSettings({
+          mistral_document_ai_use_shared_key:
+            config.mistral_document_ai_use_shared_key,
+        });
+        feedback.className = "cred-editor-feedback success";
+        feedback.textContent = `Saved ${useSharedKey ? "shared" : "override"} key mode.`;
+      } catch (e) {
+        feedback.className = "cred-editor-feedback error";
+        feedback.textContent = `Failed to save key mode: ${e}`;
+        console.error("Failed to save Document AI key mode:", e);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    })();
+  });
+}
+
+function createCredentialEditor(
+  container: HTMLElement,
+  statusContainer: HTMLElement,
+  options: {
+    service: CredentialService;
+    title: string;
+    placeholder: string;
+    hint: string;
+  }
+): void {
+  const section = document.createElement("div");
+  section.className = "cred-editor-section";
+  container.appendChild(section);
+
+  const title = document.createElement("div");
+  title.className = "cred-editor-title";
+  title.textContent = options.title;
+  section.appendChild(title);
+
+  const input = document.createElement("input");
+  input.type = "password";
+  input.className = "cred-editor-input";
+  input.placeholder = options.placeholder;
+  input.autocomplete = "new-password";
+  section.appendChild(input);
+
+  const actions = document.createElement("div");
+  actions.className = "cred-editor-actions";
+  section.appendChild(actions);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.textContent = "Save";
+  actions.appendChild(saveBtn);
+
+  const clearBtn = document.createElement("button");
+  clearBtn.type = "button";
+  clearBtn.className = "secondary";
+  clearBtn.textContent = "Clear";
+  actions.appendChild(clearBtn);
+
+  const hint = document.createElement("div");
+  hint.className = "cred-editor-hint";
+  hint.textContent = options.hint;
+  section.appendChild(hint);
+
+  const feedback = document.createElement("div");
+  feedback.className = "cred-editor-feedback";
+  section.appendChild(feedback);
+
+  async function persist(value: string | null, action: "save" | "clear"): Promise<void> {
+    if (action === "save" && !(value ?? "").trim()) {
+      feedback.className = "cred-editor-feedback error";
+      feedback.textContent = "Enter a key or use Clear.";
+      return;
+    }
+
+    saveBtn.disabled = true;
+    clearBtn.disabled = true;
+    feedback.className = "cred-editor-feedback";
+    feedback.textContent = action === "save" ? "Saving..." : "Clearing...";
+
+    try {
+      const status = await saveCredential(options.service, value);
+      renderCredentialStatus(statusContainer, status);
+      input.value = "";
+      if (action === "clear" && status[options.service]) {
+        feedback.className = "cred-editor-feedback warning";
+        feedback.textContent =
+          "Cleared workspace key. This service is still configured from env or .env.";
+      } else {
+        feedback.className = "cred-editor-feedback success";
+        feedback.textContent =
+          action === "save" ? "Saved workspace key." : "Cleared workspace key.";
+      }
+    } catch (e) {
+      feedback.className = "cred-editor-feedback error";
+      feedback.textContent = `Failed to ${action} key: ${e}`;
+      console.error(`Failed to ${action} credential for ${options.service}:`, e);
+    } finally {
+      saveBtn.disabled = false;
+      clearBtn.disabled = false;
+    }
+  }
+
+  saveBtn.addEventListener("click", () => {
+    void persist(input.value, "save");
+  });
+  clearBtn.addEventListener("click", () => {
+    void persist(null, "clear");
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void persist(input.value, "save");
+    }
+  });
 }

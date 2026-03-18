@@ -18,6 +18,11 @@ MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS = 900
 MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS = 2.0
 MISTRAL_TRANSCRIPTION_MAX_CHUNKS = 48
 MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC = 180
+MISTRAL_DOCUMENT_AI_BASE_URL = "https://api.mistral.ai"
+MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL = "mistral-ocr-latest"
+MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL = "mistral-small-latest"
+MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC = 180
+MISTRAL_DOCUMENT_AI_MAX_BYTES = 50 * 1024 * 1024
 CHROME_MCP_DEFAULT_CHANNEL = "stable"
 CHROME_MCP_CONNECT_TIMEOUT_SEC = 15
 CHROME_MCP_RPC_TIMEOUT_SEC = 45
@@ -152,6 +157,7 @@ class AgentConfig:
     brave_base_url: str = "https://api.search.brave.com/res/v1"
     tavily_base_url: str = "https://api.tavily.com"
     mistral_transcription_base_url: str = MISTRAL_TRANSCRIPTION_BASE_URL
+    mistral_document_ai_base_url: str = MISTRAL_DOCUMENT_AI_BASE_URL
     openai_api_key: str | None = None
     openai_oauth_token: str | None = None
     anthropic_api_key: str | None = None
@@ -164,6 +170,15 @@ class AgentConfig:
     tavily_api_key: str | None = None
     web_search_provider: str = "exa"
     voyage_api_key: str | None = None
+    mistral_api_key: str | None = None
+    mistral_document_ai_api_key: str | None = None
+    mistral_document_ai_use_shared_key: bool = True
+    mistral_document_ai_ocr_model: str = MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL
+    mistral_document_ai_qa_model: str = MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL
+    mistral_document_ai_max_bytes: int = MISTRAL_DOCUMENT_AI_MAX_BYTES
+    mistral_document_ai_request_timeout_sec: int = (
+        MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC
+    )
     mistral_transcription_api_key: str | None = None
     mistral_transcription_model: str = MISTRAL_TRANSCRIPTION_DEFAULT_MODEL
     mistral_transcription_max_bytes: int = 100 * 1024 * 1024
@@ -253,6 +268,14 @@ class AgentConfig:
         brave_api_key = os.getenv("OPENPLANTER_BRAVE_API_KEY") or os.getenv("BRAVE_API_KEY")
         tavily_api_key = os.getenv("OPENPLANTER_TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
         voyage_api_key = os.getenv("OPENPLANTER_VOYAGE_API_KEY") or os.getenv("VOYAGE_API_KEY")
+        mistral_api_key = (
+            os.getenv("OPENPLANTER_MISTRAL_API_KEY")
+            or os.getenv("MISTRAL_API_KEY")
+        )
+        mistral_document_ai_api_key = (
+            os.getenv("OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY")
+            or os.getenv("MISTRAL_DOCUMENT_AI_API_KEY")
+        )
         mistral_transcription_api_key = (
             os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
             or os.getenv("MISTRAL_TRANSCRIPTION_API_KEY")
@@ -318,6 +341,12 @@ class AgentConfig:
             firecrawl_base_url=os.getenv("OPENPLANTER_FIRECRAWL_BASE_URL", "https://api.firecrawl.dev/v1"),
             brave_base_url=os.getenv("OPENPLANTER_BRAVE_BASE_URL", "https://api.search.brave.com/res/v1"),
             tavily_base_url=os.getenv("OPENPLANTER_TAVILY_BASE_URL", "https://api.tavily.com"),
+            mistral_document_ai_base_url=os.getenv(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_BASE_URL",
+                os.getenv("MISTRAL_DOCUMENT_AI_BASE_URL")
+                or os.getenv("MISTRAL_BASE_URL")
+                or MISTRAL_DOCUMENT_AI_BASE_URL,
+            ),
             mistral_transcription_base_url=os.getenv(
                 "OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL",
                 os.getenv("MISTRAL_TRANSCRIPTION_BASE_URL")
@@ -336,6 +365,36 @@ class AgentConfig:
             tavily_api_key=tavily_api_key,
             web_search_provider=web_search_provider,
             voyage_api_key=voyage_api_key,
+            mistral_api_key=(mistral_api_key or "").strip() or None,
+            mistral_document_ai_api_key=(
+                mistral_document_ai_api_key or ""
+            ).strip()
+            or None,
+            mistral_document_ai_use_shared_key=_env_bool(
+                "OPENPLANTER_MISTRAL_DOCUMENT_AI_USE_SHARED_KEY", True
+            ),
+            mistral_document_ai_ocr_model=(
+                os.getenv("OPENPLANTER_MISTRAL_DOCUMENT_AI_OCR_MODEL")
+                or os.getenv("MISTRAL_DOCUMENT_AI_OCR_MODEL")
+                or MISTRAL_DOCUMENT_AI_DEFAULT_OCR_MODEL
+            ),
+            mistral_document_ai_qa_model=(
+                os.getenv("OPENPLANTER_MISTRAL_DOCUMENT_AI_QA_MODEL")
+                or os.getenv("MISTRAL_DOCUMENT_AI_QA_MODEL")
+                or MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL
+            ),
+            mistral_document_ai_max_bytes=int(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_DOCUMENT_AI_MAX_BYTES",
+                    str(MISTRAL_DOCUMENT_AI_MAX_BYTES),
+                )
+            ),
+            mistral_document_ai_request_timeout_sec=int(
+                os.getenv(
+                    "OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC",
+                    str(MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC),
+                )
+            ),
             mistral_transcription_api_key=(mistral_transcription_api_key or "").strip() or None,
             mistral_transcription_model=(
                 os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")

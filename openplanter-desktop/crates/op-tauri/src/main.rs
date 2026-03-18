@@ -28,6 +28,7 @@ fn main() {
             commands::config::update_config,
             commands::config::list_models,
             commands::config::save_settings,
+            commands::config::save_credential,
             commands::config::get_credentials_status,
             commands::init::get_init_status,
             commands::init::run_standard_init,
