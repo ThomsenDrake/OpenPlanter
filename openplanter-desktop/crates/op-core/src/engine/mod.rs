@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::builder::build_model;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, normalize_model_alias};
 use crate::events::{
     CompletionMeta, DeltaEvent, DeltaKind, LoopMetrics, LoopPhase, StepEvent, TokenUsage,
 };
@@ -1164,9 +1164,10 @@ fn build_subtask_config(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(current_model_name);
+    let requested_name = normalize_model_alias(requested_name);
     let cur_tier = model_tier(current_model_name, current_reasoning_effort);
     let req_tier = model_tier(
-        requested_name,
+        &requested_name,
         requested_effort.or(current_reasoning_effort),
     );
     if req_tier < cur_tier {
@@ -1174,8 +1175,7 @@ fn build_subtask_config(
             "Cannot delegate to higher-tier model (current tier {cur_tier}, requested tier {req_tier}). Use an equal or lower-tier model."
         ));
     }
-
-    child.model = requested_name.to_string();
+    child.model = requested_name;
     if let Some(effort) = requested_effort {
         let trimmed = effort.trim();
         child.reasoning_effort = if trimmed.is_empty() {
@@ -1276,9 +1276,24 @@ async fn execute_recursive_tool_call(
     } else {
         "Subtask result for"
     };
+    let status = outcome.status.clone();
+    let is_error = matches!(
+        status,
+        SolveFrameStatus::Error | SolveFrameStatus::Cancelled
+    );
     let mut observation = format!("{label} '{}':\n{}", objective, outcome.result);
     if !criteria.is_empty() && config.acceptance_criteria {
-        let verdict = judge_acceptance(&criteria, &outcome.result);
+        let verdict = if is_error {
+            format!(
+                "FAIL: Child solve ended with {} before acceptance criteria could be satisfied.",
+                match status {
+                    SolveFrameStatus::Cancelled => "cancellation",
+                    _ => "an error",
+                }
+            )
+        } else {
+            judge_acceptance(&criteria, &outcome.result)
+        };
         let tag = if verdict.starts_with("PASS") {
             "PASS"
         } else {
@@ -1287,7 +1302,11 @@ async fn execute_recursive_tool_call(
         observation.push_str(&format!("\n\n[ACCEPTANCE CRITERIA: {tag}]\n{verdict}"));
     }
 
-    ToolResult::ok(observation)
+    if is_error {
+        ToolResult::error(observation)
+    } else {
+        ToolResult::ok(observation)
+    }
 }
 
 async fn solve_frame(
@@ -2780,6 +2799,100 @@ mod tests {
             &tool_calls,
             &tool_observations,
         ));
+    }
+
+    #[test]
+    fn test_delegation_requirement_not_satisfied_when_all_parallel_subtasks_fail() {
+        let tool_calls = vec![
+            tool_call_with_id("call-1", "subtask"),
+            tool_call_with_id("call-2", "subtask"),
+        ];
+        let tool_observations = vec![
+            (
+                "call-1".to_string(),
+                "subtask".to_string(),
+                "{}".to_string(),
+                "child failed".to_string(),
+                true,
+            ),
+            (
+                "call-2".to_string(),
+                "subtask".to_string(),
+                "{}".to_string(),
+                "child also failed".to_string(),
+                true,
+            ),
+        ];
+
+        assert!(!delegation_requirement_satisfied_by_subtask_observations(
+            &tool_calls,
+            &tool_observations,
+        ));
+    }
+
+    #[test]
+    fn test_build_subtask_config_normalizes_model_alias() {
+        let config = AgentConfig::default();
+        let child = build_subtask_config(
+            &config,
+            "anthropic-foundry/claude-opus-4-6",
+            Some("high"),
+            Some("sonnet"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(child.model, "anthropic-foundry/claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn test_execute_recursive_tool_call_marks_child_model_error_as_error() {
+        let emitter = TestEmitter::new();
+        let cancel = CancellationToken::new();
+        let config = AgentConfig {
+            provider: "anthropic".into(),
+            model: "anthropic-foundry/claude-opus-4-6".into(),
+            anthropic_api_key: Some("sk-ant-test".into()),
+            max_depth: 2,
+            recursive: true,
+            acceptance_criteria: false,
+            ..Default::default()
+        };
+        let tool_call = ToolCall {
+            id: "call-1".into(),
+            name: "subtask".into(),
+            arguments: serde_json::json!({
+                "objective": "inspect child",
+                "model": "gpt4o",
+            })
+            .to_string(),
+        };
+
+        let result = execute_recursive_tool_call(
+            &tool_call,
+            &config,
+            &emitter,
+            cancel,
+            None,
+            0,
+            "0.1".into(),
+            "anthropic-foundry/claude-opus-4-6",
+            Some("high"),
+            Vec::new(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .contains("Subtask result for 'inspect child'")
+        );
+        assert!(
+            result
+                .content
+                .contains("Model 'gpt-4o' belongs to provider 'openai'")
+        );
     }
 
     #[test]

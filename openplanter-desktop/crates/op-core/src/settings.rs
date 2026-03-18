@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
-    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
+    normalize_model_alias, normalize_recursion_policy, normalize_web_search_provider,
+    normalize_zai_plan,
 };
 
 const VALID_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
@@ -99,7 +100,7 @@ impl PersistentSettings {
             .as_deref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(String::from);
+            .map(normalize_model_alias);
 
         let effort = normalize_reasoning_effort(self.default_reasoning_effort.as_deref())?;
 
@@ -129,7 +130,7 @@ impl PersistentSettings {
             v.as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(String::from)
+                .map(normalize_model_alias)
         }
 
         Ok(Self {
@@ -234,7 +235,9 @@ impl PersistentSettings {
             continuity_mode: get_str(obj, "continuity_mode"),
             recursive: normalize_bool(obj.get("recursive"))?,
             recursion_policy: get_str(obj, "recursion_policy"),
-            min_subtask_depth: obj.get("min_subtask_depth").and_then(|value| value.as_i64()),
+            min_subtask_depth: obj
+                .get("min_subtask_depth")
+                .and_then(|value| value.as_i64()),
             max_depth: obj.get("max_depth").and_then(|value| value.as_i64()),
             mistral_document_ai_use_shared_key: normalize_bool(
                 obj.get("mistral_document_ai_use_shared_key"),
@@ -451,5 +454,29 @@ mod tests {
         };
         let normalized = settings.normalized().unwrap();
         assert_eq!(normalized.continuity_mode, Some("auto".into()));
+    }
+
+    #[test]
+    fn test_model_aliases_normalized() {
+        let settings = PersistentSettings {
+            default_model: Some("sonnet".into()),
+            default_model_anthropic: Some("haiku".into()),
+            default_model_openai: Some("gpt5".into()),
+            ..Default::default()
+        };
+
+        let normalized = settings.normalized().unwrap();
+        assert_eq!(
+            normalized.default_model,
+            Some("anthropic-foundry/claude-sonnet-4-6".into())
+        );
+        assert_eq!(
+            normalized.default_model_anthropic,
+            Some("anthropic-foundry/claude-haiku-4-5".into())
+        );
+        assert_eq!(
+            normalized.default_model_openai,
+            Some("azure-foundry/gpt-5.4".into())
+        );
     }
 }

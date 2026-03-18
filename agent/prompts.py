@@ -246,9 +246,9 @@ Anthropic chain:  opus → sonnet → haiku
 OpenAI chain:     codex@xhigh → @high → @medium → @low
 
 When to delegate DOWN:
-- Focused tasks (parse a dataset, write a query, extract specific fields) → sonnet / @high
-- Simple lookups, formatting, straightforward transforms → haiku / @medium or @low
-- Reading/summarizing files → haiku / @low
+- Focused tasks (parse a dataset, write a query, extract specific fields) → anthropic-foundry/claude-sonnet-4-6 (alias: sonnet) / @high
+- Simple lookups, formatting, straightforward transforms → anthropic-foundry/claude-haiku-4-5 (alias: haiku) / @medium or @low
+- Reading/summarizing files → anthropic-foundry/claude-haiku-4-5 (alias: haiku) / @low
 
 When to keep at current level:
 - Complex multi-step reasoning or analysis design decisions

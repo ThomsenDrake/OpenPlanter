@@ -1614,7 +1614,7 @@ async fn test_solve_flushes_tool_loop_cancel_checkpoint_before_error() {
 
     impl SolveEmitter for TestEmitter {
         fn emit_trace(&self, message: &str) {
-            if message.contains("Executing tool: list_files") {
+            if message.contains("executing tool: list_files") {
                 let mut count = self.tool_exec_traces.lock().unwrap();
                 *count += 1;
                 if *count == 2 {

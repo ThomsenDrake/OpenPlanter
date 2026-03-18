@@ -112,6 +112,35 @@ pub fn normalize_recursion_policy(value: Option<&str>) -> String {
     }
 }
 
+pub fn normalize_model_alias(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "opus" | "opus-4" | "opus4.6" => "anthropic-foundry/claude-opus-4-6".to_string(),
+        "sonnet" | "sonnet-4" | "sonnet4.6" => "anthropic-foundry/claude-sonnet-4-6".to_string(),
+        "haiku" | "haiku-4" | "haiku4.5" => "anthropic-foundry/claude-haiku-4-5".to_string(),
+        "gpt5" | "gpt-5" | "gpt5.4" | "gpt-5.4" => "azure-foundry/gpt-5.4".to_string(),
+        "gpt5.3" | "gpt-5.3" => "azure-foundry/gpt-5.3-codex".to_string(),
+        "kimi" => "azure-foundry/Kimi-K2.5".to_string(),
+        "gpt4o" | "gpt-4o" => "gpt-4o".to_string(),
+        "o1" => "o1".to_string(),
+        "o3" => "o3".to_string(),
+        "o4" | "o4-mini" => "o4-mini".to_string(),
+        "glm" | "glm5" | "glm-5" | "zai" => "glm-5".to_string(),
+        "zai-glm" => "zai-glm-4.6".to_string(),
+        "llama" => "llama3.2".to_string(),
+        "mistral" => "mistral".to_string(),
+        "gemma" => "gemma".to_string(),
+        "phi" => "phi".to_string(),
+        "deepseek" => "deepseek".to_string(),
+        "qwen" | "qwen-3" => "qwen-3-235b-a22b-instruct-2507".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 pub fn normalize_chrome_mcp_channel(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "beta" => "beta".to_string(),
@@ -478,13 +507,17 @@ impl AgentConfig {
         let chrome_mcp_enabled = env_bool("OPENPLANTER_CHROME_MCP_ENABLED", false);
         let chrome_mcp_auto_connect = env_bool("OPENPLANTER_CHROME_MCP_AUTO_CONNECT", true);
         let max_depth = env_int("OPENPLANTER_MAX_DEPTH", 4).max(0);
-        let min_subtask_depth =
-            env_int("OPENPLANTER_MIN_SUBTASK_DEPTH", 0).clamp(0, max_depth);
+        let min_subtask_depth = env_int("OPENPLANTER_MIN_SUBTASK_DEPTH", 0).clamp(0, max_depth);
+
+        let model = normalize_model_alias(&env_or(
+            "OPENPLANTER_MODEL",
+            PROVIDER_DEFAULT_MODELS["anthropic"],
+        ));
 
         Self {
             workspace: ws,
             provider,
-            model: env_or("OPENPLANTER_MODEL", PROVIDER_DEFAULT_MODELS["anthropic"]),
+            model,
             reasoning_effort,
             base_url: openai_base_url.clone(),
             api_key: openai_api_key.clone(),
@@ -738,6 +771,31 @@ mod tests {
         assert_eq!(PROVIDER_DEFAULT_MODELS.get("ollama"), Some(&"llama3.2"));
     }
 
+    #[test]
+    fn test_normalize_model_aliases() {
+        assert_eq!(
+            normalize_model_alias("sonnet"),
+            "anthropic-foundry/claude-sonnet-4-6"
+        );
+        assert_eq!(
+            normalize_model_alias(" opus "),
+            "anthropic-foundry/claude-opus-4-6"
+        );
+        assert_eq!(
+            normalize_model_alias("haiku-4"),
+            "anthropic-foundry/claude-haiku-4-5"
+        );
+        assert_eq!(
+            normalize_model_alias("qwen"),
+            "qwen-3-235b-a22b-instruct-2507"
+        );
+        assert_eq!(
+            normalize_model_alias("anthropic/claude-sonnet-4-5"),
+            "anthropic/claude-sonnet-4-5"
+        );
+        assert_eq!(normalize_model_alias(""), "");
+    }
+
     /// Combined env-based test to avoid race conditions from parallel test execution.
     /// Tests both default and custom env var loading in sequence.
     #[test]
@@ -855,7 +913,10 @@ mod tests {
             cfg.mistral_document_ai_qa_model,
             MISTRAL_DOCUMENT_AI_DEFAULT_QA_MODEL
         );
-        assert_eq!(cfg.mistral_document_ai_max_bytes, MISTRAL_DOCUMENT_AI_MAX_BYTES);
+        assert_eq!(
+            cfg.mistral_document_ai_max_bytes,
+            MISTRAL_DOCUMENT_AI_MAX_BYTES
+        );
         assert_eq!(
             cfg.mistral_document_ai_request_timeout_sec,
             MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC
@@ -931,10 +992,7 @@ mod tests {
                 "mistral-small-test",
             );
             env::set_var("OPENPLANTER_MISTRAL_DOCUMENT_AI_MAX_BYTES", "4096");
-            env::set_var(
-                "OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC",
-                "300",
-            );
+            env::set_var("OPENPLANTER_MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC", "300");
             env::set_var("OPENPLANTER_WEB_SEARCH_PROVIDER", "tavily");
             env::set_var(
                 "OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL",

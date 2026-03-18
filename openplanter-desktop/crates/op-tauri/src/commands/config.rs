@@ -1,14 +1,13 @@
 use crate::state::AppState;
 use op_core::config::{
     has_openai_auth, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-    normalize_continuity_mode, normalize_recursion_policy, normalize_web_search_provider,
-    normalize_zai_plan,
-    resolve_zai_base_url,
+    normalize_continuity_mode, normalize_model_alias, normalize_recursion_policy,
+    normalize_web_search_provider, normalize_zai_plan, resolve_zai_base_url,
 };
 use op_core::config_hydration::merge_credentials_into_config;
 use op_core::credentials::{
-    credentials_from_env, discover_env_candidates, parse_env_file, CredentialBundle,
-    CredentialStore,
+    CredentialBundle, CredentialStore, credentials_from_env, discover_env_candidates,
+    parse_env_file,
 };
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
 use op_core::settings::{PersistentSettings, SettingsStore};
@@ -121,7 +120,7 @@ pub async fn update_config(
         cfg.provider = provider;
     }
     if let Some(model) = partial.model {
-        cfg.model = model;
+        cfg.model = normalize_model_alias(&model);
     }
     if let Some(effort) = partial.reasoning_effort {
         cfg.reasoning_effort = if effort.is_empty() {

@@ -9,7 +9,8 @@ use std::sync::LazyLock;
 
 use crate::config::{
     ANTHROPIC_FOUNDRY_MODEL_PREFIX, AZURE_FOUNDRY_MODEL_PREFIX, AgentConfig,
-    PROVIDER_DEFAULT_MODELS, resolve_anthropic_api_key, resolve_openai_api_key,
+    PROVIDER_DEFAULT_MODELS, normalize_model_alias, resolve_anthropic_api_key,
+    resolve_openai_api_key,
 };
 use crate::model::BaseModel;
 use crate::model::anthropic::AnthropicModel;
@@ -45,7 +46,9 @@ static OLLAMA_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Infer the likely provider for a model name, or `None` if ambiguous.
 pub fn infer_provider_for_model(model: &str) -> Option<&'static str> {
-    let lowered = model.trim().to_lowercase();
+    let normalized = normalize_model_alias(model);
+    let lowered = normalized.trim().to_lowercase();
+    let model = normalized.as_str();
     if lowered.starts_with(ANTHROPIC_FOUNDRY_MODEL_PREFIX) {
         return Some("anthropic");
     }
@@ -94,20 +97,22 @@ pub fn validate_model_provider(model_name: &str, provider: &str) -> Result<(), M
 pub fn resolve_model_name(cfg: &AgentConfig) -> Result<String, ModelError> {
     let selected = cfg.model.trim();
     if !selected.is_empty() && selected.to_lowercase() != "newest" {
-        return Ok(selected.to_string());
+        return Ok(normalize_model_alias(selected));
     }
     if selected.to_lowercase() == "newest" {
         // In the full implementation this would call list_models for the provider.
         // For now, fall through to defaults.
-        return Ok(PROVIDER_DEFAULT_MODELS
-            .get(cfg.provider.as_str())
-            .unwrap_or(&"anthropic-foundry/claude-opus-4-6")
-            .to_string());
+        return Ok(normalize_model_alias(
+            PROVIDER_DEFAULT_MODELS
+                .get(cfg.provider.as_str())
+                .unwrap_or(&"anthropic-foundry/claude-opus-4-6"),
+        ));
     }
-    Ok(PROVIDER_DEFAULT_MODELS
-        .get(cfg.provider.as_str())
-        .unwrap_or(&"anthropic-foundry/claude-opus-4-6")
-        .to_string())
+    Ok(normalize_model_alias(
+        PROVIDER_DEFAULT_MODELS
+            .get(cfg.provider.as_str())
+            .unwrap_or(&"anthropic-foundry/claude-opus-4-6"),
+    ))
 }
 
 /// Resolve the provider, handling "auto" by inferring from model name
@@ -391,6 +396,19 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_model_name_alias() {
+        let cfg = AgentConfig {
+            model: "sonnet".into(),
+            provider: "anthropic".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_name(&cfg).unwrap(),
+            "anthropic-foundry/claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
     fn test_resolve_model_name_default() {
         let cfg = AgentConfig {
             model: "".into(),
@@ -416,6 +434,16 @@ mod tests {
         let cfg = AgentConfig {
             provider: "auto".into(),
             model: "anthropic-foundry/claude-opus-4-6".into(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider(&cfg).unwrap(), "anthropic");
+    }
+
+    #[test]
+    fn test_resolve_provider_auto_infers_from_alias() {
+        let cfg = AgentConfig {
+            provider: "auto".into(),
+            model: "sonnet".into(),
             ..Default::default()
         };
         assert_eq!(resolve_provider(&cfg).unwrap(), "anthropic");
@@ -638,6 +666,19 @@ mod tests {
         let model = build_model(&cfg).unwrap();
         assert_eq!(model.provider_name(), "anthropic");
         assert_eq!(model.model_name(), "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn test_build_model_alias_normalized_before_construction() {
+        let cfg = AgentConfig {
+            provider: "auto".into(),
+            model: "sonnet".into(),
+            anthropic_api_key: Some("sk-ant-key".into()),
+            ..Default::default()
+        };
+        let model = build_model(&cfg).unwrap();
+        assert_eq!(model.provider_name(), "anthropic");
+        assert_eq!(model.model_name(), "anthropic-foundry/claude-sonnet-4-6");
     }
 
     #[test]
