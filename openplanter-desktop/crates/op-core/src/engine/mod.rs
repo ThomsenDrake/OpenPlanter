@@ -24,10 +24,10 @@ use crate::config::AgentConfig;
 use crate::events::{
     CompletionMeta, DeltaEvent, DeltaKind, LoopMetrics, LoopPhase, StepEvent, TokenUsage,
 };
-use crate::model::{BaseModel, Message, ModelTurn, RateLimitError};
+use crate::model::{BaseModel, Message, ModelTurn, RateLimitError, ToolCall};
 use crate::prompts::build_system_prompt;
-use crate::tools::{ParallelWriteScope, ToolResult, WorkspaceTools};
 use crate::tools::defs::build_tool_defs;
+use crate::tools::{ParallelWriteScope, ToolResult, WorkspaceTools};
 
 use self::context::TurnSummary;
 use self::curator::{
@@ -558,7 +558,11 @@ fn model_tier(model_name: &str, reasoning_effort: Option<&str>) -> i32 {
         return 3;
     }
     if lower.starts_with("gpt-5") && lower.contains("codex") {
-        return match reasoning_effort.unwrap_or_default().to_ascii_lowercase().as_str() {
+        return match reasoning_effort
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "xhigh" => 1,
             "high" => 2,
             "medium" => 3,
@@ -665,12 +669,12 @@ fn required_subtask_depth(config: &AgentConfig, objective: &str) -> u32 {
     if config.recursion_policy == "force_max" {
         return max_depth;
     }
-    let auto_depth = if config.max_steps_per_call >= 2 && objective_requires_auto_recursion(objective)
-    {
-        1
-    } else {
-        0
-    };
+    let auto_depth =
+        if config.max_steps_per_call >= 2 && objective_requires_auto_recursion(objective) {
+            1
+        } else {
+            0
+        };
     std::cmp::min(max_depth, std::cmp::max(min_depth, auto_depth))
 }
 
@@ -680,14 +684,83 @@ fn delegation_policy_message(
     acceptance_criteria_enabled: bool,
 ) -> String {
     let mut message = format!(
-        "Delegation required: recursion policy requires depth {required_depth} before direct work or finalization. Current depth is {depth}. Your next action must be exactly one subtask(objective=..., "
+        "Delegation required: recursion policy requires depth {required_depth} before direct work or finalization. Current depth is {depth}. Your next action must be one or more subtask(objective=..., "
     );
     if acceptance_criteria_enabled {
-        message.push_str("acceptance_criteria=\"...\").");
+        message.push_str("acceptance_criteria=\"...\") calls only.");
     } else {
-        message.push_str("...).");
+        message.push_str("...) calls only.");
     }
     message
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedDelegationDecision {
+    NotForced,
+    MissingSubtask,
+    InvalidToolCalls,
+    Allowed,
+}
+
+fn forced_subtask_turn_allowed(tool_calls: &[ToolCall]) -> bool {
+    !tool_calls.is_empty() && tool_calls.iter().all(|tc| tc.name == "subtask")
+}
+
+fn classify_forced_delegation_turn(
+    force_subtask: bool,
+    turn: &ModelTurn,
+) -> ForcedDelegationDecision {
+    if !force_subtask {
+        return ForcedDelegationDecision::NotForced;
+    }
+    if turn.tool_calls.is_empty() {
+        return ForcedDelegationDecision::MissingSubtask;
+    }
+    if forced_subtask_turn_allowed(&turn.tool_calls) {
+        ForcedDelegationDecision::Allowed
+    } else {
+        ForcedDelegationDecision::InvalidToolCalls
+    }
+}
+
+fn forced_subtask_rejection_tool_result(depth: u32, required_depth: u32) -> String {
+    format!(
+        "Rejected by recursion policy at depth {depth}: required depth is {required_depth}. Use only one or more subtask(...) calls in the next turn."
+    )
+}
+
+fn append_forced_subtask_rejection_tool_results(
+    messages: &mut Vec<Message>,
+    tool_calls: &[ToolCall],
+    depth: u32,
+    required_depth: u32,
+) {
+    let rejection = forced_subtask_rejection_tool_result(depth, required_depth);
+    for tool_call in tool_calls {
+        messages.push(Message::Tool {
+            tool_call_id: tool_call.id.clone(),
+            content: rejection.clone(),
+        });
+    }
+}
+
+fn summarize_tool_call_names(tool_calls: &[ToolCall]) -> String {
+    let names = tool_calls
+        .iter()
+        .map(|tc| tc.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} call(s): {names}", tool_calls.len())
+}
+
+fn delegation_requirement_satisfied_by_subtask_observations(
+    tool_calls: &[ToolCall],
+    tool_observations: &[(String, String, String, String, bool)],
+) -> bool {
+    forced_subtask_turn_allowed(tool_calls)
+        && tool_observations
+            .iter()
+            .any(|(_, _, _, _, is_error)| !*is_error)
 }
 
 fn is_recon_tool(name: &str) -> bool {
@@ -1092,7 +1165,10 @@ fn build_subtask_config(
         .filter(|value| !value.is_empty())
         .unwrap_or(current_model_name);
     let cur_tier = model_tier(current_model_name, current_reasoning_effort);
-    let req_tier = model_tier(requested_name, requested_effort.or(current_reasoning_effort));
+    let req_tier = model_tier(
+        requested_name,
+        requested_effort.or(current_reasoning_effort),
+    );
     if req_tier < cur_tier {
         return Err(format!(
             "Cannot delegate to higher-tier model (current tier {cur_tier}, requested tier {req_tier}). Use an equal or lower-tier model."
@@ -1173,7 +1249,8 @@ async fn execute_recursive_tool_call(
             current_model_name,
             current_reasoning_effort,
             args.get("model").and_then(|value| value.as_str()),
-            args.get("reasoning_effort").and_then(|value| value.as_str()),
+            args.get("reasoning_effort")
+                .and_then(|value| value.as_str()),
         ) {
             Ok(cfg) => cfg,
             Err(err) => return ToolResult::error(err),
@@ -1391,19 +1468,10 @@ async fn solve_frame(
             tool_calls: tool_calls_opt,
         });
 
-        if turn.tool_calls.is_empty() {
-            if turn.text.trim().is_empty() {
+        match classify_forced_delegation_turn(force_subtask, &turn) {
+            ForcedDelegationDecision::MissingSubtask => {
                 emitter.emit_trace(&format!(
-                    "{step_prefix} empty model response, requesting tool use or concrete final answer"
-                ));
-                messages.push(Message::User {
-                    content: "No tool calls and no final answer were returned. Continue solving: use tools if needed or return the concrete final deliverable.".to_string(),
-                });
-                continue;
-            }
-            if force_subtask {
-                emitter.emit_trace(&format!(
-                    "{step_prefix} recursion policy blocked shallow final answer; requesting subtask"
+                    "{step_prefix} recursion policy blocked shallow final answer below required depth {required_depth}"
                 ));
                 messages.push(Message::User {
                     content: delegation_policy_message(
@@ -1411,6 +1479,39 @@ async fn solve_frame(
                         required_depth,
                         config.acceptance_criteria,
                     ),
+                });
+                continue;
+            }
+            ForcedDelegationDecision::InvalidToolCalls => {
+                emitter.emit_trace(&format!(
+                    "{step_prefix} recursion policy blocked mixed/invalid tool calls below required depth {required_depth}: {}",
+                    summarize_tool_call_names(&turn.tool_calls)
+                ));
+                append_forced_subtask_rejection_tool_results(
+                    &mut messages,
+                    &turn.tool_calls,
+                    depth,
+                    required_depth,
+                );
+                messages.push(Message::User {
+                    content: delegation_policy_message(
+                        depth,
+                        required_depth,
+                        config.acceptance_criteria,
+                    ),
+                });
+                continue;
+            }
+            ForcedDelegationDecision::NotForced | ForcedDelegationDecision::Allowed => {}
+        }
+
+        if turn.tool_calls.is_empty() {
+            if turn.text.trim().is_empty() {
+                emitter.emit_trace(&format!(
+                    "{step_prefix} empty model response, requesting tool use or concrete final answer"
+                ));
+                messages.push(Message::User {
+                    content: "No tool calls and no final answer were returned. Continue solving: use tools if needed or return the concrete final deliverable.".to_string(),
                 });
                 continue;
             }
@@ -1461,21 +1562,10 @@ async fn solve_frame(
             return SolveFrameOutcome::final_result(turn.text, loop_metrics);
         }
 
-        if force_subtask
-            && (turn.tool_calls.len() != 1 || turn.tool_calls[0].name.as_str() != "subtask")
-        {
-            emitter.emit_trace(&format!(
-                "{step_prefix} recursion policy blocked non-subtask action below required depth {required_depth}"
-            ));
-            messages.push(Message::User {
-                content: delegation_policy_message(depth, required_depth, config.acceptance_criteria),
-            });
-            continue;
-        }
-
         loop_metrics.tool_calls += turn.tool_calls.len() as u32;
 
-        let mut indexed_observations: Vec<(usize, String, String, String, String, bool)> = Vec::new();
+        let mut indexed_observations: Vec<(usize, String, String, String, String, bool)> =
+            Vec::new();
         let mut delegated = Vec::new();
         for tc in turn.tool_calls.iter().cloned().enumerate() {
             let (index, tool_call) = tc;
@@ -1500,7 +1590,10 @@ async fn solve_frame(
                 return SolveFrameOutcome::cancelled(Some(loop_metrics));
             }
 
-            emitter.emit_trace(&format!("{} executing tool: {} ({})", step_prefix, tool_call.name, tool_call.id));
+            emitter.emit_trace(&format!(
+                "{} executing tool: {} ({})",
+                step_prefix, tool_call.name, tool_call.id
+            ));
             let result = tools.execute(&tool_call.name, &tool_call.arguments).await;
             if result.is_error {
                 emitter.emit_trace(&format!(
@@ -1522,40 +1615,41 @@ async fn solve_frame(
 
         if !delegated.is_empty() {
             let sibling_write_claims = Arc::new(Mutex::new(HashMap::<PathBuf, String>::new()));
-            let delegated_results = join_all(delegated.into_iter().map(|(index, child_path, tool_call)| {
-                let cancel = cancel.clone();
-                let chrome_mcp = chrome_mcp.clone();
-                let current_model_name = current_model_name.clone();
-                let mut child_parallel_write_scopes = parallel_write_scopes.clone();
-                child_parallel_write_scopes.push(ParallelWriteScope {
-                    claims: sibling_write_claims.clone(),
-                    owner_id: child_path.clone(),
-                });
-                async move {
-                    let result = execute_recursive_tool_call(
-                        &tool_call,
-                        config,
-                        emitter,
-                        cancel,
-                        chrome_mcp,
-                        depth,
-                        child_path,
-                        &current_model_name,
-                        current_reasoning_effort,
-                        child_parallel_write_scopes,
-                    )
-                    .await;
-                    (
-                        index,
-                        tool_call.id,
-                        tool_call.name,
-                        tool_call.arguments,
-                        result.content,
-                        result.is_error,
-                    )
-                }
-            }))
-            .await;
+            let delegated_results =
+                join_all(delegated.into_iter().map(|(index, child_path, tool_call)| {
+                    let cancel = cancel.clone();
+                    let chrome_mcp = chrome_mcp.clone();
+                    let current_model_name = current_model_name.clone();
+                    let mut child_parallel_write_scopes = parallel_write_scopes.clone();
+                    child_parallel_write_scopes.push(ParallelWriteScope {
+                        claims: sibling_write_claims.clone(),
+                        owner_id: child_path.clone(),
+                    });
+                    async move {
+                        let result = execute_recursive_tool_call(
+                            &tool_call,
+                            config,
+                            emitter,
+                            cancel,
+                            chrome_mcp,
+                            depth,
+                            child_path,
+                            &current_model_name,
+                            current_reasoning_effort,
+                            child_parallel_write_scopes,
+                        )
+                        .await;
+                        (
+                            index,
+                            tool_call.id,
+                            tool_call.name,
+                            tool_call.arguments,
+                            result.content,
+                            result.is_error,
+                        )
+                    }
+                }))
+                .await;
             indexed_observations.extend(delegated_results);
         }
 
@@ -1570,9 +1664,10 @@ async fn solve_frame(
         }
 
         if !delegation_requirement_satisfied
-            && turn.tool_calls.len() == 1
-            && turn.tool_calls[0].name == "subtask"
-            && tool_observations.first().is_some_and(|(_, _, _, _, is_error)| !*is_error)
+            && delegation_requirement_satisfied_by_subtask_observations(
+                &turn.tool_calls,
+                &tool_observations,
+            )
         {
             delegation_requirement_satisfied = true;
         }
@@ -1795,11 +1890,7 @@ pub async fn solve_with_initial_context_and_chrome_mcp(
     .await;
     match outcome.status {
         SolveFrameStatus::Final | SolveFrameStatus::Partial => {
-            emitter.emit_complete(
-                &outcome.result,
-                outcome.loop_metrics,
-                outcome.completion,
-            );
+            emitter.emit_complete(&outcome.result, outcome.loop_metrics, outcome.completion);
         }
         SolveFrameStatus::Error => emitter.emit_error(&outcome.result),
         SolveFrameStatus::Cancelled => emitter.emit_error("Cancelled"),
@@ -1811,12 +1902,16 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn tool_call(name: &str) -> crate::model::ToolCall {
+    fn tool_call_with_id(id: &str, name: &str) -> crate::model::ToolCall {
         crate::model::ToolCall {
-            id: format!("call-{name}"),
+            id: id.to_string(),
             name: name.to_string(),
             arguments: "{}".to_string(),
         }
+    }
+
+    fn tool_call(name: &str) -> crate::model::ToolCall {
+        tool_call_with_id(&format!("call-{name}"), name)
     }
 
     fn progress_record(
@@ -2286,17 +2381,9 @@ mod tests {
     #[test]
     fn test_build_initial_user_message_preserves_plain_objective_without_context() {
         let config = AgentConfig::default();
-        let message = build_initial_user_message(
-            "just objective",
-            &config,
-            None,
-            0,
-            "0",
-            0,
-            false,
-            true,
-        )
-        .unwrap();
+        let message =
+            build_initial_user_message("just objective", &config, None, 0, "0", 0, false, true)
+                .unwrap();
         let parsed: Value = serde_json::from_str(&message).unwrap();
         assert_eq!(parsed["objective"], "just objective");
         assert_eq!(parsed["depth"], 0);
@@ -2582,6 +2669,117 @@ mod tests {
     fn test_classify_loop_phase_mixed_recon_and_non_recon_is_iterate() {
         let phase = classify_loop_phase(&[tool_call("read_file"), tool_call("run_shell")], false);
         assert_eq!(phase, LoopPhase::Iterate);
+    }
+
+    #[test]
+    fn test_delegation_policy_message_allows_multiple_subtasks() {
+        let message = delegation_policy_message(0, 5, true);
+        assert!(message.contains("one or more subtask"));
+        assert!(message.contains("calls only"));
+    }
+
+    #[test]
+    fn test_classify_forced_delegation_turn_allows_parallel_subtasks() {
+        let turn = ModelTurn {
+            tool_calls: vec![
+                tool_call_with_id("call-1", "subtask"),
+                tool_call_with_id("call-2", "subtask"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            classify_forced_delegation_turn(true, &turn),
+            ForcedDelegationDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn test_classify_forced_delegation_turn_rejects_mixed_tool_calls() {
+        let turn = ModelTurn {
+            tool_calls: vec![
+                tool_call_with_id("call-1", "subtask"),
+                tool_call_with_id("call-2", "read_file"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            classify_forced_delegation_turn(true, &turn),
+            ForcedDelegationDecision::InvalidToolCalls
+        );
+    }
+
+    #[test]
+    fn test_classify_forced_delegation_turn_treats_no_tool_calls_as_missing_subtask() {
+        let turn = ModelTurn {
+            text: String::new(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            classify_forced_delegation_turn(true, &turn),
+            ForcedDelegationDecision::MissingSubtask
+        );
+    }
+
+    #[test]
+    fn test_append_forced_subtask_rejection_tool_results_adds_protocol_safe_observations() {
+        let tool_calls = vec![
+            tool_call_with_id("call-1", "subtask"),
+            tool_call_with_id("call-2", "read_file"),
+        ];
+        let mut messages = Vec::new();
+
+        append_forced_subtask_rejection_tool_results(&mut messages, &tool_calls, 0, 5);
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &messages[0],
+            Message::Tool {
+                tool_call_id,
+                content
+            } if tool_call_id == "call-1"
+                && content.contains("Rejected by recursion policy")
+                && content.contains("required depth is 5")
+        ));
+        assert!(matches!(
+            &messages[1],
+            Message::Tool {
+                tool_call_id,
+                content
+            } if tool_call_id == "call-2"
+                && content.contains("Use only one or more subtask(...) calls")
+        ));
+    }
+
+    #[test]
+    fn test_delegation_requirement_satisfied_by_any_successful_parallel_subtask() {
+        let tool_calls = vec![
+            tool_call_with_id("call-1", "subtask"),
+            tool_call_with_id("call-2", "subtask"),
+        ];
+        let tool_observations = vec![
+            (
+                "call-1".to_string(),
+                "subtask".to_string(),
+                "{}".to_string(),
+                "child failed".to_string(),
+                true,
+            ),
+            (
+                "call-2".to_string(),
+                "subtask".to_string(),
+                "{}".to_string(),
+                "child ok".to_string(),
+                false,
+            ),
+        ];
+
+        assert!(delegation_requirement_satisfied_by_subtask_observations(
+            &tool_calls,
+            &tool_observations,
+        ));
     }
 
     #[test]

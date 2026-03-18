@@ -208,13 +208,20 @@ async function init() {
           content: `Error: ${message}`,
           timestamp: Date.now(),
         },
+        ...(s.inputQueue.length > 0
+          ? [
+              {
+                id: crypto.randomUUID(),
+                role: "system" as const,
+                content: `Run stopped after error; ${s.inputQueue.length} queued objective(s) were not started.`,
+                timestamp: Date.now(),
+              },
+            ]
+          : []),
       ],
     }));
 
     window.dispatchEvent(new CustomEvent("agent-finished"));
-
-    // Process input queue even on error
-    processQueue();
   });
 
   await onWikiUpdated((data) => {
