@@ -41,6 +41,7 @@ async function init() {
       zaiPlan: config.zai_plan,
       webSearchProvider: config.web_search_provider,
       continuityMode: config.continuity_mode,
+      mistralDocumentAiUseSharedKey: config.mistral_document_ai_use_shared_key,
       chromeMcpEnabled: config.chrome_mcp_enabled,
       chromeMcpAutoConnect: config.chrome_mcp_auto_connect,
       chromeMcpBrowserUrl: config.chrome_mcp_browser_url,

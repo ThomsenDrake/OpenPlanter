@@ -4,7 +4,7 @@ use op_core::config::{
     normalize_continuity_mode, normalize_web_search_provider, normalize_zai_plan,
     resolve_zai_base_url,
 };
-use op_core::credentials::credentials_from_env;
+use op_core::credentials::{CredentialBundle, CredentialStore, credentials_from_env};
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
 use op_core::settings::{PersistentSettings, SettingsStore};
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ async fn make_config_view(
         zai_plan: cfg.zai_plan.clone(),
         web_search_provider: cfg.web_search_provider.clone(),
         continuity_mode: cfg.continuity_mode.clone(),
+        mistral_document_ai_use_shared_key: cfg.mistral_document_ai_use_shared_key,
         chrome_mcp_enabled: cfg.chrome_mcp_enabled,
         chrome_mcp_auto_connect: cfg.chrome_mcp_auto_connect,
         chrome_mcp_browser_url: cfg.chrome_mcp_browser_url.clone(),
@@ -70,6 +71,9 @@ fn merge_settings(
             .web_search_provider
             .or(existing.web_search_provider),
         continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
+        mistral_document_ai_use_shared_key: incoming
+            .mistral_document_ai_use_shared_key
+            .or(existing.mistral_document_ai_use_shared_key),
         chrome_mcp_enabled: incoming.chrome_mcp_enabled.or(existing.chrome_mcp_enabled),
         chrome_mcp_auto_connect: incoming
             .chrome_mcp_auto_connect
@@ -128,6 +132,9 @@ pub async fn update_config(
     }
     if let Some(mode) = partial.continuity_mode {
         cfg.continuity_mode = normalize_continuity_mode(Some(&mode));
+    }
+    if let Some(use_shared_key) = partial.mistral_document_ai_use_shared_key {
+        cfg.mistral_document_ai_use_shared_key = use_shared_key;
     }
     if let Some(enabled) = partial.chrome_mcp_enabled {
         cfg.chrome_mcp_enabled = enabled;
@@ -247,41 +254,69 @@ pub async fn save_settings(
     store.save(&merged).map_err(|e| e.to_string())
 }
 
-/// Build credential status from config: which providers/services have API keys configured.
-pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<String, bool> {
-    let mut status = HashMap::new();
-    status.insert(
-        "openai".to_string(),
-        has_openai_auth(
-            cfg.openai_api_key.as_deref(),
-            cfg.openai_oauth_token.as_deref(),
-        ),
-    );
-    status.insert("anthropic".to_string(), cfg.anthropic_api_key.is_some());
-    status.insert("openrouter".to_string(), cfg.openrouter_api_key.is_some());
-    status.insert("cerebras".to_string(), cfg.cerebras_api_key.is_some());
-    status.insert("zai".to_string(), cfg.zai_api_key.is_some());
-    status.insert("ollama".to_string(), true); // Ollama never needs a key
-    status.insert("exa".to_string(), cfg.exa_api_key.is_some());
-    status.insert("firecrawl".to_string(), cfg.firecrawl_api_key.is_some());
-    status.insert("brave".to_string(), cfg.brave_api_key.is_some());
-    status.insert("tavily".to_string(), cfg.tavily_api_key.is_some());
-    status.insert("voyage".to_string(), cfg.voyage_api_key.is_some());
-    status.insert(
-        "mistral_transcription".to_string(),
-        cfg.mistral_transcription_api_key.is_some(),
-    );
-    status
+fn normalize_credential_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-/// Get credential status: which providers/services have API keys configured.
-#[tauri::command]
-pub async fn get_credentials_status(
-    state: State<'_, AppState>,
-) -> Result<HashMap<String, bool>, String> {
-    let cfg = state.config.lock().await;
-    let env_creds = credentials_from_env();
+fn set_stored_credential_value(
+    creds: &mut CredentialBundle,
+    service: &str,
+    value: Option<String>,
+) -> Result<(), String> {
+    match service.trim().to_ascii_lowercase().as_str() {
+        "openai" => creds.openai_api_key = value,
+        "anthropic" => creds.anthropic_api_key = value,
+        "openrouter" => creds.openrouter_api_key = value,
+        "cerebras" => creds.cerebras_api_key = value,
+        "zai" => creds.zai_api_key = value,
+        "exa" => creds.exa_api_key = value,
+        "firecrawl" => creds.firecrawl_api_key = value,
+        "brave" => creds.brave_api_key = value,
+        "tavily" => creds.tavily_api_key = value,
+        "voyage" => creds.voyage_api_key = value,
+        "mistral" => creds.mistral_api_key = value,
+        "mistral_document_ai" => creds.mistral_document_ai_api_key = value,
+        "mistral_transcription" => creds.mistral_transcription_api_key = value,
+        "ollama" => return Err("ollama does not use an API key".into()),
+        other => return Err(format!("Unsupported credential service: {other}")),
+    }
+    Ok(())
+}
 
+fn set_runtime_credential_value(
+    cfg: &mut op_core::config::AgentConfig,
+    service: &str,
+    value: Option<String>,
+) -> Result<(), String> {
+    match service.trim().to_ascii_lowercase().as_str() {
+        "openai" => {
+            cfg.openai_api_key = value.clone();
+            cfg.api_key = value;
+        }
+        "anthropic" => cfg.anthropic_api_key = value,
+        "openrouter" => cfg.openrouter_api_key = value,
+        "cerebras" => cfg.cerebras_api_key = value,
+        "zai" => cfg.zai_api_key = value,
+        "exa" => cfg.exa_api_key = value,
+        "firecrawl" => cfg.firecrawl_api_key = value,
+        "brave" => cfg.brave_api_key = value,
+        "tavily" => cfg.tavily_api_key = value,
+        "voyage" => cfg.voyage_api_key = value,
+        "mistral" => cfg.mistral_api_key = value,
+        "mistral_document_ai" => cfg.mistral_document_ai_api_key = value,
+        "mistral_transcription" => cfg.mistral_transcription_api_key = value,
+        "ollama" => return Err("ollama does not use an API key".into()),
+        other => return Err(format!("Unsupported credential service: {other}")),
+    }
+    Ok(())
+}
+
+fn merged_credential_status(
+    cfg: &op_core::config::AgentConfig,
+    env_creds: &CredentialBundle,
+) -> HashMap<String, bool> {
     let mut status = HashMap::new();
     status.insert(
         "openai".to_string(),
@@ -331,11 +366,79 @@ pub async fn get_credentials_status(
         cfg.voyage_api_key.is_some() || env_creds.voyage_api_key.is_some(),
     );
     status.insert(
+        "mistral".to_string(),
+        cfg.mistral_api_key.is_some() || env_creds.mistral_api_key.is_some(),
+    );
+    status.insert(
+        "mistral_document_ai".to_string(),
+        cfg.mistral_document_ai_api_key.is_some() || env_creds.mistral_document_ai_api_key.is_some(),
+    );
+    status.insert(
         "mistral_transcription".to_string(),
         cfg.mistral_transcription_api_key.is_some()
             || env_creds.mistral_transcription_api_key.is_some(),
     );
-    Ok(status)
+    status
+}
+
+/// Build credential status from config: which providers/services have API keys configured.
+pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<String, bool> {
+    let mut status = HashMap::new();
+    status.insert(
+        "openai".to_string(),
+        has_openai_auth(
+            cfg.openai_api_key.as_deref(),
+            cfg.openai_oauth_token.as_deref(),
+        ),
+    );
+    status.insert("anthropic".to_string(), cfg.anthropic_api_key.is_some());
+    status.insert("openrouter".to_string(), cfg.openrouter_api_key.is_some());
+    status.insert("cerebras".to_string(), cfg.cerebras_api_key.is_some());
+    status.insert("zai".to_string(), cfg.zai_api_key.is_some());
+    status.insert("ollama".to_string(), true); // Ollama never needs a key
+    status.insert("exa".to_string(), cfg.exa_api_key.is_some());
+    status.insert("firecrawl".to_string(), cfg.firecrawl_api_key.is_some());
+    status.insert("brave".to_string(), cfg.brave_api_key.is_some());
+    status.insert("tavily".to_string(), cfg.tavily_api_key.is_some());
+    status.insert("voyage".to_string(), cfg.voyage_api_key.is_some());
+    status.insert("mistral".to_string(), cfg.mistral_api_key.is_some());
+    status.insert(
+        "mistral_document_ai".to_string(),
+        cfg.mistral_document_ai_api_key.is_some(),
+    );
+    status.insert(
+        "mistral_transcription".to_string(),
+        cfg.mistral_transcription_api_key.is_some(),
+    );
+    status
+}
+
+/// Save or clear a workspace credential and update the live runtime config.
+#[tauri::command]
+pub async fn save_credential(
+    service: String,
+    value: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, bool>, String> {
+    let mut cfg = state.config.lock().await;
+    let normalized = normalize_credential_value(value);
+    let store = CredentialStore::new(&cfg.workspace, &cfg.session_root_dir);
+    let mut creds = store.load();
+    set_stored_credential_value(&mut creds, &service, normalized.clone())?;
+    store.save(&creds).map_err(|e| e.to_string())?;
+    set_runtime_credential_value(&mut cfg, &service, normalized)?;
+    let env_creds = credentials_from_env();
+    Ok(merged_credential_status(&cfg, &env_creds))
+}
+
+/// Get credential status: which providers/services have API keys configured.
+#[tauri::command]
+pub async fn get_credentials_status(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, bool>, String> {
+    let cfg = state.config.lock().await;
+    let env_creds = credentials_from_env();
+    Ok(merged_credential_status(&cfg, &env_creds))
 }
 
 #[cfg(test)]
@@ -443,6 +546,8 @@ mod tests {
         cfg.brave_api_key = None;
         cfg.tavily_api_key = None;
         cfg.voyage_api_key = None;
+        cfg.mistral_api_key = None;
+        cfg.mistral_document_ai_api_key = None;
         cfg.mistral_transcription_api_key = None;
         let status = build_credential_status(&cfg);
         assert_eq!(status["openai"], false);
@@ -454,6 +559,8 @@ mod tests {
         assert_eq!(status["brave"], false);
         assert_eq!(status["tavily"], false);
         assert_eq!(status["voyage"], false);
+        assert_eq!(status["mistral"], false);
+        assert_eq!(status["mistral_document_ai"], false);
         assert_eq!(status["mistral_transcription"], false);
     }
 
@@ -511,7 +618,9 @@ mod tests {
         cfg.brave_api_key = Some("k8".to_string());
         cfg.tavily_api_key = Some("k9".to_string());
         cfg.voyage_api_key = Some("k10".to_string());
-        cfg.mistral_transcription_api_key = Some("k11".to_string());
+        cfg.mistral_api_key = Some("k11".to_string());
+        cfg.mistral_document_ai_api_key = Some("k12".to_string());
+        cfg.mistral_transcription_api_key = Some("k13".to_string());
         let status = build_credential_status(&cfg);
         for (provider, has_key) in &status {
             assert!(has_key, "{} should be true when key is set", provider);
@@ -519,13 +628,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_status_has_twelve_entries() {
+    fn test_cred_status_has_fourteen_entries() {
         let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
         let status = build_credential_status(&cfg);
         assert_eq!(
             status.len(),
-            12,
-            "should have 12 entries (6 providers + 6 services)"
+            14,
+            "should have 14 entries (6 providers + 8 services)"
         );
     }
 
@@ -545,5 +654,43 @@ mod tests {
         cfg.openai_oauth_token = None;
         let status = build_credential_status(&cfg);
         assert_eq!(status["openai"], false);
+    }
+
+    #[test]
+    fn test_set_stored_credential_value_updates_mistral() {
+        let mut creds = CredentialBundle::default();
+        set_stored_credential_value(
+            &mut creds,
+            "mistral_transcription",
+            Some("mistral-test".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            creds.mistral_transcription_api_key,
+            Some("mistral-test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_runtime_credential_value_updates_mistral() {
+        let mut cfg = op_core::config::AgentConfig::from_env("/nonexistent");
+        set_runtime_credential_value(
+            &mut cfg,
+            "mistral_transcription",
+            Some("mistral-test".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.mistral_transcription_api_key,
+            Some("mistral-test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_stored_credential_value_rejects_ollama() {
+        let mut creds = CredentialBundle::default();
+        let err = set_stored_credential_value(&mut creds, "ollama", Some("unused".to_string()))
+            .expect_err("ollama should reject API key persistence");
+        assert!(err.contains("does not use an API key"));
     }
 }

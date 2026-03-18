@@ -2,6 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConfigView,
+  CredentialService,
+  CredentialStatusMap,
   GraphData,
   InitStatusView,
   InvestigationOverviewView,
@@ -44,7 +46,14 @@ export async function saveSettings(settings: PersistentSettings): Promise<void> 
   return invoke("save_settings", { settings });
 }
 
-export async function getCredentialsStatus(): Promise<Record<string, boolean>> {
+export async function saveCredential(
+  service: CredentialService,
+  value?: string | null
+): Promise<CredentialStatusMap> {
+  return invoke("save_credential", { service, value: value ?? null });
+}
+
+export async function getCredentialsStatus(): Promise<CredentialStatusMap> {
   return invoke("get_credentials_status");
 }
 

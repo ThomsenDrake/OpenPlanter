@@ -749,6 +749,7 @@ fn merge_settings_missing(
     fill!(default_model_ollama);
     fill!(zai_plan);
     fill!(web_search_provider);
+    fill!(mistral_document_ai_use_shared_key);
 }
 
 fn read_credentials_from_path(path: &Path) -> Result<CredentialBundle, WorkspaceInitError> {
@@ -781,6 +782,8 @@ fn merge_credentials_missing(
     fill!(brave_api_key);
     fill!(tavily_api_key);
     fill!(voyage_api_key);
+    fill!(mistral_api_key);
+    fill!(mistral_document_ai_api_key);
 }
 
 fn clear_runtime_wiki_documents(wiki_dir: &Path) -> Result<(), WorkspaceInitError> {

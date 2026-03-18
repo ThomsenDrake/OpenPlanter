@@ -13,6 +13,7 @@ import {
   updateConfig,
   listModels,
   saveSettings,
+  saveCredential,
   getCredentialsStatus,
   listSessions,
   openSession,
@@ -144,6 +145,16 @@ describe("invoke wrappers", () => {
     expect(status.brave).toBe(false);
     expect(status.tavily).toBe(true);
     expect(status.voyage).toBe(true);
+    expect(status.mistral_transcription).toBe(true);
+  });
+
+  it("saveCredential sends service and value", async () => {
+    __setHandler("save_credential", ({ service, value }: any) => {
+      expect(service).toBe("mistral_transcription");
+      expect(value).toBe("mistral-key");
+      return { mistral_transcription: true };
+    });
+    const status = await saveCredential("mistral_transcription", "mistral-key");
     expect(status.mistral_transcription).toBe(true);
   });
 

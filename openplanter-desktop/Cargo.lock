@@ -2444,6 +2444,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "crc32fast",
  "futures",

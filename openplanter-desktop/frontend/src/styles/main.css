@@ -128,6 +128,42 @@ html, body {
   color: var(--text-primary);
 }
 
+.sidebar .settings-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar .settings-control {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar .settings-control-title {
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.sidebar .settings-select {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.sidebar .settings-select:focus {
+  border-color: var(--accent);
+}
+
 .sidebar .cred-status {
   font-size: 11px;
   line-height: 1.8;
@@ -139,6 +175,111 @@ html, body {
 
 .sidebar .cred-missing {
   color: var(--text-muted);
+}
+
+.sidebar .cred-editor {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar .cred-editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar .cred-editor-section:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.sidebar .cred-editor-title {
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.sidebar .cred-editor-input {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.sidebar .cred-editor-input:focus {
+  border-color: var(--accent);
+}
+
+.sidebar .cred-editor-input::placeholder {
+  color: var(--text-muted);
+}
+
+.sidebar .cred-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sidebar .cred-editor-actions button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sidebar .cred-editor-actions button.secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.sidebar .cred-editor-actions button:hover {
+  background: var(--accent-hover);
+}
+
+.sidebar .cred-editor-actions button.secondary:hover {
+  background: var(--bg-primary);
+}
+
+.sidebar .cred-editor-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sidebar .cred-editor-hint,
+.sidebar .cred-editor-feedback {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.sidebar .cred-editor-hint {
+  color: var(--text-muted);
+}
+
+.sidebar .cred-editor-feedback.success {
+  color: var(--success);
+}
+
+.sidebar .cred-editor-feedback.warning {
+  color: var(--warning);
+}
+
+.sidebar .cred-editor-feedback.error {
+  color: var(--error);
 }
 
 /* Chat pane — terminal style */

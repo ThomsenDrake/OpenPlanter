@@ -74,6 +74,7 @@ export interface AppState {
   zaiPlan: string;
   webSearchProvider: string;
   continuityMode: string;
+  mistralDocumentAiUseSharedKey: boolean;
   chromeMcpEnabled: boolean;
   chromeMcpAutoConnect: boolean;
   chromeMcpBrowserUrl: string | null;
@@ -119,6 +120,7 @@ export const appState = new Store<AppState>({
   zaiPlan: "paygo",
   webSearchProvider: "exa",
   continuityMode: "auto",
+  mistralDocumentAiUseSharedKey: true,
   chromeMcpEnabled: false,
   chromeMcpAutoConnect: true,
   chromeMcpBrowserUrl: null,

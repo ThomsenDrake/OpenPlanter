@@ -137,6 +137,14 @@ class WorkspaceTools:
     brave_base_url: str = "https://api.search.brave.com/res/v1"
     tavily_api_key: str | None = None
     tavily_base_url: str = "https://api.tavily.com"
+    mistral_api_key: str | None = None
+    mistral_document_ai_api_key: str | None = None
+    mistral_document_ai_use_shared_key: bool = True
+    mistral_document_ai_base_url: str = "https://api.mistral.ai"
+    mistral_document_ai_ocr_model: str = "mistral-ocr-latest"
+    mistral_document_ai_qa_model: str = "mistral-small-latest"
+    mistral_document_ai_max_bytes: int = 50 * 1024 * 1024
+    mistral_document_ai_request_timeout_sec: int = 180
     mistral_transcription_api_key: str | None = None
     mistral_transcription_base_url: str = "https://api.mistral.ai"
     mistral_transcription_model: str = "voxtral-mini-latest"
@@ -693,6 +701,577 @@ class WorkspaceTools:
         rel = resolved.relative_to(self.root).as_posix()
         text = f"Image {rel} ({len(raw):,} bytes, {media_type})"
         return text, b64, media_type
+
+    _DOCUMENT_PDF_EXTENSIONS = {".pdf"}
+    _DOCUMENT_IMAGE_EXTENSIONS = {".avif", ".jpg", ".jpeg", ".png", ".webp"}
+    _DOCUMENT_OCR_EXTENSIONS = _DOCUMENT_PDF_EXTENSIONS | _DOCUMENT_IMAGE_EXTENSIONS
+    _DOCUMENT_MEDIA_TYPES = {
+        ".avif": "image/avif",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }
+
+    def _mistral_document_ai_mode(self) -> str:
+        return "shared" if self.mistral_document_ai_use_shared_key else "override"
+
+    def _effective_mistral_document_ai_key(self) -> str:
+        mode = self._mistral_document_ai_mode()
+        raw = (
+            self.mistral_api_key
+            if self.mistral_document_ai_use_shared_key
+            else self.mistral_document_ai_api_key
+        )
+        key = (raw or "").strip()
+        if key:
+            return key
+        if mode == "shared":
+            raise ToolError(
+                "Mistral Document AI shared key not configured. "
+                "Set OPENPLANTER_MISTRAL_API_KEY or MISTRAL_API_KEY."
+            )
+        raise ToolError(
+            "Mistral Document AI override key not configured. "
+            "Set OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY or "
+            "MISTRAL_DOCUMENT_AI_API_KEY, or switch to shared key mode."
+        )
+
+    def _mistral_document_ai_ocr_url(self) -> str:
+        base = self.mistral_document_ai_base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/ocr"
+        return f"{base}/v1/ocr"
+
+    def _mistral_document_ai_chat_url(self) -> str:
+        base = self.mistral_document_ai_base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def _document_ai_max_chars(self) -> int:
+        return min(self.max_file_chars, self.max_observation_chars)
+
+    def _document_media_type(self, resolved: Path) -> str:
+        return self._DOCUMENT_MEDIA_TYPES.get(
+            resolved.suffix.lower(), "application/octet-stream"
+        )
+
+    def _build_data_url(self, resolved: Path) -> tuple[str, str, str, int]:
+        ext = resolved.suffix.lower()
+        if ext not in self._DOCUMENT_OCR_EXTENSIONS:
+            raise ToolError(
+                "Unsupported document format: "
+                f"{ext or '(none)'}. Supported: "
+                f"{', '.join(sorted(self._DOCUMENT_OCR_EXTENSIONS))}"
+            )
+        try:
+            size = resolved.stat().st_size
+        except OSError as exc:
+            raise ToolError(
+                f"Failed to inspect document file {resolved.name}: {exc}"
+            ) from exc
+        if size > self.mistral_document_ai_max_bytes:
+            raise ToolError(
+                f"Document file too large: {size:,} bytes "
+                f"(max {self.mistral_document_ai_max_bytes:,} bytes)"
+            )
+        try:
+            raw = resolved.read_bytes()
+        except OSError as exc:
+            raise ToolError(
+                f"Failed to read document file {resolved.name}: {exc}"
+            ) from exc
+        media_type = self._document_media_type(resolved)
+        b64 = base64.b64encode(raw).decode("ascii")
+        source_type = "image_url" if ext in self._DOCUMENT_IMAGE_EXTENSIONS else "document_url"
+        data_url = f"data:{media_type};base64,{b64}"
+        return data_url, source_type, media_type, size
+
+    def _normalize_document_pages(self, pages: list[int] | None) -> list[int] | None:
+        if pages is None:
+            return None
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for value in pages:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ToolError("pages must be an array of integers")
+            if value < 0:
+                raise ToolError("pages must contain only non-negative integers")
+            if value not in seen:
+                normalized.append(value)
+                seen.add(value)
+        return normalized or None
+
+    def _document_response_format(
+        self,
+        schema: dict[str, Any],
+        *,
+        name: str,
+    ) -> dict[str, Any]:
+        schema_type = str(schema.get("type", "")).strip().lower()
+        if schema_type in {"text", "json_object"}:
+            return schema
+        if schema_type == "json_schema" and isinstance(
+            schema.get("json_schema"), dict
+        ):
+            return schema
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": name,
+                "schema": schema,
+            },
+        }
+
+    def _mistral_document_ai_request(
+        self,
+        *,
+        url: str,
+        body: dict[str, Any],
+        request_label: str,
+    ) -> dict[str, Any]:
+        payload = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url=url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self._effective_mistral_document_ai_key()}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                req, timeout=self.mistral_document_ai_request_timeout_sec
+            ) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")
+            raise ToolError(
+                f"{request_label} HTTP {exc.code}: {self._clip(body_text, 1200)}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ToolError(f"{request_label} connection error: {exc}") from exc
+        except OSError as exc:
+            raise ToolError(f"{request_label} network error: {exc}") from exc
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"{request_label} returned non-JSON payload: {raw[:500]}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ToolError(
+                f"{request_label} returned non-object response: {type(parsed)!r}"
+            )
+        return parsed
+
+    def _coerce_jsonish_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    return value
+        return value
+
+    def _collect_document_text(self, parsed: dict[str, Any]) -> str:
+        pages = parsed.get("pages")
+        if not isinstance(pages, list):
+            return ""
+        parts: list[str] = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            markdown = str(page.get("markdown", "")).strip()
+            if markdown:
+                parts.append(markdown)
+        return "\n\n".join(parts)
+
+    def _collect_bbox_annotations(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        pages = parsed.get("pages")
+        if not isinstance(pages, list):
+            return collected
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            page_index = page.get("index")
+            images = page.get("images")
+            if not isinstance(images, list):
+                continue
+            for image_index, image in enumerate(images):
+                if not isinstance(image, dict) or "bbox_annotation" not in image:
+                    continue
+                entry = {
+                    "page_index": page_index,
+                    "image_index": image_index,
+                    "bbox_annotation": self._coerce_jsonish_value(
+                        image.get("bbox_annotation")
+                    ),
+                }
+                for field in ("id", "top_left_x", "top_left_y", "bottom_right_x", "bottom_right_y"):
+                    if field in image:
+                        entry[field] = image[field]
+                collected.append(entry)
+        return collected
+
+    def _extract_chat_message_text(self, parsed: dict[str, Any]) -> str:
+        choices = parsed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first = choices[0]
+        if not isinstance(first, dict):
+            return ""
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        parts.append(text)
+            return "\n\n".join(parts)
+        return ""
+
+    def _document_json_length(self, payload: dict[str, Any]) -> int:
+        return len(json.dumps(payload, indent=2, ensure_ascii=True))
+
+    def _truncate_document_text(
+        self,
+        payload: dict[str, Any],
+        *,
+        max_chars: int,
+    ) -> None:
+        text = str(payload.get("text", ""))
+        if not text:
+            return
+        base = copy.deepcopy(payload)
+        base["text"] = ""
+        if self._document_json_length(base) > max_chars:
+            payload["text"] = ""
+            payload.setdefault("truncation", {})["text_truncated_chars"] = len(text)
+            return
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            base["text"] = text[:mid]
+            if self._document_json_length(base) <= max_chars:
+                low = mid
+            else:
+                high = mid - 1
+        payload["text"] = text[:low]
+        omitted = len(text) - low
+        if omitted > 0:
+            payload.setdefault("truncation", {})["text_truncated_chars"] = omitted
+
+    def _strip_document_image_base64(self, response: dict[str, Any]) -> int:
+        omitted = 0
+        pages = response.get("pages")
+        if not isinstance(pages, list):
+            return omitted
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            images = page.get("images")
+            if not isinstance(images, list):
+                continue
+            for image in images:
+                if isinstance(image, dict) and "image_base64" in image:
+                    image.pop("image_base64", None)
+                    omitted += 1
+        return omitted
+
+    def _summarize_document_pages(self, response: dict[str, Any]) -> int:
+        pages = response.get("pages")
+        if not isinstance(pages, list):
+            return 0
+        original_count = len(pages)
+        response["pages"] = [
+            {
+                "index": page.get("index"),
+                "markdown_chars": len(str(page.get("markdown", ""))),
+                "image_count": (
+                    len(page.get("images", []))
+                    if isinstance(page.get("images"), list)
+                    else 0
+                ),
+                "table_count": (
+                    len(page.get("tables", []))
+                    if isinstance(page.get("tables"), list)
+                    else 0
+                ),
+                "hyperlink_count": (
+                    len(page.get("hyperlinks", []))
+                    if isinstance(page.get("hyperlinks"), list)
+                    else 0
+                ),
+            }
+            for page in pages
+            if isinstance(page, dict)
+        ]
+        return original_count
+
+    def _serialize_document_envelope(
+        self,
+        envelope: dict[str, Any],
+        *,
+        max_chars: int,
+    ) -> str:
+        payload = copy.deepcopy(envelope)
+        payload.setdefault("truncation", {"applied": False})
+        if self._document_json_length(payload) <= max_chars:
+            return json.dumps(payload, indent=2, ensure_ascii=True)
+
+        truncation = payload.setdefault("truncation", {})
+        truncation["applied"] = True
+        response = payload.get("response")
+        if isinstance(response, dict):
+            omitted_images = self._strip_document_image_base64(response)
+            if omitted_images:
+                truncation["omitted_image_base64_entries"] = omitted_images
+            if self._document_json_length(payload) > max_chars and isinstance(
+                response.get("pages"), list
+            ):
+                original_pages = len(response["pages"])
+                self._summarize_document_pages(response)
+                truncation["pages_summarized"] = original_pages
+            if self._document_json_length(payload) > max_chars:
+                if isinstance(response.get("pages"), list):
+                    truncation["omitted_response_pages"] = len(response["pages"])
+                    response.pop("pages", None)
+
+        if self._document_json_length(payload) > max_chars:
+            self._truncate_document_text(payload, max_chars=max_chars)
+
+        return json.dumps(payload, indent=2, ensure_ascii=True)
+
+    def document_ocr(
+        self,
+        path: str,
+        include_images: bool | None = None,
+        pages: list[int] | None = None,
+        model: str | None = None,
+    ) -> str:
+        try:
+            resolved = self._resolve_path(path)
+            if not resolved.exists():
+                return f"File not found: {path}"
+            if resolved.is_dir():
+                return f"Path is a directory, not a file: {path}"
+            data_url, source_type, media_type, size = self._build_data_url(resolved)
+            chosen_model = (model or self.mistral_document_ai_ocr_model or "").strip()
+            if not chosen_model:
+                return "No Mistral Document AI OCR model configured"
+            normalized_pages = self._normalize_document_pages(pages)
+            self._files_read.add(resolved)
+            rel = resolved.relative_to(self.root).as_posix()
+            request_body: dict[str, Any] = {
+                "model": chosen_model,
+                "document": {
+                    "type": source_type,
+                    source_type: data_url,
+                },
+                "include_image_base64": bool(include_images),
+            }
+            if normalized_pages:
+                request_body["pages"] = normalized_pages
+            parsed = self._mistral_document_ai_request(
+                url=self._mistral_document_ai_ocr_url(),
+                body=request_body,
+                request_label="Mistral Document AI OCR",
+            )
+            envelope = {
+                "provider": "mistral",
+                "service": "document_ai",
+                "operation": "ocr",
+                "path": rel,
+                "file": {
+                    "media_type": media_type,
+                    "size_bytes": size,
+                    "source_type": source_type,
+                },
+                "model": chosen_model,
+                "options": {
+                    "include_images": bool(include_images),
+                    "pages": normalized_pages,
+                },
+                "text": self._collect_document_text(parsed),
+                "response": parsed,
+            }
+            return self._serialize_document_envelope(
+                envelope, max_chars=self._document_ai_max_chars()
+            )
+        except ToolError as exc:
+            return str(exc)
+
+    def document_annotations(
+        self,
+        path: str,
+        document_schema: dict[str, Any] | None = None,
+        bbox_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        pages: list[int] | None = None,
+        include_images: bool | None = None,
+        model: str | None = None,
+    ) -> str:
+        try:
+            if not document_schema and not bbox_schema:
+                return (
+                    "document_annotations requires document_schema, bbox_schema, or both"
+                )
+            if instruction and not document_schema:
+                return "instruction requires document_schema"
+            resolved = self._resolve_path(path)
+            if not resolved.exists():
+                return f"File not found: {path}"
+            if resolved.is_dir():
+                return f"Path is a directory, not a file: {path}"
+            data_url, source_type, media_type, size = self._build_data_url(resolved)
+            chosen_model = (model or self.mistral_document_ai_ocr_model or "").strip()
+            if not chosen_model:
+                return "No Mistral Document AI OCR model configured"
+            normalized_pages = self._normalize_document_pages(pages)
+            self._files_read.add(resolved)
+            rel = resolved.relative_to(self.root).as_posix()
+            request_body: dict[str, Any] = {
+                "model": chosen_model,
+                "document": {
+                    "type": source_type,
+                    source_type: data_url,
+                },
+                "include_image_base64": bool(include_images),
+            }
+            if normalized_pages:
+                request_body["pages"] = normalized_pages
+            if document_schema:
+                request_body["document_annotation_format"] = (
+                    self._document_response_format(
+                        document_schema, name="document_annotation"
+                    )
+                )
+            if bbox_schema:
+                request_body["bbox_annotation_format"] = self._document_response_format(
+                    bbox_schema, name="bbox_annotation"
+                )
+            if instruction:
+                request_body["document_annotation_prompt"] = instruction
+            parsed = self._mistral_document_ai_request(
+                url=self._mistral_document_ai_ocr_url(),
+                body=request_body,
+                request_label="Mistral Document AI annotations",
+            )
+            document_annotation = self._coerce_jsonish_value(
+                parsed.get("document_annotation")
+            )
+            bbox_annotations = self._collect_bbox_annotations(parsed)
+            if document_annotation not in (None, ""):
+                text = (
+                    json.dumps(document_annotation, indent=2, ensure_ascii=True)
+                    if isinstance(document_annotation, (dict, list))
+                    else str(document_annotation)
+                )
+            elif bbox_annotations:
+                text = json.dumps(bbox_annotations, indent=2, ensure_ascii=True)
+            else:
+                text = ""
+            envelope = {
+                "provider": "mistral",
+                "service": "document_ai",
+                "operation": "annotations",
+                "path": rel,
+                "file": {
+                    "media_type": media_type,
+                    "size_bytes": size,
+                    "source_type": source_type,
+                },
+                "model": chosen_model,
+                "options": {
+                    "include_images": bool(include_images),
+                    "pages": normalized_pages,
+                    "has_document_schema": bool(document_schema),
+                    "has_bbox_schema": bool(bbox_schema),
+                    "instruction": instruction or None,
+                },
+                "text": text,
+                "document_annotation": document_annotation,
+                "bbox_annotations": bbox_annotations,
+                "response": parsed,
+            }
+            return self._serialize_document_envelope(
+                envelope, max_chars=self._document_ai_max_chars()
+            )
+        except ToolError as exc:
+            return str(exc)
+
+    def document_qa(
+        self,
+        path: str,
+        question: str,
+        model: str | None = None,
+    ) -> str:
+        try:
+            resolved = self._resolve_path(path)
+            if not resolved.exists():
+                return f"File not found: {path}"
+            if resolved.is_dir():
+                return f"Path is a directory, not a file: {path}"
+            if resolved.suffix.lower() not in self._DOCUMENT_PDF_EXTENSIONS:
+                return "document_qa supports only local PDF files in v1"
+            data_url, _, media_type, size = self._build_data_url(resolved)
+            chosen_model = (model or self.mistral_document_ai_qa_model or "").strip()
+            if not chosen_model:
+                return "No Mistral Document AI Q&A model configured"
+            self._files_read.add(resolved)
+            rel = resolved.relative_to(self.root).as_posix()
+            parsed = self._mistral_document_ai_request(
+                url=self._mistral_document_ai_chat_url(),
+                body={
+                    "model": chosen_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": question},
+                                {"type": "document_url", "document_url": data_url},
+                            ],
+                        }
+                    ],
+                },
+                request_label="Mistral Document AI Q&A",
+            )
+            answer = self._extract_chat_message_text(parsed)
+            envelope = {
+                "provider": "mistral",
+                "service": "document_ai",
+                "operation": "qa",
+                "path": rel,
+                "file": {
+                    "media_type": media_type,
+                    "size_bytes": size,
+                    "source_type": "document_url",
+                },
+                "model": chosen_model,
+                "options": {},
+                "question": question,
+                "text": answer,
+                "response": parsed,
+            }
+            return self._serialize_document_envelope(
+                envelope, max_chars=self._document_ai_max_chars()
+            )
+        except ToolError as exc:
+            return str(exc)
 
     _AUDIO_EXTENSIONS = {
         ".aac",

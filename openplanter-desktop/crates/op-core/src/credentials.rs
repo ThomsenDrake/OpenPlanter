@@ -23,6 +23,8 @@ pub struct CredentialBundle {
     pub brave_api_key: Option<String>,
     pub tavily_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
+    pub mistral_api_key: Option<String>,
+    pub mistral_document_ai_api_key: Option<String>,
     pub mistral_transcription_api_key: Option<String>,
 }
 
@@ -41,6 +43,8 @@ impl CredentialBundle {
             &self.brave_api_key,
             &self.tavily_api_key,
             &self.voyage_api_key,
+            &self.mistral_api_key,
+            &self.mistral_document_ai_api_key,
             &self.mistral_transcription_api_key,
         ];
         keys.iter()
@@ -67,6 +71,8 @@ impl CredentialBundle {
         fill!(brave_api_key);
         fill!(tavily_api_key);
         fill!(voyage_api_key);
+        fill!(mistral_api_key);
+        fill!(mistral_document_ai_api_key);
         fill!(mistral_transcription_api_key);
     }
 
@@ -91,6 +97,8 @@ impl CredentialBundle {
         add!(brave_api_key, "brave_api_key");
         add!(tavily_api_key, "tavily_api_key");
         add!(voyage_api_key, "voyage_api_key");
+        add!(mistral_api_key, "mistral_api_key");
+        add!(mistral_document_ai_api_key, "mistral_document_ai_api_key");
         add!(
             mistral_transcription_api_key,
             "mistral_transcription_api_key"
@@ -118,6 +126,8 @@ impl CredentialBundle {
             brave_api_key: get_str(payload, "brave_api_key"),
             tavily_api_key: get_str(payload, "tavily_api_key"),
             voyage_api_key: get_str(payload, "voyage_api_key"),
+            mistral_api_key: get_str(payload, "mistral_api_key"),
+            mistral_document_ai_api_key: get_str(payload, "mistral_document_ai_api_key"),
             mistral_transcription_api_key: get_str(payload, "mistral_transcription_api_key"),
         }
     }
@@ -198,6 +208,16 @@ pub fn parse_env_file(path: &Path) -> CredentialBundle {
         brave_api_key: get_key(&env_map, "BRAVE_API_KEY", "OPENPLANTER_BRAVE_API_KEY"),
         tavily_api_key: get_key(&env_map, "TAVILY_API_KEY", "OPENPLANTER_TAVILY_API_KEY"),
         voyage_api_key: get_key(&env_map, "VOYAGE_API_KEY", "OPENPLANTER_VOYAGE_API_KEY"),
+        mistral_api_key: env_map
+            .get("OPENPLANTER_MISTRAL_API_KEY")
+            .or_else(|| env_map.get("MISTRAL_API_KEY"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        mistral_document_ai_api_key: env_map
+            .get("OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY")
+            .or_else(|| env_map.get("MISTRAL_DOCUMENT_AI_API_KEY"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         mistral_transcription_api_key: env_map
             .get("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
             .or_else(|| env_map.get("MISTRAL_TRANSCRIPTION_API_KEY"))
@@ -229,6 +249,16 @@ pub fn credentials_from_env() -> CredentialBundle {
         brave_api_key: env_key("OPENPLANTER_BRAVE_API_KEY", "BRAVE_API_KEY"),
         tavily_api_key: env_key("OPENPLANTER_TAVILY_API_KEY", "TAVILY_API_KEY"),
         voyage_api_key: env_key("OPENPLANTER_VOYAGE_API_KEY", "VOYAGE_API_KEY"),
+        mistral_api_key: env::var("OPENPLANTER_MISTRAL_API_KEY")
+            .ok()
+            .or_else(|| env::var("MISTRAL_API_KEY").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        mistral_document_ai_api_key: env::var("OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY")
+            .ok()
+            .or_else(|| env::var("MISTRAL_DOCUMENT_AI_API_KEY").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         mistral_transcription_api_key: env::var("OPENPLANTER_MISTRAL_TRANSCRIPTION_API_KEY")
             .ok()
             .or_else(|| env::var("MISTRAL_TRANSCRIPTION_API_KEY").ok())
@@ -400,6 +430,16 @@ mod tests {
     }
 
     #[test]
+    fn test_credential_bundle_has_any_with_mistral_document_ai_keys() {
+        let bundle = CredentialBundle {
+            mistral_api_key: Some("shared-mistral".into()),
+            mistral_document_ai_api_key: Some("docai-override".into()),
+            ..Default::default()
+        };
+        assert!(bundle.has_any());
+    }
+
+    #[test]
     fn test_credential_bundle_merge_missing() {
         let mut a = CredentialBundle {
             openai_api_key: Some("existing".into()),
@@ -435,6 +475,8 @@ mod tests {
         assert_eq!(json.get("firecrawl_api_key").unwrap(), "fc-789");
         assert_eq!(json.get("brave_api_key").unwrap(), "brave-101");
         assert_eq!(json.get("tavily_api_key").unwrap(), "tavily-202");
+        assert!(!json.contains_key("mistral_api_key"));
+        assert!(!json.contains_key("mistral_document_ai_api_key"));
         assert!(!json.contains_key("mistral_transcription_api_key"));
     }
 
@@ -453,6 +495,7 @@ ZAI_API_KEY=zai-from-env
 OPENPLANTER_FIRECRAWL_API_KEY="firecrawl-quoted"
 BRAVE_API_KEY=brave-from-env
 OPENPLANTER_TAVILY_API_KEY=tavily-from-env
+OPENPLANTER_MISTRAL_DOCUMENT_AI_API_KEY=docai-override
 MISTRAL_API_KEY=mistral-from-env
 UNRELATED_VAR=foo
 "#,
@@ -467,6 +510,11 @@ UNRELATED_VAR=foo
         assert_eq!(bundle.firecrawl_api_key, Some("firecrawl-quoted".into()));
         assert_eq!(bundle.brave_api_key, Some("brave-from-env".into()));
         assert_eq!(bundle.tavily_api_key, Some("tavily-from-env".into()));
+        assert_eq!(bundle.mistral_api_key, Some("mistral-from-env".into()));
+        assert_eq!(
+            bundle.mistral_document_ai_api_key,
+            Some("docai-override".into())
+        );
         assert_eq!(
             bundle.mistral_transcription_api_key,
             Some("mistral-from-env".into())
@@ -517,6 +565,8 @@ UNRELATED_VAR=foo
             zai_api_key: Some("zai-test".into()),
             brave_api_key: Some("brave-test".into()),
             tavily_api_key: Some("tavily-test".into()),
+            mistral_api_key: Some("shared-mistral".into()),
+            mistral_document_ai_api_key: Some("docai-override".into()),
             mistral_transcription_api_key: Some("mistral-test".into()),
             ..Default::default()
         };
@@ -527,6 +577,11 @@ UNRELATED_VAR=foo
         assert_eq!(loaded.zai_api_key, Some("zai-test".into()));
         assert_eq!(loaded.brave_api_key, Some("brave-test".into()));
         assert_eq!(loaded.tavily_api_key, Some("tavily-test".into()));
+        assert_eq!(loaded.mistral_api_key, Some("shared-mistral".into()));
+        assert_eq!(
+            loaded.mistral_document_ai_api_key,
+            Some("docai-override".into())
+        );
         assert_eq!(
             loaded.mistral_transcription_api_key,
             Some("mistral-test".into())

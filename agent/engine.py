@@ -33,6 +33,9 @@ _RECON_TOOL_NAMES = {
     "read_file",
     "read_image",
     "audio_transcribe",
+    "document_ocr",
+    "document_annotations",
+    "document_qa",
     "list_artifacts",
     "read_artifact",
 }
@@ -1347,6 +1350,87 @@ class RLMEngine:
                 chunk_overlap_seconds=chunk_overlap_seconds,
                 max_chunks=max_chunks,
                 continue_on_chunk_error=continue_on_chunk_error,
+            )
+
+        if name == "document_ocr":
+            path = str(args.get("path", "")).strip()
+            if not path:
+                return False, "document_ocr requires path"
+            include_images = (
+                args.get("include_images")
+                if isinstance(args.get("include_images"), bool)
+                else None
+            )
+            raw_pages = args.get("pages")
+            pages: list[int] | None = None
+            if isinstance(raw_pages, list):
+                pages = []
+                for value in raw_pages:
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        pages.append(value)
+            model = str(args.get("model", "")).strip() or None
+            return False, self.tools.document_ocr(
+                path=path,
+                include_images=include_images,
+                pages=pages,
+                model=model,
+            )
+
+        if name == "document_annotations":
+            path = str(args.get("path", "")).strip()
+            if not path:
+                return False, "document_annotations requires path"
+
+            def _coerce_schema(value: Any) -> dict[str, Any] | None:
+                if isinstance(value, dict):
+                    return value
+                if isinstance(value, str) and value.strip():
+                    try:
+                        parsed = json.loads(value)
+                    except json.JSONDecodeError:
+                        return None
+                    if isinstance(parsed, dict):
+                        return parsed
+                return None
+
+            document_schema = _coerce_schema(args.get("document_schema"))
+            bbox_schema = _coerce_schema(args.get("bbox_schema"))
+            instruction = str(args.get("instruction", "")).strip() or None
+            raw_pages = args.get("pages")
+            pages: list[int] | None = None
+            if isinstance(raw_pages, list):
+                pages = []
+                for value in raw_pages:
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        pages.append(value)
+            include_images = (
+                args.get("include_images")
+                if isinstance(args.get("include_images"), bool)
+                else None
+            )
+            model = str(args.get("model", "")).strip() or None
+            return False, self.tools.document_annotations(
+                path=path,
+                document_schema=document_schema,
+                bbox_schema=bbox_schema,
+                instruction=instruction,
+                pages=pages,
+                include_images=include_images,
+                model=model,
+            )
+
+        if name == "document_qa":
+            path = str(args.get("path", "")).strip()
+            if not path:
+                return False, "document_qa requires path"
+            question = str(args.get("question", "")).strip()
+            if not question:
+                return False, "document_qa requires question"
+            model = str(args.get("model", "")).strip() or None
+            return False, self.tools.document_qa(
+                path=path,
+                question=question,
+                model=model,
             )
 
         if name == "write_file":
