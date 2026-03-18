@@ -81,6 +81,24 @@ const CHROME_CHANNELS: CompletionItem[] = [
   { value: "canary", description: "Target Chrome Canary", children: SAVE_FLAG },
 ];
 
+const MISTRAL_VALUE: CompletionItem[] = [
+  { value: "<value>", description: "Workspace API key value" },
+];
+
+function createMistralKeyActions(label: string): CompletionItem[] {
+  return [
+    {
+      value: "set",
+      description: `Save the ${label} workspace key`,
+      children: MISTRAL_VALUE,
+    },
+    {
+      value: "clear",
+      description: `Clear the ${label} workspace key`,
+    },
+  ];
+}
+
 export const COMMAND_COMPLETIONS: CompletionItem[] = [
   { value: "/help", description: "Show available commands" },
   { value: "/new", description: "Start a new session" },
@@ -120,6 +138,44 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
     value: "/reasoning",
     description: "Set reasoning effort",
     children: REASONING_LEVELS,
+  },
+  {
+    value: "/mistral",
+    description: "Show or configure Mistral tool credentials",
+    children: [
+      { value: "status", description: "Show Mistral key status" },
+      {
+        value: "key-mode",
+        description: "Choose which key Document AI uses",
+        children: [
+          {
+            value: "shared",
+            description: "Use the shared Mistral key for Document AI",
+            children: SAVE_FLAG,
+          },
+          {
+            value: "override",
+            description: "Use the Document AI override key",
+            children: SAVE_FLAG,
+          },
+        ],
+      },
+      {
+        value: "shared-key",
+        description: "Manage the shared Mistral key",
+        children: createMistralKeyActions("shared Mistral"),
+      },
+      {
+        value: "docai-key",
+        description: "Manage the Document AI override key",
+        children: createMistralKeyActions("Document AI override"),
+      },
+      {
+        value: "transcription-key",
+        description: "Manage the transcription key",
+        children: createMistralKeyActions("transcription"),
+      },
+    ],
   },
   {
     value: "/chrome",

@@ -76,6 +76,7 @@ function buildProviderDefaultModelSettings(
 export interface CommandResult {
   action: "handled" | "clear" | "quit";
   lines: string[];
+  sensitive?: boolean;
 }
 
 /** Handle /model [args]. */

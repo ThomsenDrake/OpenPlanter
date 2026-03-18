@@ -41,15 +41,17 @@ export function createInputBar(): HTMLElement {
     textarea.style.height = Math.min(textarea.scrollHeight, 120) + "px";
   }
 
-  async function handleSubmit() {
-    const text = textarea.value.trim();
-    if (!text) return;
-
-    // Add to input history
+  function rememberInput(text: string) {
     appState.update((s) => ({
       ...s,
       inputHistory: [text, ...s.inputHistory.filter((h) => h !== text)].slice(0, 100),
     }));
+  }
+
+  async function handleSubmit() {
+    const text = textarea.value.trim();
+    if (!text) return;
+
     historyIndex = -1;
     savedInput = "";
 
@@ -70,6 +72,10 @@ export function createInputBar(): HTMLElement {
       const result = await dispatchSlashCommand(text);
       if (!result) return;
 
+      if (!result.sensitive) {
+        rememberInput(text);
+      }
+
       if (result.action === "clear") {
         appState.update((s) => ({ ...s, messages: [] }));
         return;
@@ -88,6 +94,8 @@ export function createInputBar(): HTMLElement {
       }
       return;
     }
+
+    rememberInput(text);
 
     if (appState.get().initGateState !== "ready") {
       addSystemMessage(

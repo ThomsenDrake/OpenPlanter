@@ -203,6 +203,62 @@ describe("createInputBar", () => {
     document.body.removeChild(bar);
   });
 
+  it("adds non-sensitive slash commands to history", async () => {
+    __setHandler("get_credentials_status", () => ({
+      mistral: true,
+      mistral_document_ai: false,
+      mistral_transcription: true,
+    }));
+
+    const bar = createInputBar();
+    document.body.appendChild(bar);
+    const textarea = bar.querySelector("textarea")!;
+
+    textarea.value = "/mistral status";
+    bar.querySelectorAll("button")[0].click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().inputHistory).toContain("/mistral status");
+    });
+
+    document.body.removeChild(bar);
+  });
+
+  it("does not persist sensitive slash commands or echo their values", async () => {
+    __setHandler("save_credential", ({ service, value }: any) => {
+      expect(service).toBe("mistral");
+      expect(value).toBe("super-secret-key");
+      return {
+        mistral: true,
+        mistral_document_ai: false,
+        mistral_transcription: true,
+      };
+    });
+
+    const bar = createInputBar();
+    document.body.appendChild(bar);
+    const textarea = bar.querySelector("textarea")!;
+
+    textarea.value = "/mistral shared-key set super-secret-key";
+    bar.querySelectorAll("button")[0].click();
+
+    await vi.waitFor(() => {
+      const history = appState.get().inputHistory;
+      expect(history).not.toContain("/mistral shared-key set super-secret-key");
+      expect(appState.get().messages.some((m) => m.role === "user")).toBe(false);
+      expect(
+        appState.get().messages.some((m) => m.content.includes("super-secret-key"))
+      ).toBe(false);
+      expect(
+        appState.get().messages.some((m) =>
+          m.content.includes("Saved Mistral shared workspace key.")
+        )
+      ).toBe(true);
+    });
+
+    document.body.removeChild(bar);
+  });
+
   it("deduplicates history entries", async () => {
     appState.update((s) => ({ ...s, inputHistory: ["old command"] }));
 

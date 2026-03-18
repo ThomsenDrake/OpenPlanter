@@ -9,6 +9,7 @@ import { handleZaiPlanCommand } from "./zaiPlan";
 import { handleInitCommand } from "./init";
 import { handleContinuityCommand } from "./continuity";
 import { handleRecursionCommand } from "./recursion";
+import { handleMistralCommand, MISTRAL_USAGE } from "./mistral";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -48,6 +49,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /recursion <mode> --min <N> --max <N> [--save]  Configure recursion depth policy",
           "  /reasoning          Show/set reasoning effort",
           "  /reasoning <level>  Set level (low, medium, high, off)",
+          `  ${MISTRAL_USAGE.slice(6)}`,
           "  /chrome             Show current Chrome DevTools MCP status",
           `  ${CHROME_USAGE.slice(6)}`,
           "  /init status        Show workspace init status",
@@ -106,6 +108,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Web search:  ${s.webSearchProvider || "exa"}`,
           `Continuity:  ${s.continuityMode || "auto"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
+          `DocAI key mode: ${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}`,
           ...formatChromeStatusLines(s),
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
           `Policy:      ${s.recursionPolicy.replace(/_/g, "-")}`,
@@ -138,6 +141,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/reasoning":
       return handleReasoningCommand(args);
+
+    case "/mistral":
+      return handleMistralCommand(args);
 
     case "/chrome":
       return handleChromeCommand(args);

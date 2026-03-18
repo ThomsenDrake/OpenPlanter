@@ -28,6 +28,7 @@ describe("completionRegistry", () => {
     expect(values).toContain("/continuity");
     expect(values).toContain("/recursion");
     expect(values).toContain("/reasoning");
+    expect(values).toContain("/mistral");
     expect(values).toContain("/chrome");
     expect(values).toContain("/init");
   });
@@ -149,6 +150,38 @@ describe("completionRegistry", () => {
       "canary",
     ]);
     expect(channelCmd.children?.[0].children?.[0].value).toBe("--save");
+  });
+
+  it("/mistral has expected subcommands", () => {
+    const mistralCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/mistral");
+    expect(mistralCmd).toBeDefined();
+    expect(mistralCmd!.children?.map((child) => child.value)).toEqual([
+      "status",
+      "key-mode",
+      "shared-key",
+      "docai-key",
+      "transcription-key",
+    ]);
+  });
+
+  it("/mistral key-mode exposes shared and override with save flag", () => {
+    const mistralCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/mistral")!;
+    const keyModeCmd = mistralCmd.children!.find((c) => c.value === "key-mode")!;
+    expect(keyModeCmd.children?.map((child) => child.value)).toEqual([
+      "shared",
+      "override",
+    ]);
+    expect(keyModeCmd.children?.[0].children?.[0].value).toBe("--save");
+  });
+
+  it("/mistral key actions expose set and clear", () => {
+    const mistralCmd = COMMAND_COMPLETIONS.find((c) => c.value === "/mistral")!;
+    const sharedKeyCmd = mistralCmd.children!.find((c) => c.value === "shared-key")!;
+    expect(sharedKeyCmd.children?.map((child) => child.value)).toEqual([
+      "set",
+      "clear",
+    ]);
+    expect(sharedKeyCmd.children?.[0].children?.[0].value).toBe("<value>");
   });
 
   it("reasoning level children have --save flag", () => {

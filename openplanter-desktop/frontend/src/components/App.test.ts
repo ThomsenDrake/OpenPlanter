@@ -135,6 +135,7 @@ describe("createApp", () => {
     expect(settings!.textContent).toContain("glm-5");
     expect(settings!.textContent).toContain("coding");
     expect(settings!.textContent).toContain("firecrawl");
+    expect(settings!.textContent).toContain("document ai key:");
     expect(settings!.textContent).toContain("recursive (auto)");
     expect(settings!.textContent).toContain("min subtask depth:");
     expect(settings!.textContent).toContain("max depth:");
@@ -153,108 +154,19 @@ describe("createApp", () => {
     });
   });
 
-  it("saves the Mistral credential from the sidebar editor", async () => {
-    let saved: { service: string; value: string | null } | null = null;
-    __setHandler("save_credential", ({ service, value }: any) => {
-      saved = { service, value };
-      return {
-        openai: true, anthropic: true, openrouter: false,
-        cerebras: false, zai: true, ollama: true, exa: false, firecrawl: true, brave: false, tavily: true, voyage: true,
-        mistral: true, mistral_document_ai: false, mistral_transcription: true,
-      };
-    });
-
+  it("keeps sidebar credentials read-only", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     createApp(root);
 
-    const sections = [...root.querySelectorAll(".cred-editor-section")];
-    const transcriptionSection = sections.find((section) => {
-      return (
-        section.querySelector(".cred-editor-title")?.textContent ===
-        "Mistral transcription"
-      );
-    }) as HTMLElement | undefined;
-    expect(transcriptionSection).toBeDefined();
-
-    const input = transcriptionSection!.querySelector(
-      ".cred-editor-input"
-    ) as HTMLInputElement;
-    const saveBtn = transcriptionSection!.querySelector(
-      ".cred-editor-actions button"
-    ) as HTMLButtonElement;
-    input.value = "mistral-key";
-    saveBtn.click();
-
     await vi.waitFor(() => {
-      expect(saved).toEqual({
-        service: "mistral_transcription",
-        value: "mistral-key",
-      });
+      expect(root.querySelector(".cred-status")?.children.length).toBe(14);
     });
 
-    await vi.waitFor(() => {
-      const feedback = transcriptionSection!.querySelector(
-        ".cred-editor-feedback"
-      ) as HTMLElement;
-      expect(feedback.textContent).toContain("Saved workspace key.");
-    });
-  });
-
-  it("saves the Document AI key mode from the sidebar", async () => {
-    let savedPartial: any = null;
-    let savedSettings: any = null;
-    __setHandler("update_config", ({ partial }: any) => {
-      savedPartial = partial;
-      return {
-        provider: "anthropic",
-        model: "anthropic-foundry/claude-opus-4-6",
-        reasoning_effort: null,
-        zai_plan: "paygo",
-        web_search_provider: "exa",
-        continuity_mode: "auto",
-        mistral_document_ai_use_shared_key: false,
-        chrome_mcp_enabled: false,
-        chrome_mcp_auto_connect: true,
-        chrome_mcp_browser_url: null,
-        chrome_mcp_channel: "stable",
-        chrome_mcp_connect_timeout_sec: 15,
-        chrome_mcp_rpc_timeout_sec: 45,
-        chrome_mcp_status: "disabled",
-        chrome_mcp_status_detail: "disabled",
-        workspace: ".",
-        session_id: null,
-        recursive: true,
-        max_depth: 4,
-        max_steps_per_call: 100,
-        demo: false,
-      };
-    });
-    __setHandler("save_settings", ({ settings }: any) => {
-      savedSettings = settings;
-    });
-
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    createApp(root);
-
-    const select = root.querySelector(".settings-select") as HTMLSelectElement;
-    const saveBtn = root.querySelector(
-      ".settings-control .cred-editor-actions button"
-    ) as HTMLButtonElement;
-
-    select.value = "override";
-    saveBtn.click();
-
-    await vi.waitFor(() => {
-      expect(savedPartial).toEqual({
-        mistral_document_ai_use_shared_key: false,
-      });
-      expect(savedSettings).toEqual({
-        mistral_document_ai_use_shared_key: false,
-      });
-      expect(appState.get().mistralDocumentAiUseSharedKey).toBe(false);
-    });
+    expect(root.querySelector(".settings-controls")).toBeNull();
+    expect(root.querySelector(".settings-select")).toBeNull();
+    expect(root.querySelector(".cred-editor")).toBeNull();
+    expect(root.querySelectorAll(".cred-editor-section").length).toBe(0);
   });
 
   it("new session button creates session and clears state", async () => {

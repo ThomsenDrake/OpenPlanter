@@ -19,6 +19,7 @@ describe("dispatchSlashCommand", () => {
       model: "claude-opus-4-6",
       zaiPlan: "paygo",
       webSearchProvider: "exa",
+      mistralDocumentAiUseSharedKey: true,
       chromeMcpEnabled: true,
       chromeMcpAutoConnect: true,
       chromeMcpBrowserUrl: null,
@@ -105,6 +106,12 @@ describe("dispatchSlashCommand", () => {
     expect(result).not.toBeNull();
     expect(result!.lines.some((l) => l.includes("Chrome MCP:"))).toBe(true);
     expect(result!.lines.some((l) => l.includes("Chrome runtime:"))).toBe(true);
+  });
+
+  it("status shows DocAI key mode", async () => {
+    const result = await dispatchSlashCommand("/status");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("DocAI key mode:"))).toBe(true);
   });
 
   it("unknown command", async () => {
@@ -209,6 +216,12 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("/continuity"))).toBe(true);
   });
 
+  it("help includes mistral command", async () => {
+    const result = await dispatchSlashCommand("/help");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("/mistral"))).toBe(true);
+  });
+
   it("help includes recursion command", async () => {
     const result = await dispatchSlashCommand("/help");
     expect(result).not.toBeNull();
@@ -220,6 +233,20 @@ describe("dispatchSlashCommand", () => {
     expect(result).not.toBeNull();
     expect(result!.action).toBe("handled");
     expect(result!.lines.some((l) => l.includes("Chrome MCP:"))).toBe(true);
+  });
+
+  it("mistral dispatches", async () => {
+    __setHandler("get_credentials_status", () => ({
+      mistral: true,
+      mistral_document_ai: false,
+      mistral_transcription: true,
+    }));
+    const result = await dispatchSlashCommand("/mistral");
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("handled");
+    expect(
+      result!.lines.some((l) => l.includes("Document AI key mode:"))
+    ).toBe(true);
   });
 
   it("recursion dispatches", async () => {
