@@ -159,7 +159,24 @@ export OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC=120.0
 export OPENPLANTER_ZAI_STREAM_MAX_RETRIES=10
 ```
 
-Additional service keys: `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY` (web search), `VOYAGE_API_KEY` (embeddings), `MISTRAL_TRANSCRIPTION_API_KEY` or `MISTRAL_API_KEY` (audio transcription).
+Additional service keys: `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY` (web search), `VOYAGE_API_KEY` (Voyage embeddings; the internal provider name is `voyage`), `MISTRAL_API_KEY` (shared Mistral key for embeddings, Document AI/OCR, and transcription), and `MISTRAL_TRANSCRIPTION_API_KEY` (optional transcription-only override).
+
+### Embeddings Retrieval
+
+OpenPlanter can build local semantic indexes for the runtime wiki, workspace research docs, and session evidence or artifacts. At the start of top-level solves it can retrieve relevant chunks and inject them into the initial prompt as a retrieval packet. Retrieval is additive: if the selected embeddings provider is not configured, the agent still runs and status surfaces explain why retrieval is disabled.
+
+The embeddings provider defaults to `voyage`. If you were thinking of "Voyager", use the internal provider name `voyage` in config, CLI flags, slash commands, and saved settings.
+
+Configure it with:
+
+```bash
+export OPENPLANTER_EMBEDDINGS_PROVIDER=voyage   # or mistral
+openplanter-agent --embeddings-provider mistral
+```
+
+When `mistral` is selected, embeddings use the shared `MISTRAL_API_KEY`. That same shared key can also be used by Mistral Document AI/OCR and, when `MISTRAL_TRANSCRIPTION_API_KEY` is not set, by audio transcription as well.
+
+OpenPlanter stores embeddings indexes locally under `.openplanter/embeddings/workspace/` and `.openplanter/sessions/<session_id>/embeddings/`. The desktop app and TUI both support `/embeddings [voyage|mistral] [--save]`, and `/status` shows the active embeddings provider plus retrieval availability.
 
 ### Audio Transcription
 
@@ -310,6 +327,7 @@ OPENPLANTER_WORKSPACE=workspace
 |------|-------------|
 | `--provider NAME` | `auto`, `openai`, `anthropic`, `openrouter`, `cerebras`, `zai`, `ollama` |
 | `--model NAME` | Model name or `newest` to auto-select |
+| `--embeddings-provider NAME` | Embeddings retrieval backend: `voyage` or `mistral` |
 | `--openai-oauth-token TOKEN` | ChatGPT Plus/Teams/Pro OAuth bearer token for OpenAI-compatible models |
 | `--zai-plan PLAN` | Z.AI endpoint plan: `paygo` or `coding` |
 | `--reasoning-effort LEVEL` | `low`, `medium`, `high`, or `none` |
@@ -340,7 +358,7 @@ OPENPLANTER_WORKSPACE=workspace
 
 ### Persistent Defaults
 
-Use `--default-model`, `--default-reasoning-effort`, Chrome MCP slash commands with `--save`, or per-provider variants like `--default-model-openai` to save workspace defaults to `.openplanter/settings.json`. View them with `--show-settings`.
+Use `--default-model`, `--default-reasoning-effort`, `--embeddings-provider`, `/embeddings ... --save`, Chrome MCP slash commands with `--save`, or per-provider variants like `--default-model-openai` to save workspace defaults to `.openplanter/settings.json`. View them with `--show-settings`.
 
 ## Configuration
 

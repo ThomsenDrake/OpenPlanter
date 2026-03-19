@@ -12,6 +12,7 @@ from agent.settings import (
     PersistentSettings,
     SettingsStore,
     normalize_chrome_mcp_channel,
+    normalize_embeddings_provider,
     normalize_reasoning_effort,
 )
 from agent.tui import SLASH_COMMANDS, _compute_suggestions
@@ -52,6 +53,15 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.chrome_mcp_connect_timeout_sec, 21)
             self.assertEqual(loaded.chrome_mcp_rpc_timeout_sec, 61)
 
+    def test_embeddings_provider_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SettingsStore(workspace=root, session_root_dir=".openplanter")
+            settings = PersistentSettings(embeddings_provider="mistral")
+            store.save(settings)
+            loaded = store.load()
+            self.assertEqual(loaded.embeddings_provider, "mistral")
+
     def test_normalize_reasoning_effort(self) -> None:
         self.assertEqual(normalize_reasoning_effort("LOW"), "low")
         self.assertEqual(normalize_reasoning_effort(" medium "), "medium")
@@ -64,6 +74,12 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(normalize_chrome_mcp_channel(""))
         with self.assertRaises(ValueError):
             normalize_chrome_mcp_channel("nightly")
+
+    def test_normalize_embeddings_provider(self) -> None:
+        self.assertEqual(normalize_embeddings_provider("MISTRAL"), "mistral")
+        self.assertIsNone(normalize_embeddings_provider(""))
+        with self.assertRaises(ValueError):
+            normalize_embeddings_provider("other")
 
     def test_per_provider_model_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -155,7 +171,7 @@ class ComputeSuggestionsTests(unittest.TestCase):
 
     def test_slash_e_filters(self) -> None:
         matches, idx = _compute_suggestions("/e")
-        self.assertEqual(matches, ["/exit"])
+        self.assertEqual(matches, ["/exit", "/embeddings"])
         self.assertEqual(idx, -1)
 
     def test_slash_q_filters(self) -> None:
@@ -197,6 +213,10 @@ class ComputeSuggestionsTests(unittest.TestCase):
     def test_slash_c_matches_chrome(self) -> None:
         matches, _ = _compute_suggestions("/ch")
         self.assertIn("/chrome", matches)
+
+    def test_slash_em_matches_embeddings(self) -> None:
+        matches, _ = _compute_suggestions("/em")
+        self.assertIn("/embeddings", matches)
 
 
 class InferProviderTests(unittest.TestCase):

@@ -2,9 +2,8 @@ use std::env;
 
 use crate::config::{
     AgentConfig, FOUNDRY_OPENAI_API_KEY_PLACEHOLDER, normalize_continuity_mode,
-    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
-    resolve_openai_api_key,
-    resolve_zai_base_url,
+    normalize_embeddings_provider, normalize_recursion_policy, normalize_web_search_provider,
+    normalize_zai_plan, resolve_openai_api_key, resolve_zai_base_url,
 };
 use crate::credentials::CredentialBundle;
 use crate::settings::PersistentSettings;
@@ -104,6 +103,12 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
     if !has_env_value(&["OPENPLANTER_WEB_SEARCH_PROVIDER"]) {
         if let Some(provider) = settings.web_search_provider.as_deref() {
             cfg.web_search_provider = normalize_web_search_provider(Some(provider));
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_EMBEDDINGS_PROVIDER"]) {
+        if let Some(provider) = settings.embeddings_provider.as_deref() {
+            cfg.embeddings_provider = normalize_embeddings_provider(Some(provider));
         }
     }
 

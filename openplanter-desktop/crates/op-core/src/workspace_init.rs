@@ -749,6 +749,7 @@ fn merge_settings_missing(
     fill!(default_model_ollama);
     fill!(zai_plan);
     fill!(web_search_provider);
+    fill!(embeddings_provider);
     fill!(mistral_document_ai_use_shared_key);
 }
 

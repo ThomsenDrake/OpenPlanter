@@ -43,6 +43,11 @@ const WEB_SEARCH_PROVIDERS: CompletionItem[] = [
   { value: "tavily", description: "Use Tavily for web search", children: SAVE_FLAG },
 ];
 
+const EMBEDDINGS_PROVIDERS: CompletionItem[] = [
+  { value: "voyage", description: "Use Voyage embeddings", children: SAVE_FLAG },
+  { value: "mistral", description: "Use Mistral embeddings", children: SAVE_FLAG },
+];
+
 const CONTINUITY_MODES: CompletionItem[] = [
   { value: "auto", description: "Infer follow-ups automatically", children: SAVE_FLAG },
   { value: "fresh", description: "Force a fresh turn context", children: SAVE_FLAG },
@@ -118,6 +123,11 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
     value: "/zai-plan",
     description: "Show or switch the Z.AI endpoint family",
     children: ZAI_PLANS,
+  },
+  {
+    value: "/embeddings",
+    description: "Show or switch the embeddings provider",
+    children: EMBEDDINGS_PROVIDERS,
   },
   {
     value: "/web-search",

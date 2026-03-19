@@ -433,6 +433,21 @@ Each item should cite the relevant evidence/provenance IDs.
 """
 
 
+RETRIEVAL_SECTION = """
+== SEMANTIC RETRIEVAL ==
+Your initial message may contain a "retrieval_packet" assembled from local
+semantic search over the runtime wiki, workspace research documents, and this
+session's memory/evidence/artifacts.
+
+Use retrieval_packet as bounded context, not ground truth:
+- Treat retrieved excerpts as candidate leads to verify with tools.
+- Prefer the cited source paths and excerpts when choosing what to read next.
+- Re-read the underlying file or artifact before making high-confidence claims.
+- Do not quote retrieval excerpts as if they were exhaustive; they are chunked,
+  relevance-ranked snippets.
+"""
+
+
 WIKI_SECTION = """
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -477,6 +492,7 @@ def build_system_prompt(
     prompt += SESSION_LOGS_SECTION
     prompt += TURN_HISTORY_SECTION
     prompt += QUESTION_REASONING_SECTION
+    prompt += RETRIEVAL_SECTION
     prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION

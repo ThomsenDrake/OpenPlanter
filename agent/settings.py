@@ -7,6 +7,7 @@ from pathlib import Path
 
 VALID_REASONING_EFFORTS: set[str] = {"low", "medium", "high"}
 VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
+VALID_EMBEDDINGS_PROVIDERS: set[str] = {"voyage", "mistral"}
 
 
 def normalize_reasoning_effort(value: str | None) -> str | None:
@@ -52,6 +53,20 @@ def normalize_chrome_mcp_channel(value: str | None) -> str | None:
     return cleaned
 
 
+def normalize_embeddings_provider(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return None
+    if cleaned not in VALID_EMBEDDINGS_PROVIDERS:
+        raise ValueError(
+            f"Invalid embeddings provider '{value}'. Expected one of: "
+            f"{', '.join(sorted(VALID_EMBEDDINGS_PROVIDERS))}"
+        )
+    return cleaned
+
+
 @dataclass(slots=True)
 class PersistentSettings:
     default_model: str | None = None
@@ -62,6 +77,7 @@ class PersistentSettings:
     default_model_cerebras: str | None = None
     default_model_zai: str | None = None
     default_model_ollama: str | None = None
+    embeddings_provider: str | None = None
     chrome_mcp_enabled: bool | None = None
     chrome_mcp_auto_connect: bool | None = None
     chrome_mcp_browser_url: str | None = None
@@ -95,6 +111,7 @@ class PersistentSettings:
             default_model_cerebras=(self.default_model_cerebras or "").strip() or None,
             default_model_zai=(self.default_model_zai or "").strip() or None,
             default_model_ollama=(self.default_model_ollama or "").strip() or None,
+            embeddings_provider=normalize_embeddings_provider(self.embeddings_provider),
             chrome_mcp_enabled=normalize_bool(self.chrome_mcp_enabled),
             chrome_mcp_auto_connect=normalize_bool(self.chrome_mcp_auto_connect),
             chrome_mcp_browser_url=(self.chrome_mcp_browser_url or "").strip() or None,
@@ -129,6 +146,8 @@ class PersistentSettings:
             payload["default_model_zai"] = self.default_model_zai
         if self.default_model_ollama:
             payload["default_model_ollama"] = self.default_model_ollama
+        if self.embeddings_provider:
+            payload["embeddings_provider"] = self.embeddings_provider
         if self.chrome_mcp_enabled is not None:
             payload["chrome_mcp_enabled"] = self.chrome_mcp_enabled
         if self.chrome_mcp_auto_connect is not None:
@@ -158,6 +177,7 @@ class PersistentSettings:
             default_model_cerebras=(str(payload.get("default_model_cerebras", "")).strip() or None),
             default_model_zai=(str(payload.get("default_model_zai", "")).strip() or None),
             default_model_ollama=(str(payload.get("default_model_ollama", "")).strip() or None),
+            embeddings_provider=(str(payload.get("embeddings_provider", "")).strip() or None),
             chrome_mcp_enabled=payload.get("chrome_mcp_enabled"),
             chrome_mcp_auto_connect=payload.get("chrome_mcp_auto_connect"),
             chrome_mcp_browser_url=(str(payload.get("chrome_mcp_browser_url", "")).strip() or None),

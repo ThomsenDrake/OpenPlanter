@@ -15,6 +15,7 @@ use op_core::engine::investigation_state::{
     build_question_reasoning_packet, has_reasoning_content,
 };
 use op_core::engine::{SolveEmitter, SolveInitialContext};
+use op_core::retrieval::build_retrieval_packet;
 use op_core::session::replay::{ReplayEntry, ReplayLogger};
 use op_core::workspace_init;
 
@@ -167,12 +168,13 @@ fn resolve_continuity(
 }
 
 async fn build_solve_initial_context(
+    config: &op_core::config::AgentConfig,
     session_dir: &Path,
     session_id: &str,
     objective: &str,
     configured_mode: &str,
     max_turn_summaries: usize,
-) -> (SolveInitialContext, Option<String>) {
+) -> (SolveInitialContext, Option<String>, Option<String>) {
     let mut initial_context = SolveInitialContext {
         session_id: Some(session_id.to_string()),
         session_dir: Some(session_dir.display().to_string()),
@@ -180,6 +182,7 @@ async fn build_solve_initial_context(
         continuity_mode: None,
         continuity_reason: None,
         question_reasoning_packet: None,
+        retrieval_packet: None,
     };
 
     match load_or_migrate_investigation_state(session_dir).await {
@@ -198,13 +201,38 @@ async fn build_solve_initial_context(
             if has_reasoning_content(&packet) {
                 initial_context.question_reasoning_packet = Some(packet);
             }
-            (initial_context, None)
+            let retrieval_result = match build_retrieval_packet(
+                &config.workspace,
+                Some(session_dir),
+                &config.session_root_dir,
+                objective,
+                initial_context.question_reasoning_packet.as_ref(),
+                &config.embeddings_provider,
+                config.voyage_api_key.as_deref(),
+                config.mistral_api_key.as_deref(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    return (
+                        initial_context,
+                        None,
+                        Some(format!(
+                            "[retrieval] failed to build retrieval packet; continuing without semantic context: {err}"
+                        )),
+                    );
+                }
+            };
+            initial_context.retrieval_packet = retrieval_result.packet;
+            (initial_context, None, Some(format!("[retrieval] {}", retrieval_result.status.detail)))
         }
         Err(err) => (
             initial_context,
             Some(format!(
                 "[solve] failed to load investigation state for continuity and reasoning packet; continuing without session memory: {err}"
             )),
+            None,
         ),
     }
 }
@@ -298,7 +326,8 @@ pub async fn solve(
         session_id
     ));
     emitter.emit_trace(&format!("[startup:info] {}", state.startup_trace()));
-    let (initial_context, initial_context_warning) = build_solve_initial_context(
+    let (initial_context, initial_context_warning, retrieval_status_detail) = build_solve_initial_context(
+        &cfg,
         &session_dir,
         &session_id,
         &objective,
@@ -308,6 +337,9 @@ pub async fn solve(
     .await;
     if let Some(warning) = initial_context_warning.as_deref() {
         emitter.emit_trace(warning);
+    }
+    if let Some(detail) = retrieval_status_detail.as_deref() {
+        emitter.emit_trace(detail);
     }
 
     tokio::spawn(async move {
@@ -400,8 +432,15 @@ pub async fn debug_log(msg: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use op_core::config::AgentConfig;
     use tempfile::tempdir;
     use tokio::fs;
+
+    fn test_config(root: &Path) -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.workspace = root.to_path_buf();
+        cfg
+    }
 
     #[tokio::test]
     async fn test_build_solve_initial_context_includes_packet_when_state_has_reasoning() {
@@ -419,9 +458,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) =
-            build_solve_initial_context(tmp.path(), "sid", "Investigate this", "auto", 50).await;
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) =
+            build_solve_initial_context(&cfg, tmp.path(), "sid", "Investigate this", "auto", 50)
+                .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         let packet = context
             .question_reasoning_packet
             .expect("packet should be present");
@@ -441,9 +483,12 @@ mod tests {
             .await
             .unwrap();
 
-        let (context, warning) =
-            build_solve_initial_context(tmp.path(), "sid", "Investigate this", "auto", 50).await;
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) =
+            build_solve_initial_context(&cfg, tmp.path(), "sid", "Investigate this", "auto", 50)
+                .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         assert!(context.question_reasoning_packet.is_none());
         assert_eq!(context.session_id, Some("sid".to_string()));
         assert_eq!(context.session_dir, Some(tmp.path().display().to_string()));
@@ -463,10 +508,18 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) =
-            build_solve_initial_context(tmp.path(), "sid", "Why does that matter?", "auto", 50)
-                .await;
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
+            tmp.path(),
+            "sid",
+            "Why does that matter?",
+            "auto",
+            50,
+        )
+        .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         assert_eq!(context.continuity_mode.as_deref(), Some("continue"));
         assert_eq!(context.continuity_reason.as_deref(), Some("follow_up_cue"));
         assert_eq!(context.turn_history.as_ref().map(Vec::len), Some(1));
@@ -486,7 +539,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) = build_solve_initial_context(
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
             tmp.path(),
             "sid",
             "Compare donor network addresses",
@@ -495,12 +550,13 @@ mod tests {
         )
         .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         assert_eq!(context.continuity_mode.as_deref(), Some("continue"));
         assert!(
             context
                 .continuity_reason
                 .as_deref()
-                .is_some_and(|value| value.starts_with("token_overlap:"))
+                .is_some_and(|value: &str| value.starts_with("token_overlap:"))
         );
     }
 
@@ -518,7 +574,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) = build_solve_initial_context(
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
             tmp.path(),
             "sid",
             "Summarize zoning permits in Boston",
@@ -527,6 +585,7 @@ mod tests {
         )
         .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         assert!(context.turn_history.is_none());
         assert!(context.continuity_mode.is_none());
         assert!(context.continuity_reason.is_none());
@@ -546,7 +605,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (context, warning) = build_solve_initial_context(
+        let cfg = test_config(tmp.path());
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
             tmp.path(),
             "sid",
             "How do we structure a CI pipeline?",
@@ -555,6 +616,7 @@ mod tests {
         )
         .await;
         assert!(warning.is_none());
+        assert!(retrieval_detail.is_some());
         assert!(context.turn_history.is_none());
         assert!(context.continuity_mode.is_none());
         assert!(context.continuity_reason.is_none());

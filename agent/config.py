@@ -27,6 +27,7 @@ CHROME_MCP_DEFAULT_CHANNEL = "stable"
 CHROME_MCP_CONNECT_TIMEOUT_SEC = 15
 CHROME_MCP_RPC_TIMEOUT_SEC = 45
 VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
+VALID_EMBEDDINGS_PROVIDERS: set[str] = {"voyage", "mistral"}
 
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "azure-foundry/gpt-5.4",
@@ -51,6 +52,13 @@ def normalize_recursion_policy(value: str | None) -> str:
     if cleaned in VALID_RECURSION_POLICIES:
         return cleaned
     return "auto"
+
+
+def normalize_embeddings_provider(value: str | None) -> str:
+    cleaned = (value or "").strip().lower()
+    if cleaned in VALID_EMBEDDINGS_PROVIDERS:
+        return cleaned
+    return "voyage"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -169,6 +177,7 @@ class AgentConfig:
     brave_api_key: str | None = None
     tavily_api_key: str | None = None
     web_search_provider: str = "exa"
+    embeddings_provider: str = "voyage"
     voyage_api_key: str | None = None
     mistral_api_key: str | None = None
     mistral_document_ai_api_key: str | None = None
@@ -242,6 +251,7 @@ class AgentConfig:
             self.chrome_mcp_browser_url
         )
         self.chrome_mcp_channel = normalize_chrome_mcp_channel(self.chrome_mcp_channel)
+        self.embeddings_provider = normalize_embeddings_provider(self.embeddings_provider)
         self.chrome_mcp_connect_timeout_sec = max(1, int(self.chrome_mcp_connect_timeout_sec))
         self.chrome_mcp_rpc_timeout_sec = max(1, int(self.chrome_mcp_rpc_timeout_sec))
         self.recursion_policy = normalize_recursion_policy(self.recursion_policy)
@@ -310,6 +320,9 @@ class AgentConfig:
         web_search_provider = (os.getenv("OPENPLANTER_WEB_SEARCH_PROVIDER", "exa").strip().lower() or "exa")
         if web_search_provider not in {"exa", "firecrawl", "brave", "tavily"}:
             web_search_provider = "exa"
+        embeddings_provider = normalize_embeddings_provider(
+            os.getenv("OPENPLANTER_EMBEDDINGS_PROVIDER", "voyage")
+        )
         budget_extension_enabled = (os.getenv("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "true").strip().lower() in {"1", "true", "yes"})
         budget_extension_block_steps = max(
             1,
@@ -364,6 +377,7 @@ class AgentConfig:
             brave_api_key=brave_api_key,
             tavily_api_key=tavily_api_key,
             web_search_provider=web_search_provider,
+            embeddings_provider=embeddings_provider,
             voyage_api_key=voyage_api_key,
             mistral_api_key=(mistral_api_key or "").strip() or None,
             mistral_document_ai_api_key=(

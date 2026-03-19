@@ -1,8 +1,9 @@
 use crate::state::AppState;
 use op_core::config::{
     has_openai_auth, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-    normalize_continuity_mode, normalize_model_alias, normalize_recursion_policy,
-    normalize_web_search_provider, normalize_zai_plan, resolve_zai_base_url,
+    normalize_continuity_mode, normalize_embeddings_provider, normalize_model_alias,
+    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
+    resolve_zai_base_url,
 };
 use op_core::config_hydration::merge_credentials_into_config;
 use op_core::credentials::{
@@ -10,6 +11,7 @@ use op_core::credentials::{
     parse_env_file,
 };
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
+use op_core::retrieval::build_embeddings_status;
 use op_core::settings::{PersistentSettings, SettingsStore};
 use std::collections::HashMap;
 use tauri::State;
@@ -20,12 +22,20 @@ async fn make_config_view(
     state: &AppState,
 ) -> ConfigView {
     let chrome_status = state.chrome_mcp_status(cfg).await;
+    let embeddings_status = build_embeddings_status(
+        &cfg.embeddings_provider,
+        cfg.voyage_api_key.as_deref(),
+        cfg.mistral_api_key.as_deref(),
+    );
     ConfigView {
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         reasoning_effort: cfg.reasoning_effort.clone(),
         zai_plan: cfg.zai_plan.clone(),
         web_search_provider: cfg.web_search_provider.clone(),
+        embeddings_provider: cfg.embeddings_provider.clone(),
+        embeddings_status: embeddings_status.status,
+        embeddings_status_detail: embeddings_status.detail,
         continuity_mode: cfg.continuity_mode.clone(),
         mistral_document_ai_use_shared_key: cfg.mistral_document_ai_use_shared_key,
         chrome_mcp_enabled: cfg.chrome_mcp_enabled,
@@ -76,6 +86,7 @@ fn merge_settings(
         web_search_provider: incoming
             .web_search_provider
             .or(existing.web_search_provider),
+        embeddings_provider: incoming.embeddings_provider.or(existing.embeddings_provider),
         continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
         recursive: incoming.recursive.or(existing.recursive),
         recursion_policy: incoming.recursion_policy.or(existing.recursion_policy),
@@ -139,6 +150,9 @@ pub async fn update_config(
     }
     if let Some(provider) = partial.web_search_provider {
         cfg.web_search_provider = normalize_web_search_provider(Some(&provider));
+    }
+    if let Some(provider) = partial.embeddings_provider {
+        cfg.embeddings_provider = normalize_embeddings_provider(Some(&provider));
     }
     if let Some(mode) = partial.continuity_mode {
         cfg.continuity_mode = normalize_continuity_mode(Some(&mode));
@@ -354,6 +368,17 @@ fn apply_runtime_credential_fallbacks(cfg: &mut op_core::config::AgentConfig) {
     apply_runtime_credential_fallbacks_from_sources(cfg, &env_creds, &file_creds);
 }
 
+fn has_effective_mistral_transcription_key(
+    transcription_key: Option<&str>,
+    shared_key: Option<&str>,
+) -> bool {
+    has_text(transcription_key) || has_text(shared_key)
+}
+
+fn has_text(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
 fn merged_credential_status(
     cfg: &op_core::config::AgentConfig,
     env_creds: &CredentialBundle,
@@ -417,6 +442,16 @@ fn merged_credential_status(
     );
     status.insert(
         "mistral_transcription".to_string(),
+        has_effective_mistral_transcription_key(
+            cfg.mistral_transcription_api_key.as_deref()
+                .or(env_creds.mistral_transcription_api_key.as_deref()),
+            cfg.mistral_api_key
+                .as_deref()
+                .or(env_creds.mistral_api_key.as_deref()),
+        ),
+    );
+    status.insert(
+        "mistral_transcription_direct".to_string(),
         cfg.mistral_transcription_api_key.is_some()
             || env_creds.mistral_transcription_api_key.is_some(),
     );
@@ -450,6 +485,13 @@ pub fn build_credential_status(cfg: &op_core::config::AgentConfig) -> HashMap<St
     );
     status.insert(
         "mistral_transcription".to_string(),
+        has_effective_mistral_transcription_key(
+            cfg.mistral_transcription_api_key.as_deref(),
+            cfg.mistral_api_key.as_deref(),
+        ),
+    );
+    status.insert(
+        "mistral_transcription_direct".to_string(),
         cfg.mistral_transcription_api_key.is_some(),
     );
     status
@@ -672,13 +714,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_status_has_fourteen_entries() {
+    fn test_cred_status_has_fifteen_entries() {
         let cfg = op_core::config::AgentConfig::from_env("/nonexistent");
         let status = build_credential_status(&cfg);
         assert_eq!(
             status.len(),
-            14,
-            "should have 14 entries (6 providers + 8 services)"
+            15,
+            "should have 15 entries including direct transcription status"
         );
     }
 

@@ -419,7 +419,9 @@ impl WorkspaceTools {
                     .and_then(|v| v.as_bool());
                 audio::audio_transcribe(
                     &self.root,
-                    self.mistral_transcription_api_key.as_deref(),
+                    self.mistral_transcription_api_key
+                        .as_deref()
+                        .or(self.mistral_api_key.as_deref()),
                     &self.mistral_transcription_base_url,
                     &self.mistral_transcription_model,
                     self.mistral_transcription_max_bytes,

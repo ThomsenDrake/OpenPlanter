@@ -1624,10 +1624,11 @@ class WorkspaceTools:
         language: str | None,
         temperature: float | None,
     ) -> dict[str, Any]:
-        if not (
-            self.mistral_transcription_api_key
-            and self.mistral_transcription_api_key.strip()
-        ):
+        transcription_key = (
+            (self.mistral_transcription_api_key or "").strip()
+            or (self.mistral_api_key or "").strip()
+        )
+        if not transcription_key:
             raise ToolError("Mistral transcription API key not configured")
         try:
             size = resolved.stat().st_size
@@ -1670,7 +1671,7 @@ class WorkspaceTools:
             url=self._mistral_transcription_url(),
             data=body,
             headers={
-                "Authorization": f"Bearer {self.mistral_transcription_api_key}",
+                "Authorization": f"Bearer {transcription_key}",
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
             },
             method="POST",

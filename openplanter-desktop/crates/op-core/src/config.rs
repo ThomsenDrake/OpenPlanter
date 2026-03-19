@@ -97,6 +97,13 @@ pub fn normalize_web_search_provider(value: Option<&str>) -> String {
     }
 }
 
+pub fn normalize_embeddings_provider(value: Option<&str>) -> String {
+    match value.unwrap_or_default().trim().to_lowercase().as_str() {
+        "mistral" => "mistral".to_string(),
+        _ => "voyage".to_string(),
+    }
+}
+
 pub fn normalize_continuity_mode(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "fresh" => "fresh".to_string(),
@@ -285,6 +292,7 @@ pub struct AgentConfig {
     pub brave_api_key: Option<String>,
     pub tavily_api_key: Option<String>,
     pub web_search_provider: String,
+    pub embeddings_provider: String,
     pub continuity_mode: String,
     pub voyage_api_key: Option<String>,
     pub mistral_api_key: Option<String>,
@@ -373,6 +381,7 @@ impl Default for AgentConfig {
             brave_api_key: None,
             tavily_api_key: None,
             web_search_provider: "exa".into(),
+            embeddings_provider: "voyage".into(),
             continuity_mode: "auto".into(),
             voyage_api_key: None,
             mistral_api_key: None,
@@ -500,6 +509,8 @@ impl AgentConfig {
         });
         let web_search_provider =
             normalize_web_search_provider(env_opt("OPENPLANTER_WEB_SEARCH_PROVIDER").as_deref());
+        let embeddings_provider =
+            normalize_embeddings_provider(env_opt("OPENPLANTER_EMBEDDINGS_PROVIDER").as_deref());
         let continuity_mode =
             normalize_continuity_mode(env_opt("OPENPLANTER_CONTINUITY_MODE").as_deref());
         let recursion_policy =
@@ -562,6 +573,7 @@ impl AgentConfig {
             brave_api_key,
             tavily_api_key,
             web_search_provider,
+            embeddings_provider,
             continuity_mode,
             voyage_api_key,
             mistral_api_key,

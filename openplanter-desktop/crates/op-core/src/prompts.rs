@@ -291,6 +291,19 @@ Final deliverables MUST separate findings into three sections:
 
 Each item should cite the relevant evidence/provenance IDs."#;
 
+pub const RETRIEVAL_SECTION: &str = r#"
+== SEMANTIC RETRIEVAL ==
+Your initial message may contain a "retrieval_packet" assembled from local
+semantic search over the runtime wiki, workspace research documents, and this
+session's memory/evidence/artifacts.
+
+Use retrieval_packet as bounded context, not ground truth:
+- Treat retrieved excerpts as candidate leads to verify with tools.
+- Prefer the cited source paths and excerpts when choosing what to read next.
+- Re-read the underlying file or artifact before making high-confidence claims.
+- Do not quote retrieval excerpts as if they were exhaustive; they are chunked,
+  relevance-ranked snippets."#;
+
 pub const WIKI_SECTION: &str = r#"
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -449,6 +462,7 @@ pub fn build_system_prompt(recursive: bool, acceptance_criteria: bool, demo: boo
     prompt.push_str(SESSION_LOGS_SECTION);
     prompt.push_str(TURN_HISTORY_SECTION);
     prompt.push_str(QUESTION_REASONING_SECTION);
+    prompt.push_str(RETRIEVAL_SECTION);
     prompt.push_str(WIKI_SECTION);
     if recursive {
         prompt.push_str(RECURSIVE_SECTION);

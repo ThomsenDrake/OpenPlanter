@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .config import AgentConfig
 from .engine import RLMEngine, _MODEL_CONTEXT_WINDOWS, _DEFAULT_CONTEXT_WINDOW
 from .model import EchoFallbackModel, ModelError
+from .retrieval import build_embeddings_status
 from .runtime import SessionRuntime
 from .settings import SettingsStore
 
@@ -23,6 +24,7 @@ SLASH_COMMANDS: list[str] = [
     "/clear",
     "/model",
     "/reasoning",
+    "/embeddings",
     "/chrome",
 ]
 
@@ -115,6 +117,7 @@ HELP_LINES: list[str] = [
     "  /model <name> --save  Switch and persist as default",
     "  /model list [all]   List available models",
     "  /reasoning [low|medium|high|off]  Change reasoning effort",
+    "  /embeddings [voyage|mistral] [--save]  Change retrieval embeddings provider",
     "  /chrome status|on|off|auto|url <endpoint>|channel <stable|beta|dev|canary> [--save]",
     "  /status  /clear  /quit  /exit  /help",
 ]
@@ -392,6 +395,48 @@ def _format_chrome_status(ctx: ChatContext) -> list[str]:
     return lines
 
 
+def _format_embeddings_status(ctx: ChatContext) -> list[str]:
+    status = build_embeddings_status(
+        provider=ctx.cfg.embeddings_provider,
+        voyage_api_key=ctx.cfg.voyage_api_key,
+        mistral_api_key=ctx.cfg.mistral_api_key,
+    )
+    return [
+        (
+            "Embeddings: "
+            f"provider={status.provider} | model={status.model} | status={status.status}"
+        ),
+        f"Retrieval status: {status.detail}",
+    ]
+
+
+def handle_embeddings_command(args: str, ctx: ChatContext) -> list[str]:
+    parts = [part for part in args.strip().split() if part]
+    if not parts:
+        return _format_embeddings_status(ctx) + [
+            "Usage: /embeddings [voyage|mistral] [--save]",
+        ]
+
+    save = "--save" in parts
+    parts = [part for part in parts if part != "--save"]
+    if not parts:
+        return ["Usage: /embeddings [voyage|mistral] [--save]"]
+
+    provider = parts[0].strip().lower()
+    if provider not in {"voyage", "mistral"}:
+        return [f"Invalid embeddings provider '{provider}'. Use: voyage, mistral"]
+
+    ctx.cfg.embeddings_provider = provider
+    ctx.runtime.engine.config.embeddings_provider = provider
+    lines = _format_embeddings_status(ctx)
+    if save:
+        settings = ctx.settings_store.load()
+        settings.embeddings_provider = provider
+        ctx.settings_store.save(settings)
+        lines.append("Saved as workspace default.")
+    return lines
+
+
 def handle_chrome_command(args: str, ctx: ChatContext) -> list[str]:
     from .builder import build_engine
 
@@ -472,7 +517,11 @@ def dispatch_slash_command(
         model_name = _get_model_display_name(ctx.runtime.engine)
         effort = ctx.cfg.reasoning_effort or "(off)"
         mode = _get_mode_label(ctx.cfg)
-        emit(f"Provider: {ctx.cfg.provider} | Model: {model_name} | Reasoning: {effort} | Mode: {mode}")
+        emit(
+            "Provider: "
+            f"{ctx.cfg.provider} | Model: {model_name} | Reasoning: {effort} | "
+            f"Embeddings: {ctx.cfg.embeddings_provider} | Mode: {mode}"
+        )
         tokens = ctx.runtime.engine.session_tokens
         if tokens:
             for mname, counts in tokens.items():
@@ -484,6 +533,8 @@ def dispatch_slash_command(
         else:
             emit("  Tokens: (none yet)")
         for line in _format_chrome_status(ctx):
+            emit(f"  {line}")
+        for line in _format_embeddings_status(ctx):
             emit(f"  {line}")
         return "handled"
     if command == "/clear":
@@ -497,6 +548,12 @@ def dispatch_slash_command(
     if command.startswith("/reasoning"):
         cmd_args = command[len("/reasoning"):].strip()
         lines = handle_reasoning_command(cmd_args, ctx)
+        for line in lines:
+            emit(line)
+        return "handled"
+    if command.startswith("/embeddings"):
+        cmd_args = command[len("/embeddings"):].strip()
+        lines = handle_embeddings_command(cmd_args, ctx)
         for line in lines:
             emit(line)
         return "handled"

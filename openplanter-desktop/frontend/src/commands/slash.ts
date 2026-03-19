@@ -4,6 +4,7 @@ import { openSession } from "../api/invoke";
 import { handleModelCommand, type CommandResult } from "./model";
 import { CHROME_USAGE, formatChromeStatusLines, handleChromeCommand } from "./chrome";
 import { handleReasoningCommand } from "./reasoning";
+import { handleEmbeddingsCommand } from "./embeddings";
 import { handleWebSearchCommand } from "./webSearch";
 import { handleZaiPlanCommand } from "./zaiPlan";
 import { handleInitCommand } from "./init";
@@ -38,6 +39,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /zai-plan          Show current Z.AI endpoint family",
           "  /zai-plan <plan>   Set Z.AI endpoint family (paygo, coding)",
           "  /zai-plan <plan> --save  Set and persist",
+          "  /embeddings        Show current embeddings provider and retrieval status",
+          "  /embeddings <provider>  Set embeddings provider (voyage, mistral)",
+          "  /embeddings <provider> --save  Set and persist",
           "  /web-search        Show current web search provider",
           "  /web-search <provider>  Set web search provider (exa, firecrawl, brave, tavily)",
           "  /web-search <provider> --save  Set and persist",
@@ -105,6 +109,8 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Provider:    ${s.provider || "auto"}`,
           `Model:       ${s.model || "—"}`,
           `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
+          `Embeddings:  ${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})`,
+          `Retrieval:   ${s.embeddingsStatusDetail}`,
           `Web search:  ${s.webSearchProvider || "exa"}`,
           `Continuity:  ${s.continuityMode || "auto"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
@@ -129,6 +135,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/zai-plan":
       return handleZaiPlanCommand(args);
+
+    case "/embeddings":
+      return handleEmbeddingsCommand(args);
 
     case "/web-search":
       return handleWebSearchCommand(args);

@@ -25,6 +25,9 @@ export function createStatusBar(): HTMLElement {
   const continuityEl = document.createElement("span");
   continuityEl.className = "continuity";
 
+  const embeddingsEl = document.createElement("span");
+  embeddingsEl.className = "embeddings";
+
   const modeEl = document.createElement("span");
   modeEl.className = "mode";
 
@@ -39,6 +42,7 @@ export function createStatusBar(): HTMLElement {
   bar.appendChild(reasoningEl);
   bar.appendChild(zaiPlanEl);
   bar.appendChild(continuityEl);
+  bar.appendChild(embeddingsEl);
   bar.appendChild(modeEl);
   bar.appendChild(sessionEl);
   bar.appendChild(tokensEl);
@@ -53,6 +57,7 @@ export function createStatusBar(): HTMLElement {
     zaiPlanEl.textContent =
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
+    embeddingsEl.textContent = `emb:${s.embeddingsProvider || "voyage"}:${s.embeddingsStatus || "disabled"}`;
     modeEl.textContent = formatModeLabel(
       s.recursive,
       s.recursionPolicy,

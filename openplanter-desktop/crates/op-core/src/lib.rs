@@ -6,6 +6,7 @@ pub mod engine;
 pub mod events;
 pub mod model;
 pub mod prompts;
+pub mod retrieval;
 pub mod session;
 pub mod settings;
 pub mod tools;

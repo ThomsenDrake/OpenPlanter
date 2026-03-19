@@ -21,6 +21,7 @@ from .investigation_state import (
     state_to_legacy_projection,
     upsert_legacy_observations,
 )
+from .retrieval import build_retrieval_packet
 from .replay_log import ReplayLogger
 
 EventCallback = Callable[[str], None]
@@ -536,6 +537,18 @@ class SessionRuntime:
         question_reasoning_packet = build_question_reasoning_packet(typed_state)
         if not _has_reasoning_content(question_reasoning_packet):
             question_reasoning_packet = None
+        retrieval_result = build_retrieval_packet(
+            workspace=self.store.workspace,
+            session_dir=self.store._session_dir(self.session_id),
+            session_root_dir=self.store.session_root_dir,
+            objective=objective,
+            question_reasoning_packet=question_reasoning_packet,
+            embeddings_provider=self.engine.config.embeddings_provider,
+            voyage_api_key=self.engine.config.voyage_api_key,
+            mistral_api_key=self.engine.config.mistral_api_key,
+            on_event=_on_event,
+        )
+        _on_event(f"[retrieval] {retrieval_result.detail}")
 
         result, updated_context = self.engine.solve_with_context(
             objective=objective,
@@ -546,6 +559,7 @@ class SessionRuntime:
             replay_logger=replay_logger,
             turn_history=self.turn_history,
             question_reasoning_packet=question_reasoning_packet,
+            retrieval_packet=retrieval_result.packet,
         )
         self.context = updated_context
 

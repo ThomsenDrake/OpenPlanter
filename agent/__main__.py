@@ -9,6 +9,7 @@ from pathlib import Path
 from .builder import _fetch_models_for_provider, build_engine, infer_provider_for_model
 from .config import (
     AgentConfig,
+    normalize_embeddings_provider,
     normalize_zai_plan,
     resolve_anthropic_api_key,
     resolve_openai_api_key,
@@ -24,8 +25,13 @@ from .credentials import (
     prompt_for_credentials,
 )
 from .model import ModelError
+from .retrieval import build_embeddings_status
 from .runtime import SessionError, SessionRuntime, SessionStore
-from .settings import PersistentSettings, SettingsStore, normalize_reasoning_effort
+from .settings import (
+    PersistentSettings,
+    SettingsStore,
+    normalize_reasoning_effort,
+)
 from .tui import ChatContext, _clip_event, _get_model_display_name, dispatch_slash_command, run_rich_repl
 from .workspace_resolution import WorkspaceResolutionError, resolve_startup_workspace
 
@@ -112,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--web-search-provider",
         choices=["exa", "firecrawl", "brave", "tavily"],
         help="Web search backend provider.",
+    )
+    parser.add_argument(
+        "--embeddings-provider",
+        choices=["voyage", "mistral"],
+        help="Embeddings backend provider for retrieval.",
     )
     parser.add_argument(
         "--chrome-mcp",
@@ -484,6 +495,9 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
         cfg.web_search_provider = args.web_search_provider
     if cfg.web_search_provider not in {"exa", "firecrawl", "brave", "tavily"}:
         cfg.web_search_provider = "exa"
+    if args.embeddings_provider:
+        cfg.embeddings_provider = args.embeddings_provider
+    cfg.embeddings_provider = normalize_embeddings_provider(cfg.embeddings_provider)
     if args.reasoning_effort:
         cfg.reasoning_effort = None if args.reasoning_effort == "none" else args.reasoning_effort
     if args.chrome_mcp_enabled is not None:
@@ -571,7 +585,6 @@ def _apply_persistent_settings(
     if args.default_model_ollama is not None:
         settings.default_model_ollama = args.default_model_ollama.strip() or None
         changed = True
-
     if changed:
         store.save(settings)
         settings = settings.normalized()
@@ -589,6 +602,12 @@ def _apply_persistent_settings(
         and settings.default_reasoning_effort
     ):
         cfg.reasoning_effort = settings.default_reasoning_effort
+    if (
+        args.embeddings_provider is None
+        and not os.getenv("OPENPLANTER_EMBEDDINGS_PROVIDER")
+        and settings.embeddings_provider
+    ):
+        cfg.embeddings_provider = settings.embeddings_provider
     if (
         args.chrome_mcp_enabled is None
         and os.getenv("OPENPLANTER_CHROME_MCP_ENABLED") is None
@@ -637,6 +656,7 @@ def _print_settings(settings: PersistentSettings) -> None:
     print(f"  default_model_cerebras: {settings.default_model_cerebras or '(unset)'}")
     print(f"  default_model_zai: {settings.default_model_zai or '(unset)'}")
     print(f"  default_model_ollama: {settings.default_model_ollama or '(unset)'}")
+    print(f"  embeddings_provider: {settings.embeddings_provider or '(unset)'}")
     print(f"  chrome_mcp_enabled: {settings.chrome_mcp_enabled if settings.chrome_mcp_enabled is not None else '(unset)'}")
     print(f"  chrome_mcp_auto_connect: {settings.chrome_mcp_auto_connect if settings.chrome_mcp_auto_connect is not None else '(unset)'}")
     print(f"  chrome_mcp_browser_url: {settings.chrome_mcp_browser_url or '(unset)'}")
@@ -792,6 +812,11 @@ def main() -> None:
     engine = build_engine(cfg)
     model_name = _get_model_display_name(engine)
     chrome_status = engine.tools.chrome_mcp_status()
+    embeddings_status = build_embeddings_status(
+        provider=cfg.embeddings_provider,
+        voyage_api_key=cfg.voyage_api_key,
+        mistral_api_key=cfg.mistral_api_key,
+    )
 
     try:
         runtime = SessionRuntime.bootstrap(
@@ -808,6 +833,7 @@ def main() -> None:
         "Provider": cfg.provider,
         "Model": model_name,
         "WebSearch": cfg.web_search_provider,
+        "Embeddings": f"{cfg.embeddings_provider} ({embeddings_status.status})",
     }
     if cfg.provider == "zai":
         startup_info["ZAIPlan"] = cfg.zai_plan
@@ -816,6 +842,7 @@ def main() -> None:
         startup_info["Reasoning"] = cfg.reasoning_effort
     startup_info["Mode"] = "recursive" if cfg.recursive else "flat"
     startup_info["ChromeMCP"] = f"{chrome_status.status}: {chrome_status.detail}"
+    startup_info["Retrieval"] = embeddings_status.detail
     startup_info["Workspace"] = str(cfg.workspace)
     startup_info["WorkspaceSource"] = workspace_resolution.source
     if workspace_resolution.guardrail_action != "none":

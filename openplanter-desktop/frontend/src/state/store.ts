@@ -75,6 +75,9 @@ export interface AppState {
   model: string;
   zaiPlan: string;
   webSearchProvider: string;
+  embeddingsProvider: string;
+  embeddingsStatus: string;
+  embeddingsStatusDetail: string;
   continuityMode: string;
   mistralDocumentAiUseSharedKey: boolean;
   chromeMcpEnabled: boolean;
@@ -124,6 +127,9 @@ export const appState = new Store<AppState>({
   model: "",
   zaiPlan: "paygo",
   webSearchProvider: "exa",
+  embeddingsProvider: "voyage",
+  embeddingsStatus: "disabled",
+  embeddingsStatusDetail: "Retrieval disabled: VOYAGE_API_KEY is not configured for voyage.",
   continuityMode: "auto",
   mistralDocumentAiUseSharedKey: true,
   chromeMcpEnabled: false,

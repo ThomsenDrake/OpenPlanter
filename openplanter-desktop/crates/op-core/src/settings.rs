@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
-    normalize_model_alias, normalize_recursion_policy, normalize_web_search_provider,
+    normalize_embeddings_provider, normalize_model_alias, normalize_recursion_policy,
+    normalize_web_search_provider,
     normalize_zai_plan,
 };
 
@@ -61,6 +62,7 @@ pub struct PersistentSettings {
     pub default_model_ollama: Option<String>,
     pub zai_plan: Option<String>,
     pub web_search_provider: Option<String>,
+    pub embeddings_provider: Option<String>,
     pub continuity_mode: Option<String>,
     pub recursive: Option<bool>,
     pub recursion_policy: Option<String>,
@@ -108,6 +110,10 @@ impl PersistentSettings {
             .web_search_provider
             .as_deref()
             .map(|value| normalize_web_search_provider(Some(value)));
+        let embeddings_provider = self
+            .embeddings_provider
+            .as_deref()
+            .map(|value| normalize_embeddings_provider(Some(value)));
         let continuity_mode = self
             .continuity_mode
             .as_deref()
@@ -144,6 +150,7 @@ impl PersistentSettings {
             default_model_ollama: trim_opt(&self.default_model_ollama),
             zai_plan,
             web_search_provider,
+            embeddings_provider,
             continuity_mode,
             recursive: self.recursive,
             recursion_policy,
@@ -186,6 +193,7 @@ impl PersistentSettings {
         add!(default_model_ollama, "default_model_ollama");
         add!(zai_plan, "zai_plan");
         add!(web_search_provider, "web_search_provider");
+        add!(embeddings_provider, "embeddings_provider");
         add!(continuity_mode, "continuity_mode");
         add!(recursive, "recursive");
         add!(recursion_policy, "recursion_policy");
@@ -232,6 +240,7 @@ impl PersistentSettings {
             default_model_ollama: get_str(obj, "default_model_ollama"),
             zai_plan: get_str(obj, "zai_plan"),
             web_search_provider: get_str(obj, "web_search_provider"),
+            embeddings_provider: get_str(obj, "embeddings_provider"),
             continuity_mode: get_str(obj, "continuity_mode"),
             recursive: normalize_bool(obj.get("recursive"))?,
             recursion_policy: get_str(obj, "recursion_policy"),

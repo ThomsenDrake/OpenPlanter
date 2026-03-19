@@ -43,6 +43,7 @@ pub struct SolveInitialContext {
     pub continuity_mode: Option<String>,
     pub continuity_reason: Option<String>,
     pub question_reasoning_packet: Option<Value>,
+    pub retrieval_packet: Option<Value>,
 }
 
 fn take_curator_phase_checkpoint(
@@ -377,6 +378,9 @@ fn build_initial_user_message(
     }
     if let Some(packet) = initial_context.question_reasoning_packet.clone() {
         payload.insert("question_reasoning_packet".to_string(), packet);
+    }
+    if let Some(packet) = initial_context.retrieval_packet.clone() {
+        payload.insert("retrieval_packet".to_string(), packet);
     }
 
     serde_json::to_string(&payload)
@@ -2707,6 +2711,7 @@ mod tests {
                     "contradictions": [],
                     "evidence_index": {},
                 })),
+                retrieval_packet: None,
             }),
             0,
             "0",
@@ -2755,6 +2760,7 @@ mod tests {
                 continuity_mode: None,
                 continuity_reason: None,
                 question_reasoning_packet: None,
+                retrieval_packet: None,
             }),
             0,
             "0",
@@ -2792,6 +2798,7 @@ mod tests {
                 continuity_mode: Some("continue".to_string()),
                 continuity_reason: Some("follow_up_cue".to_string()),
                 question_reasoning_packet: None,
+                retrieval_packet: None,
             }),
             0,
             "0",
@@ -2828,6 +2835,7 @@ mod tests {
                 continuity_mode: None,
                 continuity_reason: None,
                 question_reasoning_packet: None,
+                retrieval_packet: None,
             }),
             0,
             "0",

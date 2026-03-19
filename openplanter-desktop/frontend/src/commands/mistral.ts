@@ -46,11 +46,18 @@ function formatCredentialState(configured: boolean): string {
 }
 
 function formatMistralStatusLines(status: CredentialStatusMap): string[] {
+  const transcriptionConfigured = status.mistral_transcription ?? false;
+  const transcriptionDirect = status.mistral_transcription_direct ?? false;
+  const transcriptionState = !transcriptionConfigured
+    ? "missing"
+    : transcriptionDirect
+      ? "configured (direct)"
+      : "configured via shared key";
   return [
     `Document AI key mode: ${currentKeyMode()}`,
     `Mistral shared key: ${formatCredentialState(status.mistral ?? false)}`,
     `Document AI override key: ${formatCredentialState(status.mistral_document_ai ?? false)}`,
-    `Transcription key: ${formatCredentialState(status.mistral_transcription ?? false)}`,
+    `Transcription key: ${transcriptionState}`,
   ];
 }
 

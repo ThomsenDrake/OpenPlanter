@@ -58,13 +58,14 @@ describe("handleMistralCommand", () => {
       mistral: true,
       mistral_document_ai: false,
       mistral_transcription: true,
+      mistral_transcription_direct: false,
     }));
 
     const result = await handleMistralCommand("");
     expect(result.lines).toContain("Document AI key mode: shared");
     expect(result.lines).toContain("Mistral shared key: configured");
     expect(result.lines).toContain("Document AI override key: missing");
-    expect(result.lines).toContain("Transcription key: configured");
+    expect(result.lines).toContain("Transcription key: configured via shared key");
     expect(result.lines).toContain(MISTRAL_USAGE);
   });
 
@@ -128,6 +129,7 @@ describe("handleMistralCommand", () => {
         mistral: false,
         mistral_document_ai: false,
         mistral_transcription: true,
+        mistral_transcription_direct: true,
       };
     });
 
