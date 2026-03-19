@@ -7,9 +7,12 @@
 // to replay.jsonl as they stream.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
+use crate::commands::session::append_session_event;
 use op_core::engine::SolveEmitter;
 use op_core::events::{
     CompleteEvent, CompletionMeta, CuratorUpdateEvent, DeltaEvent, DeltaKind, ErrorEvent,
@@ -178,16 +181,21 @@ impl SolveEmitter for TauriEmitter {
 pub struct LoggingEmitter<E: SolveEmitter> {
     inner: E,
     replay: Arc<tokio::sync::Mutex<ReplayLogger>>,
+    session_dir: PathBuf,
     /// Per-conversation-path streaming state used to build replay step summaries.
     step_states: Mutex<HashMap<String, StepCaptureState>>,
     /// Final completion payload emitted during the solve.
-    completion: Mutex<Option<CompletionSnapshot>>,
+    terminal: Mutex<Option<TerminalSnapshot>>,
+    observations: Mutex<Vec<String>>,
+    last_loop_metrics: Mutex<Option<LoopMetrics>>,
 }
 
 /// A tool call being accumulated during streaming.
 struct PendingToolCall {
     name: String,
     key_arg: String,
+    raw_args: String,
+    args_truncated: bool,
     start_time: std::time::Instant,
 }
 
@@ -202,9 +210,29 @@ struct StepCaptureState {
 }
 
 #[derive(Clone)]
-pub struct CompletionSnapshot {
+pub enum TerminalStatus {
+    Final,
+    Partial,
+    Cancelled,
+    Error,
+}
+
+#[derive(Clone)]
+pub struct TerminalSnapshot {
+    pub status: TerminalStatus,
     pub result: String,
     pub loop_metrics: Option<LoopMetrics>,
+    pub completion: Option<CompletionMeta>,
+    pub observations: Vec<String>,
+}
+
+fn terminal_status_label(status: &TerminalStatus) -> &'static str {
+    match status {
+        TerminalStatus::Final => "final",
+        TerminalStatus::Partial => "partial",
+        TerminalStatus::Cancelled => "cancelled",
+        TerminalStatus::Error => "error",
+    }
 }
 
 /// Key argument names for tool call display (mirrors frontend KEY_ARGS).
@@ -276,22 +304,155 @@ fn first_informative_value(value: &serde_json::Value) -> Option<String> {
 }
 
 impl<E: SolveEmitter> LoggingEmitter<E> {
-    pub fn new(inner: E, replay: ReplayLogger) -> Self {
+    pub fn new(inner: E, replay: ReplayLogger, session_dir: PathBuf) -> Self {
         Self {
             inner,
             replay: Arc::new(tokio::sync::Mutex::new(replay)),
+            session_dir,
             step_states: Mutex::new(HashMap::new()),
-            completion: Mutex::new(None),
+            terminal: Mutex::new(None),
+            observations: Mutex::new(Vec::new()),
+            last_loop_metrics: Mutex::new(None),
         }
     }
 
-    pub fn take_completion(&self) -> Option<CompletionSnapshot> {
-        self.completion.lock().unwrap().take()
+    pub fn take_terminal_snapshot(&self) -> Option<TerminalSnapshot> {
+        self.terminal.lock().unwrap().take()
+    }
+
+    fn current_observations(&self) -> Vec<String> {
+        self.observations.lock().unwrap().clone()
+    }
+
+    fn store_terminal_snapshot(&self, snapshot: TerminalSnapshot) -> bool {
+        let mut terminal = self.terminal.lock().unwrap();
+        if terminal.is_some() {
+            return false;
+        }
+        *terminal = Some(snapshot);
+        true
+    }
+
+    fn push_observation(&self, message: String) {
+        let mut observations = self.observations.lock().unwrap();
+        observations.push(message);
+        if observations.len() > 400 {
+            let drain_count = observations.len() - 400;
+            observations.drain(0..drain_count);
+        }
+    }
+
+    fn append_event_value(&self, event_type: &str, payload: serde_json::Value) {
+        if let Err(err) = append_session_event(&self.session_dir, event_type, payload) {
+            eprintln!("[bridge] failed to append {event_type} event: {err}");
+        }
+    }
+
+    fn write_patch_artifact(
+        &self,
+        depth: u32,
+        step: u32,
+        index: usize,
+        patch_text: &str,
+    ) -> Option<String> {
+        let patch_dir = self.session_dir.join("artifacts").join("patches");
+        if let Err(err) = fs::create_dir_all(&patch_dir) {
+            eprintln!("[bridge] failed to create patch artifact dir: {err}");
+            return None;
+        }
+        let name = format!("patch-d{depth}-s{step}-{}.patch", index + 1);
+        let path = patch_dir.join(&name);
+        if let Err(err) = fs::write(&path, patch_text) {
+            eprintln!("[bridge] failed to write patch artifact: {err}");
+            return None;
+        }
+        Some(format!("artifacts/patches/{name}"))
+    }
+
+    fn flush_partial_replay_on_cancel(&self) {
+        let pending = {
+            let mut step_states = self.step_states.lock().unwrap();
+            step_states.drain().collect::<Vec<_>>()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let replay = self.replay.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut replay = replay.lock().await;
+                for (conversation_path, state) in pending {
+                    let preview =
+                        format_model_preview(&state.streaming_buf, state.streaming_truncated)
+                            .unwrap_or_else(|| "Task cancelled.".to_string());
+                    let step_tools: Vec<StepToolCallEntry> = state
+                        .step_tool_calls
+                        .iter()
+                        .map(|tc| StepToolCallEntry {
+                            name: tc.name.clone(),
+                            key_arg: tc.key_arg.clone(),
+                            elapsed: tc.start_time.elapsed().as_millis() as u64,
+                        })
+                        .collect();
+                    let entry = ReplayEntry {
+                        seq: 0,
+                        timestamp: String::new(),
+                        role: "assistant-partial".into(),
+                        content: preview.clone(),
+                        tool_name: None,
+                        is_rendered: Some(false),
+                        step_number: None,
+                        step_depth: None,
+                        conversation_path: Some(conversation_path),
+                        step_tokens_in: None,
+                        step_tokens_out: None,
+                        step_elapsed: None,
+                        step_model_preview: Some(preview),
+                        step_tool_calls: if step_tools.is_empty() {
+                            None
+                        } else {
+                            Some(step_tools)
+                        },
+                    };
+                    if let Err(err) = replay.append(entry).await {
+                        eprintln!("[bridge] failed to log cancel partial replay: {err}");
+                    }
+                }
+            });
+        });
+    }
+
+    fn append_replay_entry(&self, entry: ReplayEntry, context: &'static str) {
+        let replay = self.replay.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if let Err(err) = replay.lock().await.append(entry).await {
+                    eprintln!("[bridge] failed to log {context}: {err}");
+                }
+            });
+        });
+    }
+
+    fn terminal_payload(
+        &self,
+        status: &TerminalStatus,
+        result: &str,
+        loop_metrics: Option<&LoopMetrics>,
+        completion: Option<&CompletionMeta>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "status": terminal_status_label(status),
+            "text": result,
+            "loop_metrics": loop_metrics,
+            "completion": completion,
+        })
     }
 }
 
 impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
     fn emit_trace(&self, message: &str) {
+        self.push_observation(format!("[trace] {message}"));
+        self.append_event_value("trace", serde_json::json!({ "message": message }));
         self.inner.emit_trace(message);
     }
 
@@ -318,6 +479,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                 state.step_tool_calls.push(PendingToolCall {
                     name: tool_name,
                     key_arg: String::new(),
+                    raw_args: String::new(),
+                    args_truncated: false,
                     start_time: std::time::Instant::now(),
                 });
             }
@@ -328,8 +491,11 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                     MAX_TOOL_ARGS_CAPTURE_CHARS,
                     &mut state.current_args_truncated,
                 );
-                if let Some(key_arg) =
-                    extract_key_arg(&state.current_tool, &state.current_args_buf)
+                if let Some(last) = state.step_tool_calls.last_mut() {
+                    last.raw_args = state.current_args_buf.clone();
+                    last.args_truncated = state.current_args_truncated;
+                }
+                if let Some(key_arg) = extract_key_arg(&state.current_tool, &state.current_args_buf)
                 {
                     if let Some(last) = state.step_tool_calls.last_mut() {
                         last.key_arg = key_arg;
@@ -355,8 +521,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             .remove(&conversation_path)
             .unwrap_or_default();
 
-        let model_preview =
-            format_model_preview(&state.streaming_buf, state.streaming_truncated);
+        let model_preview = format_model_preview(&state.streaming_buf, state.streaming_truncated);
 
         let step_tools: Vec<StepToolCallEntry> = state
             .step_tool_calls
@@ -381,7 +546,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             step_tokens_in: Some(event.tokens.input_tokens),
             step_tokens_out: Some(event.tokens.output_tokens),
             step_elapsed: Some(event.elapsed_ms),
-            step_model_preview: model_preview,
+            step_model_preview: model_preview.clone(),
             step_tool_calls: if step_tools.is_empty() {
                 None
             } else {
@@ -389,15 +554,82 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             },
         };
 
-        // Async file I/O — use block_in_place only for this
-        let replay = self.replay.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = replay.lock().await.append(entry).await {
-                    eprintln!("[bridge] failed to log step: {e}");
-                }
-            });
+        self.append_replay_entry(entry, "step");
+
+        let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| {
+            serde_json::json!({
+                "depth": event.depth,
+                "step": event.step,
+                "is_final": event.is_final,
+            })
         });
+        if let serde_json::Value::Object(ref mut obj) = payload {
+            obj.insert(
+                "step_model_preview".to_string(),
+                model_preview
+                    .as_ref()
+                    .map(|value| serde_json::Value::String(value.clone()))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            obj.insert(
+                "step_tool_calls".to_string(),
+                serde_json::to_value(
+                    &state
+                        .step_tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "name": tc.name.clone(),
+                                "key_arg": tc.key_arg.clone(),
+                                "args_truncated": tc.args_truncated,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        self.append_event_value("step", payload);
+
+        let mut patch_index = 0usize;
+        for tc in &state.step_tool_calls {
+            if tc.name != "apply_patch" || tc.args_truncated || tc.raw_args.trim().is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&tc.raw_args) else {
+                continue;
+            };
+            let Some(patch_text) = value.get("patch").and_then(|item| item.as_str()) else {
+                continue;
+            };
+            if patch_text.trim().is_empty() {
+                continue;
+            }
+            if let Some(path) =
+                self.write_patch_artifact(event.depth, event.step, patch_index, patch_text)
+            {
+                self.append_event_value(
+                    "artifact",
+                    serde_json::json!({
+                        "kind": "patch",
+                        "path": path,
+                        "depth": event.depth,
+                        "step": event.step,
+                        "tool": "apply_patch",
+                    }),
+                );
+            }
+            patch_index += 1;
+        }
+
+        if let Some(preview) = model_preview.as_ref() {
+            self.push_observation(format!(
+                "[step d{} s{}] {}",
+                event.depth,
+                event.step,
+                preview_text(preview, 400)
+            ));
+        }
 
         self.inner.emit_step(event);
     }
@@ -408,10 +640,20 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         loop_metrics: Option<LoopMetrics>,
         completion: Option<CompletionMeta>,
     ) {
-        *self.completion.lock().unwrap() = Some(CompletionSnapshot {
-            result: result.to_string(),
-            loop_metrics: loop_metrics.clone(),
-        });
+        *self.last_loop_metrics.lock().unwrap() = loop_metrics.clone();
+        let status = if completion
+            .as_ref()
+            .is_some_and(|meta| meta.kind.eq_ignore_ascii_case("partial"))
+        {
+            TerminalStatus::Partial
+        } else {
+            TerminalStatus::Final
+        };
+        self.push_observation(format!(
+            "[result {}] {}",
+            terminal_status_label(&status),
+            preview_text(result, 400)
+        ));
         let entry = ReplayEntry {
             seq: 0,
             timestamp: String::new(),
@@ -429,20 +671,82 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             step_tool_calls: None,
         };
 
-        // Async file I/O
-        let replay = self.replay.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = replay.lock().await.append(entry).await {
-                    eprintln!("[bridge] failed to log complete: {e}");
-                }
-            });
-        });
+        self.append_replay_entry(entry, "complete");
+
+        let snapshot = TerminalSnapshot {
+            status: status.clone(),
+            result: result.to_string(),
+            loop_metrics: loop_metrics.clone(),
+            completion: completion.clone(),
+            observations: self.current_observations(),
+        };
+        if self.store_terminal_snapshot(snapshot) {
+            self.append_event_value(
+                "result",
+                self.terminal_payload(&status, result, loop_metrics.as_ref(), completion.as_ref()),
+            );
+        }
 
         self.inner.emit_complete(result, loop_metrics, completion);
     }
 
     fn emit_error(&self, message: &str) {
+        self.push_observation(format!("[error] {message}"));
+        let is_cancelled = message == "Cancelled";
+        let status = if is_cancelled {
+            TerminalStatus::Cancelled
+        } else {
+            TerminalStatus::Error
+        };
+        let result_text = if is_cancelled {
+            "Task cancelled.".to_string()
+        } else {
+            message.to_string()
+        };
+        let mut metrics = self.last_loop_metrics.lock().unwrap().clone();
+        if is_cancelled {
+            self.flush_partial_replay_on_cancel();
+            if metrics.is_none() {
+                metrics = Some(LoopMetrics::default());
+            }
+            if let Some(ref mut current) = metrics {
+                if current.termination_reason.is_empty() {
+                    current.termination_reason = "cancelled".to_string();
+                }
+            }
+            self.append_replay_entry(
+                ReplayEntry {
+                    seq: 0,
+                    timestamp: String::new(),
+                    role: "assistant-cancelled".into(),
+                    content: result_text.clone(),
+                    tool_name: None,
+                    is_rendered: Some(false),
+                    step_number: None,
+                    step_depth: None,
+                    conversation_path: None,
+                    step_tokens_in: None,
+                    step_tokens_out: None,
+                    step_elapsed: None,
+                    step_model_preview: None,
+                    step_tool_calls: None,
+                },
+                "cancelled",
+            );
+        }
+        let snapshot = TerminalSnapshot {
+            status: status.clone(),
+            result: result_text.clone(),
+            loop_metrics: metrics.clone(),
+            completion: None,
+            observations: self.current_observations(),
+        };
+        if self.store_terminal_snapshot(snapshot) {
+            self.append_event_value(
+                "result",
+                self.terminal_payload(&status, &result_text, metrics.as_ref(), None),
+            );
+        }
         self.inner.emit_error(message);
     }
 
@@ -455,11 +759,16 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         metrics: LoopMetrics,
         is_final: bool,
     ) {
+        *self.last_loop_metrics.lock().unwrap() = Some(metrics.clone());
         self.inner
             .emit_loop_health(depth, step, conversation_path, phase, metrics, is_final);
     }
 
     fn emit_curator_update(&self, summary: &str, files_changed: u32) {
+        self.push_observation(format!(
+            "[curator] {} ({files_changed} files)",
+            preview_text(summary, 300)
+        ));
         // Log curator update to replay
         let entry = ReplayEntry {
             seq: 0,
@@ -478,14 +787,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             step_tool_calls: None,
         };
 
-        let replay = self.replay.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = replay.lock().await.append(entry).await {
-                    eprintln!("[bridge] failed to log curator update: {e}");
-                }
-            });
-        });
+        self.append_replay_entry(entry, "curator update");
 
         self.inner.emit_curator_update(summary, files_changed);
     }
@@ -514,7 +816,7 @@ mod tests {
     async fn test_logging_emitter_persists_replay() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay);
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
         let token = CancellationToken::new();
 
         demo_solve("Test persistence", &emitter, token).await;
@@ -549,7 +851,7 @@ mod tests {
     async fn test_logging_emitter_cancel_no_crash() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay);
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
         let token = CancellationToken::new();
         token.cancel();
 
@@ -586,7 +888,7 @@ mod tests {
             .unwrap();
 
         // 2. Run demo_solve through LoggingEmitter
-        let emitter = LoggingEmitter::new(NullEmitter, replay);
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
         let token = CancellationToken::new();
         demo_solve("Roundtrip test", &emitter, token).await;
 
@@ -635,7 +937,7 @@ mod tests {
         let replay = ReplayLogger::new(tmp.path());
         let inner = CapturingEmitter::default();
         let deltas = inner.deltas.clone();
-        let emitter = LoggingEmitter::new(inner, replay);
+        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf());
         let big_text = "x".repeat(MAX_STEP_MODEL_PREVIEW_CHARS + 256);
 
         emitter.emit_delta(DeltaEvent {
@@ -674,7 +976,7 @@ mod tests {
         let replay = ReplayLogger::new(tmp.path());
         let inner = CapturingEmitter::default();
         let deltas = inner.deltas.clone();
-        let emitter = LoggingEmitter::new(inner, replay);
+        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf());
         let filler = "x".repeat(MAX_TOOL_ARGS_CAPTURE_CHARS + 512);
 
         emitter.emit_delta(DeltaEvent {
@@ -725,7 +1027,7 @@ mod tests {
     async fn test_logging_emitter_keeps_root_buffers_when_child_step_arrives() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay);
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
 
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
@@ -781,5 +1083,93 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(tool_calls[0].key_arg, "root.txt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_complete_records_terminal_snapshot_and_result_event() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+
+        emitter.emit_complete(
+            "final text",
+            Some(LoopMetrics {
+                steps: 2,
+                termination_reason: "success".into(),
+                ..LoopMetrics::default()
+            }),
+            Some(CompletionMeta {
+                kind: "final".into(),
+                reason: "final_answer".into(),
+                steps_used: 2,
+                max_steps: 4,
+                extensions_granted: 0,
+                extension_block_steps: 0,
+                extension_max_blocks: 0,
+            }),
+        );
+
+        let snapshot = emitter.take_terminal_snapshot().expect("terminal snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Final));
+        assert_eq!(snapshot.result, "final text");
+        assert_eq!(
+            snapshot.loop_metrics.as_ref().map(|metrics| metrics.steps),
+            Some(2)
+        );
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"type\":\"result\""));
+        assert!(events.contains("\"status\":\"final\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_error_cancelled_flushes_partial_replay_and_result_event() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::Text,
+            text: "drafting".into(),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "write_file".into(),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"path":"draft.txt","content":"hello"}"#.into(),
+        });
+        emitter.emit_error("Cancelled");
+
+        let snapshot = emitter
+            .take_terminal_snapshot()
+            .expect("cancelled snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Cancelled));
+        assert_eq!(snapshot.result, "Task cancelled.");
+        assert_eq!(
+            snapshot
+                .loop_metrics
+                .as_ref()
+                .map(|metrics| metrics.termination_reason.as_str()),
+            Some("cancelled")
+        );
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        assert!(
+            entries.iter().any(
+                |entry| entry.role == "assistant-partial" && entry.content.contains("drafting")
+            )
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.role == "assistant-cancelled"
+                    && entry.content == "Task cancelled.")
+        );
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"type\":\"result\""));
+        assert!(events.contains("\"status\":\"cancelled\""));
     }
 }

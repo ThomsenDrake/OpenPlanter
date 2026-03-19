@@ -232,6 +232,9 @@ class StepProgressRecord:
     step_signature: str
     tool_count: int
     failed_tool_step: bool
+    final_rejection: bool = False
+    rewrite_only_violation: bool = False
+    post_finalization_artifact_churn: bool = False
     successful_action_signatures: set[str] = field(default_factory=set)
     state_delta_signatures: set[str] = field(default_factory=set)
     completed_previews: list[str] = field(default_factory=list)
@@ -319,6 +322,30 @@ def _build_step_progress_record(
     return record
 
 
+def _special_step_progress_record(
+    step: int,
+    phase: str,
+    *,
+    final_rejection: bool = False,
+    rewrite_only_violation: bool = False,
+    post_finalization_artifact_churn: bool = False,
+) -> StepProgressRecord:
+    return StepProgressRecord(
+        step=step,
+        phase=phase,
+        step_signature=(
+            f"special|final_rejection={int(final_rejection)}"
+            f"|rewrite_only_violation={int(rewrite_only_violation)}"
+            f"|artifact_churn={int(post_finalization_artifact_churn)}"
+        ),
+        tool_count=0,
+        failed_tool_step=False,
+        final_rejection=final_rejection,
+        rewrite_only_violation=rewrite_only_violation,
+        post_finalization_artifact_churn=post_finalization_artifact_churn,
+    )
+
+
 def _evaluate_budget_extension(
     records: list[StepProgressRecord],
     *,
@@ -347,10 +374,18 @@ def _evaluate_budget_extension(
     recent_action_signatures: set[str] = set()
     recent_state_delta_signatures: set[str] = set()
     has_build_or_finalize = False
+    has_finalization_churn = False
     for record in window:
         recent_action_signatures.update(record.successful_action_signatures)
         recent_state_delta_signatures.update(record.state_delta_signatures)
         has_build_or_finalize = has_build_or_finalize or record.phase in {"build", "finalize"}
+        has_finalization_churn = has_finalization_churn or any(
+            (
+                record.final_rejection,
+                record.rewrite_only_violation,
+                record.post_finalization_artifact_churn,
+            )
+        )
 
     novel_action_signatures = recent_action_signatures - prior_action_signatures
     positive_signals = 0
@@ -368,6 +403,8 @@ def _evaluate_budget_extension(
         blockers.append("high_failure_ratio")
     if recon_streak >= 4:
         blockers.append("recon_streak")
+    if has_finalization_churn:
+        blockers.append("finalization_churn")
 
     return {
         "eligible": not blockers and positive_signals >= _MIN_EXTENSION_PROGRESS_SIGNALS,
@@ -377,6 +414,7 @@ def _evaluate_budget_extension(
         "novel_action_count": len(novel_action_signatures),
         "state_delta_count": len(recent_state_delta_signatures),
         "has_build_or_finalize": has_build_or_finalize,
+        "has_finalization_churn": has_finalization_churn,
         "positive_signals": positive_signals,
         "blockers": blockers,
     }
@@ -395,6 +433,8 @@ def _suggest_next_actions(
         actions.append("Triage the failing tool calls first so the next run is not dominated by avoidable errors.")
     if "recon_streak" in blockers:
         actions.append("Move from exploration into artifact-building or synthesis before doing more reconnaissance.")
+    if "finalization_churn" in blockers:
+        actions.append("Rewrite the answer from completed work only instead of calling more tools or creating more files.")
     if recent_previews:
         actions.append("Turn the completed findings below into a concrete artifact or summary before resuming deeper work.")
     actions.append(f"Resume the objective with a narrower next slice: {objective}")
@@ -418,12 +458,15 @@ def _render_partial_completion(
             break
     next_actions = _suggest_next_actions(objective, evaluation, recent_previews)
     completed = recent_previews or ["The run gathered additional context but did not converge on a final artifact before the bounded limit."]
-    remaining = (
-        "Finish the deliverable using the completed work below and avoid repeating the stalled loop."
-        if recent_previews
-        else "Finish the deliverable with a narrower plan or a different tactic."
-    )
     reason = str(loop_metrics.get("termination_reason", "budget_no_progress"))
+    if reason == "finalization_stall":
+        remaining = "Rewrite the final answer from the completed work below only. Do not call more tools or create more files."
+    else:
+        remaining = (
+            "Finish the deliverable using the completed work below and avoid repeating the stalled loop."
+            if recent_previews
+            else "Finish the deliverable with a narrower plan or a different tactic."
+        )
     header = (
         f"Partial completion for objective: {objective}\n"
         f"Stopped after {int(loop_metrics.get('steps', 0))} steps "
@@ -646,15 +689,74 @@ class RLMEngine:
     def _objective_allows_meta_final(self, objective: str) -> bool:
         return bool(_META_DELIVERABLE_OBJECTIVE_PATTERN.search(objective))
 
-    def _is_meta_final_text(self, text: str, objective: str = "") -> bool:
+    def _weak_structural_meta_prefix(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in _WEAK_STRUCTURAL_META_PATTERNS)
+
+    def _has_strong_process_meta(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in _STRONG_PROCESS_META_PATTERNS)
+
+    def _substantive_completion_block(self, text: str) -> bool:
         stripped = text.strip()
         if not stripped:
+            return False
+        if self._has_strong_process_meta(stripped):
+            return False
+        lower = stripped.lower()
+        if (
+            stripped.startswith("#")
+            or stripped.startswith("- ")
+            or stripped.startswith("* ")
+            or stripped.startswith("1. ")
+            or lower.startswith("subject:")
+        ):
             return True
-        if any(pattern.search(stripped) for pattern in _STRONG_PROCESS_META_PATTERNS):
-            return True
-        if any(pattern.search(stripped) for pattern in _WEAK_STRUCTURAL_META_PATTERNS):
-            return not self._objective_allows_meta_final(objective)
-        return False
+        return len(stripped) >= 80
+
+    def _split_nonempty_paragraphs(self, text: str) -> list[str]:
+        return [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
+
+    def _classify_final_answer_text(self, text: str, objective: str = "") -> str:
+        stripped = text.strip()
+        if not stripped:
+            return "reject_meta"
+        allows_structural_meta = self._objective_allows_meta_final(objective)
+        has_weak_structural_meta = self._weak_structural_meta_prefix(stripped)
+        has_strong_meta = self._has_strong_process_meta(stripped)
+
+        if has_weak_structural_meta and allows_structural_meta and not has_strong_meta:
+            return "accept"
+
+        paragraphs = self._split_nonempty_paragraphs(stripped)
+        if paragraphs:
+            first = paragraphs[0]
+            leading_meta = len(first) <= 200 and (
+                self._has_strong_process_meta(first) or self._weak_structural_meta_prefix(first)
+            )
+            if leading_meta and any(
+                self._substantive_completion_block(paragraph)
+                for paragraph in paragraphs[1:]
+            ):
+                return "accept"
+
+        for delimiter in ("\n\n", "\n", ":"):
+            idx = stripped.find(delimiter)
+            if idx == -1:
+                continue
+            leading = stripped[: idx + len(delimiter)]
+            rest = stripped[idx + len(delimiter) :].strip()
+            if len(leading) <= 200 and self._has_strong_process_meta(leading):
+                if self._substantive_completion_block(rest) or any(
+                    self._substantive_completion_block(paragraph)
+                    for paragraph in self._split_nonempty_paragraphs(rest)
+                ):
+                    return "accept"
+
+        if has_strong_meta or (has_weak_structural_meta and not allows_structural_meta):
+            return "reject_meta"
+        return "accept"
+
+    def _is_meta_final_text(self, text: str, objective: str = "") -> bool:
+        return self._classify_final_answer_text(text, objective) == "reject_meta"
 
     def _solve_recursive(
         self,
@@ -726,6 +828,8 @@ class RLMEngine:
             "max_recon_streak": 0,
             "guardrail_warnings": 0,
             "final_rejections": 0,
+            "rewrite_only_violations": 0,
+            "finalization_stalls": 0,
             "last_guardrail_streak": 0,
             "budget_extension_enabled": bool(self.config.budget_extension_enabled),
             "budget_extension_block_steps": int(self.config.budget_extension_block_steps),
@@ -737,6 +841,9 @@ class RLMEngine:
             "termination_reason": "",
         }
         step_records: list[StepProgressRecord] = []
+        pending_final_rewrite = False
+        final_rejection_streak = 0
+        rewrite_only_violations = 0
         active_step_budget = self.config.max_steps_per_call
         max_total_steps = self.config.max_steps_per_call + (
             self.config.budget_extension_block_steps * self.config.budget_extension_max_blocks
@@ -786,6 +893,7 @@ class RLMEngine:
                 while True:
                     if self._cancel.is_set():
                         self._emit(f"[d{depth}] cancelled by user", on_event)
+                        loop_metrics["termination_reason"] = "cancelled"
                         self.last_loop_metrics = loop_metrics
                         return "Task cancelled."
                     try:
@@ -906,8 +1014,17 @@ class RLMEngine:
                         ],
                     )
                     continue
-                if self._is_meta_final_text(turn.text, objective):
+                if self._classify_final_answer_text(turn.text, objective) == "reject_meta":
                     loop_metrics["final_rejections"] += 1
+                    final_rejection_streak += 1
+                    pending_final_rewrite = True
+                    step_records.append(
+                        _special_step_progress_record(
+                            step=step,
+                            phase="finalize",
+                            final_rejection=True,
+                        )
+                    )
                     self._emit(
                         f"[d{depth}/s{step}] rejected meta final-answer text; requesting concrete completion",
                         on_event,
@@ -922,7 +1039,31 @@ class RLMEngine:
                         ),
                     )
                     model.append_tool_results(conversation, [rejection_result])
+                    if final_rejection_streak >= 2:
+                        loop_metrics["finalization_stalls"] += 1
+                        loop_metrics["termination_reason"] = "finalization_stall"
+                        self.last_loop_metrics = loop_metrics
+                        return _render_partial_completion(
+                            objective,
+                            loop_metrics,
+                            {
+                                "eligible": False,
+                                "window_size": min(len(step_records), _BUDGET_EXTENSION_WINDOW),
+                                "repeated_signature_streak": 0,
+                                "failure_ratio": 0.0,
+                                "novel_action_count": 0,
+                                "state_delta_count": 0,
+                                "has_build_or_finalize": True,
+                                "has_finalization_churn": True,
+                                "positive_signals": 0,
+                                "blockers": ["finalization_churn"],
+                            },
+                            step_records,
+                        )
                     continue
+                pending_final_rewrite = False
+                final_rejection_streak = 0
+                rewrite_only_violations = 0
                 loop_metrics["phase_counts"]["finalize"] += 1
                 loop_metrics["termination_reason"] = "success"
                 preview = turn.text[:200] + "..." if len(turn.text) > 200 else turn.text
@@ -958,6 +1099,60 @@ class RLMEngine:
                     content="No tool calls and no text in response. Please use a tool or provide a final answer.",
                 )
                 model.append_tool_results(conversation, [empty_result])
+                continue
+
+            if pending_final_rewrite and turn.tool_calls:
+                rewrite_only_violations += 1
+                loop_metrics["rewrite_only_violations"] += 1
+                artifact_churn = any(tc.name in _ARTIFACT_TOOL_NAMES for tc in turn.tool_calls)
+                step_records.append(
+                    _special_step_progress_record(
+                        step=step,
+                        phase="finalize",
+                        rewrite_only_violation=True,
+                        post_finalization_artifact_churn=artifact_churn,
+                    )
+                )
+                self._emit(
+                    f"[d{depth}/s{step}] rewrite-only finalization retry blocked tool calls; requesting plain-text rewrite",
+                    on_event,
+                )
+                model.append_tool_results(
+                    conversation,
+                    [
+                        ToolResult(
+                            tool_call_id="rewrite-only-final",
+                            name="system",
+                            content=(
+                                "Your previous response was process/meta commentary rather than a concrete final answer. "
+                                "Rewrite it from the completed work only: do not call tools, do not create or verify files, "
+                                "and return the direct final deliverable as plain text."
+                            ),
+                            is_error=True,
+                        )
+                    ],
+                )
+                if final_rejection_streak >= 1 and rewrite_only_violations >= 2:
+                    loop_metrics["finalization_stalls"] += 1
+                    loop_metrics["termination_reason"] = "finalization_stall"
+                    self.last_loop_metrics = loop_metrics
+                    return _render_partial_completion(
+                        objective,
+                        loop_metrics,
+                        {
+                            "eligible": False,
+                            "window_size": min(len(step_records), _BUDGET_EXTENSION_WINDOW),
+                            "repeated_signature_streak": 0,
+                            "failure_ratio": 0.0,
+                            "novel_action_count": 0,
+                            "state_delta_count": 0,
+                            "has_build_or_finalize": True,
+                            "has_finalization_churn": True,
+                            "positive_signals": 0,
+                            "blockers": ["finalization_churn"],
+                        },
+                        step_records,
+                    )
                 continue
 
             if force_subtask and (

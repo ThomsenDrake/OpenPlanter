@@ -56,6 +56,19 @@ def _has_reasoning_content(packet: dict[str, Any]) -> bool:
     return any(findings.get(key) for key in ("supported", "contested", "unresolved"))
 
 
+def _result_status(result: str, loop_metrics: dict[str, Any]) -> str:
+    reason = str(loop_metrics.get("termination_reason", "") or "")
+    if reason == "cancelled":
+        return "cancelled"
+    if reason in {"model_error", "time_limit"}:
+        return "error"
+    if reason in {"budget_no_progress", "budget_cap", "finalization_stall"}:
+        return "partial"
+    if result.startswith("Partial completion for objective:"):
+        return "partial"
+    return "final"
+
+
 @dataclass
 class SessionStore:
     workspace: Path
@@ -406,6 +419,8 @@ class SessionRuntime:
         loop_metrics.setdefault("tool_calls", 0)
         loop_metrics.setdefault("guardrail_warnings", 0)
         loop_metrics.setdefault("final_rejections", 0)
+        loop_metrics.setdefault("rewrite_only_violations", 0)
+        loop_metrics.setdefault("finalization_stalls", 0)
         loop_metrics.setdefault("extensions_granted", 0)
         loop_metrics.setdefault("extension_eligible_checks", 0)
         loop_metrics.setdefault("extension_denials_no_progress", 0)
@@ -543,6 +558,8 @@ class SessionRuntime:
                 "tool_calls": 0,
                 "guardrail_warnings": 0,
                 "final_rejections": 0,
+                "rewrite_only_violations": 0,
+                "finalization_stalls": 0,
                 "extensions_granted": 0,
                 "extension_eligible_checks": 0,
                 "extension_denials_no_progress": 0,
@@ -556,6 +573,8 @@ class SessionRuntime:
         self.loop_metrics["tool_calls"] = int(self.loop_metrics.get("tool_calls", 0)) + int(latest_loop_metrics.get("tool_calls", 0))
         self.loop_metrics["guardrail_warnings"] = int(self.loop_metrics.get("guardrail_warnings", 0)) + int(latest_loop_metrics.get("guardrail_warnings", 0))
         self.loop_metrics["final_rejections"] = int(self.loop_metrics.get("final_rejections", 0)) + int(latest_loop_metrics.get("final_rejections", 0))
+        self.loop_metrics["rewrite_only_violations"] = int(self.loop_metrics.get("rewrite_only_violations", 0)) + int(latest_loop_metrics.get("rewrite_only_violations", 0))
+        self.loop_metrics["finalization_stalls"] = int(self.loop_metrics.get("finalization_stalls", 0)) + int(latest_loop_metrics.get("finalization_stalls", 0))
         self.loop_metrics["extensions_granted"] = int(self.loop_metrics.get("extensions_granted", 0)) + int(latest_loop_metrics.get("extensions_granted", 0))
         self.loop_metrics["extension_eligible_checks"] = int(self.loop_metrics.get("extension_eligible_checks", 0)) + int(latest_loop_metrics.get("extension_eligible_checks", 0))
         self.loop_metrics["extension_denials_no_progress"] = int(self.loop_metrics.get("extension_denials_no_progress", 0)) + int(latest_loop_metrics.get("extension_denials_no_progress", 0))
@@ -590,11 +609,16 @@ class SessionRuntime:
         self.turn_history.append(summary)
         if len(self.turn_history) > self.max_turn_summaries:
             self.turn_history = self.turn_history[-self.max_turn_summaries:]
+        status = _result_status(result, latest_loop_metrics)
         try:
             self.store.append_event(
                 self.session_id,
                 "result",
-                {"text": result},
+                {
+                    "text": result,
+                    "status": status,
+                    "loop_metrics": latest_loop_metrics,
+                },
             )
         except OSError:
             pass

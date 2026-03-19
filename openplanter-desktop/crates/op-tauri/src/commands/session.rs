@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use op_core::events::SessionInfo;
 use op_core::session::replay::{ReplayEntry, ReplayLogger};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -74,6 +75,28 @@ pub fn create_session(dir: &Path) -> Result<SessionInfo, std::io::Error> {
     Ok(info)
 }
 
+pub fn append_session_event(
+    session_dir: &Path,
+    event_type: &str,
+    payload: Value,
+) -> Result<(), std::io::Error> {
+    let event_path = session_dir.join("events.jsonl");
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": event_type,
+        "payload": payload,
+    });
+    let mut line =
+        serde_json::to_string(&event).map_err(|e| std::io::Error::other(e.to_string()))?;
+    line.push('\n');
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(event_path)?;
+    file.write_all(line.as_bytes())
+}
+
 /// List recent sessions by scanning session directories.
 #[tauri::command]
 pub async fn list_sessions(
@@ -103,6 +126,11 @@ pub async fn open_session(
                     serde_json::from_str(&content).map_err(|e| e.to_string())?;
                 let mut session_lock = state.session_id.lock().await;
                 *session_lock = Some(info.id.clone());
+                let _ = append_session_event(
+                    &dir.join(session_id),
+                    "session_started",
+                    serde_json::json!({"resume": true, "created_new": false}),
+                );
                 return Ok(info);
             }
         }
@@ -111,6 +139,11 @@ pub async fn open_session(
     let info = create_session(&dir).map_err(|e| e.to_string())?;
     let mut session_lock = state.session_id.lock().await;
     *session_lock = Some(info.id.clone());
+    let _ = append_session_event(
+        &dir.join(&info.id),
+        "session_started",
+        serde_json::json!({"resume": false, "created_new": true}),
+    );
     Ok(info)
 }
 

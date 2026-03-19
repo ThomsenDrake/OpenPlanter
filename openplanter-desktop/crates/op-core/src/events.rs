@@ -51,6 +51,8 @@ pub struct LoopMetrics {
     pub max_recon_streak: u32,
     pub guardrail_warnings: u32,
     pub final_rejections: u32,
+    pub rewrite_only_violations: u32,
+    pub finalization_stalls: u32,
     pub extensions_granted: u32,
     pub extension_eligible_checks: u32,
     pub extension_denials_no_progress: u32,
@@ -96,6 +98,7 @@ pub enum CompletionReason {
     FinalAnswer,
     BudgetNoProgress,
     BudgetCap,
+    FinalizationStall,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -630,6 +633,8 @@ mod tests {
                 max_recon_streak: 1,
                 guardrail_warnings: 0,
                 final_rejections: 1,
+                rewrite_only_violations: 0,
+                finalization_stalls: 0,
                 extensions_granted: 0,
                 extension_eligible_checks: 0,
                 extension_denials_no_progress: 0,

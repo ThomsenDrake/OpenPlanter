@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from conftest import _tc
 from agent.config import AgentConfig
-from agent.engine import RLMEngine, ExternalContext
+from agent.engine import ExternalContext, RLMEngine, StepProgressRecord, _evaluate_budget_extension
 from agent.model import Conversation, ModelTurn, RateLimitError, ScriptedModel, ToolResult
 from agent.tools import WorkspaceTools
 
@@ -115,6 +115,74 @@ class EngineComplexTests(unittest.TestCase):
                 int(engine.last_loop_metrics.get("steps", 0)),
                 cfg.max_steps_per_call + cfg.budget_extension_block_steps * cfg.budget_extension_max_blocks,
             )
+
+    def test_meta_preface_with_real_body_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=2)
+            tools = WorkspaceTools(root=root)
+            final_text = (
+                "Let me provide the final summary:\n\n"
+                "Subject: Final deliverable\n\n"
+                "This run completed the deliverable and the concrete output is ready to use."
+            )
+            model = ScriptedModel(
+                scripted_turns=[ModelTurn(text=final_text, stop_reason="end_turn")]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("accept the real deliverable")
+            self.assertEqual(result, final_text)
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 0)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+
+    def test_rewrite_only_violation_triggers_finalization_stall_without_tool_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="Let me draft the final answer next.", stop_reason="end_turn"),
+                    ModelTurn(tool_calls=[_tc("write_file", path="blocked-a.txt", content="a")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="blocked-b.txt", content="b")]),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("force a rewrite-only retry")
+            self.assertIn("Partial completion for objective", result)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "finalization_stall")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 1)
+            self.assertEqual(engine.last_loop_metrics.get("rewrite_only_violations"), 2)
+            self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 1)
+            self.assertFalse((root / "blocked-a.txt").exists())
+            self.assertFalse((root / "blocked-b.txt").exists())
+
+    def test_budget_extension_eval_blocks_finalization_churn(self) -> None:
+        evaluation = _evaluate_budget_extension(
+            [
+                StepProgressRecord(
+                    step=1,
+                    phase="build",
+                    step_signature="write|a",
+                    tool_count=1,
+                    failed_tool_step=False,
+                    successful_action_signatures={"write|a"},
+                    state_delta_signatures={"write|delta-a"},
+                    completed_previews=["wrote a"],
+                ),
+                StepProgressRecord(
+                    step=2,
+                    phase="finalize",
+                    step_signature="reject-meta",
+                    tool_count=0,
+                    failed_tool_step=False,
+                    final_rejection=True,
+                ),
+            ],
+            recon_streak=0,
+        )
+        self.assertFalse(evaluation["eligible"])
+        self.assertIn("finalization_churn", evaluation["blockers"])
 
     # ------------------------------------------------------------------
     # 2. Nested subtasks at depth 2 (3-level recursion)

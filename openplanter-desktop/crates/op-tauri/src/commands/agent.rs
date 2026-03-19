@@ -5,11 +5,11 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::bridge::{LoggingEmitter, TauriEmitter};
-use crate::commands::session::sessions_dir;
+use crate::bridge::{LoggingEmitter, TauriEmitter, TerminalStatus};
+use crate::commands::session::{append_session_event, sessions_dir};
 use crate::state::AppState;
 use op_core::engine::context::{
-    TurnSummary, append_turn_summary, load_or_migrate_investigation_state, turn_history_from_state,
+    TurnSummary, load_or_migrate_investigation_state, persist_turn_outcome, turn_history_from_state,
 };
 use op_core::engine::investigation_state::{
     build_question_reasoning_packet, has_reasoning_content,
@@ -267,6 +267,13 @@ pub async fn solve(
     if let Err(e) = replay.append(user_entry).await {
         eprintln!("[agent] failed to log user message: {e}");
     }
+    if let Err(err) = append_session_event(
+        &session_dir,
+        "objective",
+        serde_json::json!({ "text": objective.clone() }),
+    ) {
+        eprintln!("[agent] failed to log objective event: {err}");
+    }
 
     // Update metadata: increment turn_count, set last_objective
     if let Err(e) =
@@ -275,7 +282,11 @@ pub async fn solve(
         eprintln!("[agent] failed to update metadata: {e}");
     }
 
-    let emitter = Arc::new(LoggingEmitter::new(TauriEmitter::new(app), replay));
+    let emitter = Arc::new(LoggingEmitter::new(
+        TauriEmitter::new(app),
+        replay,
+        session_dir.clone(),
+    ));
     let cwd = std::env::current_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|_| "<unavailable>".to_string());
@@ -320,24 +331,36 @@ pub async fn solve(
         .await;
 
         if result.is_ok() {
-            if let Some(completion) = emitter.take_completion() {
-                if let Err(err) = append_turn_summary(
-                    &session_dir,
-                    &objective,
-                    &completion.result,
-                    completion
-                        .loop_metrics
-                        .as_ref()
-                        .map(|metrics| metrics.steps)
-                        .unwrap_or(0),
-                    replay_seq_start,
-                    cfg.max_turn_summaries.max(1) as usize,
-                )
-                .await
-                {
-                    emitter.emit_trace(&format!(
-                        "[solve] failed to persist turn summary; continuing without continuity update: {err}"
-                    ));
+            if let Some(terminal) = emitter.take_terminal_snapshot() {
+                let completion_kind = terminal
+                    .completion
+                    .as_ref()
+                    .map(|meta| meta.kind.as_str())
+                    .unwrap_or("");
+                if matches!(
+                    terminal.status,
+                    TerminalStatus::Final | TerminalStatus::Partial | TerminalStatus::Cancelled
+                ) {
+                    if let Err(err) = persist_turn_outcome(
+                        &session_dir,
+                        &objective,
+                        &terminal.result,
+                        terminal
+                            .loop_metrics
+                            .as_ref()
+                            .map(|metrics| metrics.steps)
+                            .unwrap_or(0),
+                        replay_seq_start,
+                        cfg.max_turn_summaries.max(1) as usize,
+                        &terminal.observations,
+                        terminal.loop_metrics.as_ref(),
+                    )
+                    .await
+                    {
+                        emitter.emit_trace(&format!(
+                            "[solve] failed to persist turn summary; completion_kind={completion_kind}; continuing without continuity update: {err}"
+                        ));
+                    }
                 }
             }
         }

@@ -1,11 +1,14 @@
 // External context and turn summary types for multi-turn sessions.
 
+use crate::events::LoopMetrics;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::Path;
 use tokio::fs;
 
 use super::investigation_state::InvestigationState;
+
+const MAX_PERSISTED_OBSERVATIONS: usize = 400;
 
 struct ResolvedInvestigationState {
     state: InvestigationState,
@@ -147,6 +150,29 @@ pub async fn append_turn_summary(
     replay_seq_start: u64,
     max_turn_summaries: usize,
 ) -> std::io::Result<()> {
+    persist_turn_outcome(
+        session_dir,
+        objective,
+        result,
+        steps_used,
+        replay_seq_start,
+        max_turn_summaries,
+        &[],
+        None,
+    )
+    .await
+}
+
+pub async fn persist_turn_outcome(
+    session_dir: &Path,
+    objective: &str,
+    result: &str,
+    steps_used: u32,
+    replay_seq_start: u64,
+    max_turn_summaries: usize,
+    observations: &[String],
+    loop_metrics: Option<&LoopMetrics>,
+) -> std::io::Result<()> {
     let session_id = session_dir
         .file_name()
         .and_then(|value| value.to_str())
@@ -183,8 +209,11 @@ pub async fn append_turn_summary(
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let observations = typed_state.legacy_observations();
-    let loop_metrics = typed_state.legacy.loop_metrics.clone();
+    let observations = merged_observations(&typed_state.legacy_observations(), observations);
+    let loop_metrics = loop_metrics
+        .map(loop_metrics_to_map)
+        .transpose()?
+        .unwrap_or_else(|| typed_state.legacy.loop_metrics.clone());
     let extra_fields = typed_state.legacy.extra_fields.clone();
     typed_state.merge_legacy_updates(
         &observations,
@@ -200,6 +229,32 @@ pub async fn append_turn_summary(
     let legacy_json = serde_json::to_string_pretty(&typed_state.to_legacy_python_projection())
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     fs::write(&legacy_path, legacy_json).await
+}
+
+fn merged_observations(existing: &[String], new: &[String]) -> Vec<String> {
+    let mut merged = existing.to_vec();
+    merged.extend(
+        new.iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+    );
+    if merged.len() > MAX_PERSISTED_OBSERVATIONS {
+        merged = merged.split_off(merged.len() - MAX_PERSISTED_OBSERVATIONS);
+    }
+    merged
+}
+
+fn loop_metrics_to_map(metrics: &LoopMetrics) -> std::io::Result<Map<String, Value>> {
+    serde_json::to_value(metrics)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|value| {
+            value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("loop metrics did not serialize to an object"))
+        })
 }
 
 async fn load_existing_investigation_state(

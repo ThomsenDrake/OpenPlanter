@@ -208,6 +208,8 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
         max_recon_streak: 0,
         guardrail_warnings: 0,
         final_rejections: 0,
+        rewrite_only_violations: 0,
+        finalization_stalls: 0,
         extensions_granted: 0,
         extension_eligible_checks: 0,
         extension_denials_no_progress: 0,
@@ -500,13 +502,14 @@ fn objective_allows_meta_final(objective: &str) -> bool {
         })
 }
 
-fn is_meta_final_text(text: &str, objective: &str) -> bool {
-    let stripped = text.trim();
-    if stripped.is_empty() {
-        return true;
-    }
-    let lower = stripped.to_ascii_lowercase();
-    let weak_structural_meta = [
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalAnswerDisposition {
+    Accept,
+    RejectMeta,
+}
+
+fn weak_structural_meta_prefix(lower: &str) -> bool {
+    [
         "here is my plan",
         "here's my plan",
         "here is the plan",
@@ -519,9 +522,14 @@ fn is_meta_final_text(text: &str, objective: &str) -> bool {
         "here's my analysis",
         "here is the analysis",
         "here's the analysis",
-    ];
-    let padded = format!(" {lower} ");
-    let strong_process_meta = [
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn has_strong_process_meta(text: &str) -> bool {
+    let padded = format!(" {} ", text.to_ascii_lowercase());
+    [
         " i will ",
         " i can ",
         " i should ",
@@ -533,17 +541,89 @@ fn is_meta_final_text(text: &str, objective: &str) -> bool {
         " next, i will ",
         " next i will ",
         " i should start by ",
-    ];
-    if strong_process_meta
-        .iter()
-        .any(|needle| padded.contains(needle))
+    ]
+    .iter()
+    .any(|needle| padded.contains(needle))
+}
+
+fn substantive_completion_block(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if has_strong_process_meta(trimmed) {
+        return false;
+    }
+    if trimmed.starts_with('#')
+        || trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("1. ")
+        || lower.starts_with("subject:")
     {
         return true;
     }
-    if weak_structural_meta.iter().any(|p| lower.starts_with(p)) {
-        return !objective_allows_meta_final(objective);
+    trimmed.chars().count() >= 80
+}
+
+fn split_nonempty_paragraphs<'a>(text: &'a str) -> Vec<&'a str> {
+    text.split("\n\n")
+        .map(str::trim)
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect()
+}
+
+fn classify_final_answer_text(text: &str, objective: &str) -> FinalAnswerDisposition {
+    let stripped = text.trim();
+    if stripped.is_empty() {
+        return FinalAnswerDisposition::RejectMeta;
     }
-    false
+
+    let lower = stripped.to_ascii_lowercase();
+    let allows_structural_meta = objective_allows_meta_final(objective);
+    let has_weak_structural_meta = weak_structural_meta_prefix(&lower);
+    let has_strong_meta = has_strong_process_meta(stripped);
+
+    if has_weak_structural_meta && allows_structural_meta && !has_strong_meta {
+        return FinalAnswerDisposition::Accept;
+    }
+
+    let paragraphs = split_nonempty_paragraphs(stripped);
+    if let Some(first) = paragraphs.first() {
+        let leading_meta = first.chars().count() <= 200
+            && (has_strong_process_meta(first)
+                || weak_structural_meta_prefix(&first.to_ascii_lowercase()));
+        if leading_meta
+            && paragraphs
+                .iter()
+                .skip(1)
+                .any(|paragraph| substantive_completion_block(paragraph))
+        {
+            return FinalAnswerDisposition::Accept;
+        }
+    }
+
+    for delimiter in ["\n\n", "\n", ":"] {
+        if let Some(idx) = stripped.find(delimiter) {
+            let (leading, rest_with_delimiter) = stripped.split_at(idx + delimiter.len());
+            if leading.chars().count() <= 200 && has_strong_process_meta(leading) {
+                let rest = rest_with_delimiter.trim();
+                if substantive_completion_block(rest)
+                    || split_nonempty_paragraphs(rest)
+                        .iter()
+                        .any(|paragraph| substantive_completion_block(paragraph))
+                {
+                    return FinalAnswerDisposition::Accept;
+                }
+            }
+        }
+    }
+
+    if has_strong_meta || (has_weak_structural_meta && !allows_structural_meta) {
+        return FinalAnswerDisposition::RejectMeta;
+    }
+
+    FinalAnswerDisposition::Accept
 }
 
 fn model_tier(model_name: &str, reasoning_effort: Option<&str>) -> i32 {
@@ -744,6 +824,19 @@ fn append_forced_subtask_rejection_tool_results(
     }
 }
 
+fn append_uniform_tool_results(
+    messages: &mut Vec<Message>,
+    tool_calls: &[ToolCall],
+    content: &str,
+) {
+    for tool_call in tool_calls {
+        messages.push(Message::Tool {
+            tool_call_id: tool_call.id.clone(),
+            content: content.to_string(),
+        });
+    }
+}
+
 fn summarize_tool_call_names(tool_calls: &[ToolCall]) -> String {
     let names = tool_calls
         .iter()
@@ -830,6 +923,9 @@ struct StepProgressRecord {
     step_signature: String,
     tool_count: usize,
     failed_tool_step: bool,
+    final_rejection: bool,
+    rewrite_only_violation: bool,
+    post_finalization_artifact_churn: bool,
     successful_action_signatures: HashSet<String>,
     state_delta_signatures: HashSet<String>,
     completed_previews: Vec<String>,
@@ -886,6 +982,9 @@ fn build_step_progress_record(
         ),
         tool_count: tool_calls.len(),
         failed_tool_step: has_error,
+        final_rejection: false,
+        rewrite_only_violation: false,
+        post_finalization_artifact_churn: false,
         successful_action_signatures: HashSet::new(),
         state_delta_signatures: HashSet::new(),
         completed_previews: Vec::new(),
@@ -910,6 +1009,29 @@ fn build_step_progress_record(
         }
     }
     record
+}
+
+fn special_step_progress_record(
+    phase: LoopPhase,
+    step_signature: impl Into<String>,
+    tool_count: usize,
+    failed_tool_step: bool,
+    final_rejection: bool,
+    rewrite_only_violation: bool,
+    post_finalization_artifact_churn: bool,
+) -> StepProgressRecord {
+    StepProgressRecord {
+        phase,
+        step_signature: step_signature.into(),
+        tool_count,
+        failed_tool_step,
+        final_rejection,
+        rewrite_only_violation,
+        post_finalization_artifact_churn,
+        successful_action_signatures: HashSet::new(),
+        state_delta_signatures: HashSet::new(),
+        completed_previews: Vec::new(),
+    }
 }
 
 fn evaluate_budget_extension(
@@ -954,10 +1076,14 @@ fn evaluate_budget_extension(
     let mut recent_action_signatures = HashSet::new();
     let mut recent_state_delta_signatures = HashSet::new();
     let mut has_build_or_finalize = false;
+    let mut has_finalization_churn = false;
     for record in window {
         recent_action_signatures.extend(record.successful_action_signatures.iter().cloned());
         recent_state_delta_signatures.extend(record.state_delta_signatures.iter().cloned());
         has_build_or_finalize |= matches!(record.phase, LoopPhase::Build | LoopPhase::Finalize);
+        has_finalization_churn |= record.final_rejection
+            || record.rewrite_only_violation
+            || record.post_finalization_artifact_churn;
     }
 
     let novel_action_count = recent_action_signatures
@@ -978,6 +1104,9 @@ fn evaluate_budget_extension(
     if recon_streak >= 4 {
         blockers.push("recon_streak");
     }
+    if has_finalization_churn {
+        blockers.push("finalization_churn");
+    }
 
     let mut payload = Map::new();
     payload.insert("window_size".into(), Value::from(window.len() as u64));
@@ -997,6 +1126,10 @@ fn evaluate_budget_extension(
     payload.insert(
         "has_build_or_finalize".into(),
         Value::from(has_build_or_finalize),
+    );
+    payload.insert(
+        "has_finalization_churn".into(),
+        Value::from(has_finalization_churn),
     );
     payload.insert(
         "positive_signals".into(),
@@ -1058,6 +1191,12 @@ fn build_partial_completion_text(
     if loop_metrics.termination_reason == "budget_cap" {
         next_actions.push(
             "Resume from the saved state and focus on finishing the deliverable instead of reopening the full search space."
+                .to_string(),
+        );
+    }
+    if loop_metrics.termination_reason == "finalization_stall" {
+        next_actions.push(
+            "Stop retrying tool-based rewrites and return the strongest existing deliverable in plain text."
                 .to_string(),
         );
     }
@@ -1136,6 +1275,37 @@ impl SolveFrameOutcome {
             completion: None,
         }
     }
+}
+
+async fn finalize_partial_outcome(
+    objective: &str,
+    tools: &mut WorkspaceTools,
+    pending_curator_deltas: &mut Vec<CuratorStateDelta>,
+    boundary: &str,
+    loop_metrics: LoopMetrics,
+    step_records: &[StepProgressRecord],
+    active_step_budget: usize,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
+    emitter: &dyn SolveEmitter,
+) -> SolveFrameOutcome {
+    tools.cleanup();
+    flush_pending_curator_checkpoint(pending_curator_deltas, boundary, config, cancel, emitter)
+        .await;
+    let completion = CompletionMeta {
+        kind: "partial".into(),
+        reason: loop_metrics.termination_reason.clone(),
+        steps_used: loop_metrics.steps,
+        max_steps: active_step_budget as u32,
+        extensions_granted: loop_metrics.extensions_granted,
+        extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
+        extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
+    };
+    SolveFrameOutcome::partial(
+        build_partial_completion_text(objective, &loop_metrics, step_records),
+        loop_metrics,
+        completion,
+    )
 }
 
 fn judge_acceptance(criteria: &str, output: &str) -> String {
@@ -1390,6 +1560,9 @@ async fn solve_frame(
     let mut active_curator_phase: Option<LoopPhase> = None;
     let mut pending_curator_deltas: Vec<CuratorStateDelta> = Vec::new();
     let mut step_records: Vec<StepProgressRecord> = Vec::new();
+    let mut pending_final_rewrite = false;
+    let mut final_rejection_streak = 0u32;
+    let mut rewrite_only_violations = 0u32;
     let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
     let max_total_steps = active_step_budget
         + if config.budget_extension_enabled {
@@ -1524,6 +1697,54 @@ async fn solve_frame(
             ForcedDelegationDecision::NotForced | ForcedDelegationDecision::Allowed => {}
         }
 
+        if pending_final_rewrite && !turn.tool_calls.is_empty() {
+            let has_artifact = turn.tool_calls.iter().any(|tc| is_artifact_tool(&tc.name));
+            let rewrite_only_message = "Rewrite-only finalization retry: do not call tools, do not create or verify files, and return the final answer as plain text only.";
+            loop_metrics.tool_calls += turn.tool_calls.len() as u32;
+            loop_metrics.rewrite_only_violations += 1;
+            rewrite_only_violations += 1;
+            increment_phase(&mut loop_metrics, &LoopPhase::Finalize);
+            step_records.push(special_step_progress_record(
+                LoopPhase::Finalize,
+                format!(
+                    "final-rewrite-violation|artifact={}|tool_count={}",
+                    if has_artifact { 1 } else { 0 },
+                    turn.tool_calls.len()
+                ),
+                turn.tool_calls.len(),
+                false,
+                false,
+                true,
+                has_artifact,
+            ));
+            emitter.emit_trace(&format!(
+                "{step_prefix} rewrite-only finalization retry blocked tool calls: {}",
+                summarize_tool_call_names(&turn.tool_calls)
+            ));
+            append_uniform_tool_results(&mut messages, &turn.tool_calls, rewrite_only_message);
+            messages.push(Message::User {
+                content: rewrite_only_message.to_string(),
+            });
+            if final_rejection_streak >= 1 && rewrite_only_violations >= 2 {
+                loop_metrics.finalization_stalls += 1;
+                loop_metrics.termination_reason = "finalization_stall".into();
+                return finalize_partial_outcome(
+                    objective,
+                    &mut tools,
+                    &mut pending_curator_deltas,
+                    "finalization_stall",
+                    loop_metrics,
+                    &step_records,
+                    active_step_budget,
+                    config,
+                    &cancel,
+                    emitter,
+                )
+                .await;
+            }
+            continue;
+        }
+
         if turn.tool_calls.is_empty() {
             if turn.text.trim().is_empty() {
                 emitter.emit_trace(&format!(
@@ -1534,14 +1755,46 @@ async fn solve_frame(
                 });
                 continue;
             }
-            if is_meta_final_text(&turn.text, objective) {
+            if matches!(
+                classify_final_answer_text(&turn.text, objective),
+                FinalAnswerDisposition::RejectMeta
+            ) {
                 loop_metrics.final_rejections += 1;
+                final_rejection_streak += 1;
+                pending_final_rewrite = true;
+                increment_phase(&mut loop_metrics, &LoopPhase::Finalize);
+                step_records.push(special_step_progress_record(
+                    LoopPhase::Finalize,
+                    "final-reject-meta",
+                    0,
+                    false,
+                    true,
+                    false,
+                    false,
+                ));
                 emitter.emit_trace(&format!(
-                    "{step_prefix} rejected meta final answer; requesting concrete deliverable"
+                    "{step_prefix} rejected meta final answer; requesting rewrite-only plain-text completion"
                 ));
                 messages.push(Message::User {
-                    content: "Your previous response was process/meta commentary rather than a concrete final answer. Continue solving: use tools if needed and return a direct final deliverable.".to_string(),
+                    content: "Your previous response was process/meta commentary rather than a concrete final answer. Rewrite it from the completed work only: do not call tools, do not create or verify files, and return the direct final deliverable as plain text.".to_string(),
                 });
+                if final_rejection_streak >= 2 {
+                    loop_metrics.finalization_stalls += 1;
+                    loop_metrics.termination_reason = "finalization_stall".into();
+                    return finalize_partial_outcome(
+                        objective,
+                        &mut tools,
+                        &mut pending_curator_deltas,
+                        "finalization_stall",
+                        loop_metrics,
+                        &step_records,
+                        active_step_budget,
+                        config,
+                        &cancel,
+                        emitter,
+                    )
+                    .await;
+                }
                 continue;
             }
             let phase = LoopPhase::Finalize;
@@ -1794,57 +2047,36 @@ async fn solve_frame(
                 loop_metrics.extension_denials_no_progress += 1;
                 loop_metrics.termination_reason = "budget_no_progress".into();
             }
-
-            tools.cleanup();
-            flush_pending_curator_checkpoint(
+            return finalize_partial_outcome(
+                objective,
+                &mut tools,
                 &mut pending_curator_deltas,
                 "budget_exhausted",
+                loop_metrics,
+                &step_records,
+                active_step_budget,
                 config,
                 &cancel,
                 emitter,
             )
             .await;
-            let completion = CompletionMeta {
-                kind: "partial".into(),
-                reason: loop_metrics.termination_reason.clone(),
-                steps_used: loop_metrics.steps,
-                max_steps: active_step_budget as u32,
-                extensions_granted: loop_metrics.extensions_granted,
-                extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
-                extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
-            };
-            return SolveFrameOutcome::partial(
-                build_partial_completion_text(objective, &loop_metrics, &step_records),
-                loop_metrics,
-                completion,
-            );
         }
     }
 
-    tools.cleanup();
     loop_metrics.termination_reason = "budget_cap".into();
-    flush_pending_curator_checkpoint(
+    finalize_partial_outcome(
+        objective,
+        &mut tools,
         &mut pending_curator_deltas,
         "budget_exhausted",
+        loop_metrics,
+        &step_records,
+        active_step_budget,
         config,
         &cancel,
         emitter,
     )
-    .await;
-    let completion = CompletionMeta {
-        kind: "partial".into(),
-        reason: loop_metrics.termination_reason.clone(),
-        steps_used: loop_metrics.steps,
-        max_steps: active_step_budget as u32,
-        extensions_granted: loop_metrics.extensions_granted,
-        extension_block_steps: config.budget_extension_block_steps.max(1) as u32,
-        extension_max_blocks: config.budget_extension_max_blocks.max(0) as u32,
-    };
-    SolveFrameOutcome::partial(
-        build_partial_completion_text(objective, &loop_metrics, &step_records),
-        loop_metrics,
-        completion,
-    )
+    .await
 }
 
 /// Real solve flow with a multi-step agentic loop.
@@ -1946,6 +2178,9 @@ mod tests {
             step_signature: step_signature.to_string(),
             tool_count: 1,
             failed_tool_step,
+            final_rejection: false,
+            rewrite_only_violation: false,
+            post_finalization_artifact_churn: false,
             successful_action_signatures: action_sigs.iter().map(|s| (*s).to_string()).collect(),
             state_delta_signatures: delta_sigs.iter().map(|s| (*s).to_string()).collect(),
             completed_previews: previews.iter().map(|s| (*s).to_string()).collect(),
@@ -2235,6 +2470,39 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_budget_extension_blocks_finalization_churn() {
+        let records = vec![
+            special_step_progress_record(
+                LoopPhase::Finalize,
+                "final-reject-meta",
+                0,
+                false,
+                true,
+                false,
+                false,
+            ),
+            special_step_progress_record(
+                LoopPhase::Finalize,
+                "final-rewrite-violation|artifact=1|tool_count=1",
+                1,
+                false,
+                false,
+                true,
+                true,
+            ),
+        ];
+
+        let (eligible, payload) = evaluate_budget_extension(&records, 0);
+        assert!(!eligible, "finalization churn should block extension");
+        let blockers = payload
+            .get("blockers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(blockers.contains(&Value::from("finalization_churn")));
+    }
+
+    #[test]
     fn test_normalize_progress_fragment_truncates_on_utf8_boundary() {
         let normalized =
             normalize_progress_fragment("[Step 1/100] [Context 10/20] 日本語テスト", 7);
@@ -2280,6 +2548,8 @@ mod tests {
             max_recon_streak: 0,
             guardrail_warnings: 0,
             final_rejections: 0,
+            rewrite_only_violations: 0,
+            finalization_stalls: 0,
             extensions_granted: 1,
             extension_eligible_checks: 2,
             extension_denials_no_progress: 0,
@@ -2644,32 +2914,60 @@ mod tests {
     }
 
     #[test]
-    fn test_is_meta_final_text_rejects_empty_and_strong_process_meta() {
-        assert!(is_meta_final_text("", "Answer the question directly"));
-        assert!(is_meta_final_text(
-            "I should start by checking the workspace layout.",
-            "Answer the question directly"
-        ));
-        assert!(!is_meta_final_text(
-            "Completed the fix and updated the failing test.",
-            "Answer the question directly"
-        ));
+    fn test_classify_final_answer_text_rejects_empty_and_strong_process_meta() {
+        assert_eq!(
+            classify_final_answer_text("", "Answer the question directly"),
+            FinalAnswerDisposition::RejectMeta
+        );
+        assert_eq!(
+            classify_final_answer_text(
+                "I should start by checking the workspace layout.",
+                "Answer the question directly"
+            ),
+            FinalAnswerDisposition::RejectMeta
+        );
+        assert_eq!(
+            classify_final_answer_text(
+                "Completed the fix and updated the failing test.",
+                "Answer the question directly"
+            ),
+            FinalAnswerDisposition::Accept
+        );
     }
 
     #[test]
-    fn test_is_meta_final_text_respects_objective_policy_for_structural_meta() {
-        assert!(is_meta_final_text(
-            "Here is my plan for finishing the task.",
-            "Answer the question directly"
-        ));
-        assert!(!is_meta_final_text(
-            "Here is my plan for finishing the task.",
-            "Write a plan for finishing the task"
-        ));
-        assert!(is_meta_final_text(
-            "Here is my plan: I will inspect files and then implement.",
-            "Write a plan for finishing the task"
-        ));
+    fn test_classify_final_answer_text_respects_objective_policy_for_structural_meta() {
+        assert_eq!(
+            classify_final_answer_text(
+                "Here is my plan for finishing the task.",
+                "Answer the question directly"
+            ),
+            FinalAnswerDisposition::RejectMeta
+        );
+        assert_eq!(
+            classify_final_answer_text(
+                "Here is my plan for finishing the task.",
+                "Write a plan for finishing the task"
+            ),
+            FinalAnswerDisposition::Accept
+        );
+        assert_eq!(
+            classify_final_answer_text(
+                "Here is my plan: I will inspect files and then implement.",
+                "Write a plan for finishing the task"
+            ),
+            FinalAnswerDisposition::RejectMeta
+        );
+    }
+
+    #[test]
+    fn test_classify_final_answer_text_accepts_short_meta_preface_with_real_body() {
+        let text = "All deliverables are written. Let me provide the final summary:\n\n## Summary\nThe fix is in place and the tests now pass.";
+
+        assert_eq!(
+            classify_final_answer_text(text, "Answer the question directly"),
+            FinalAnswerDisposition::Accept
+        );
     }
 
     #[test]

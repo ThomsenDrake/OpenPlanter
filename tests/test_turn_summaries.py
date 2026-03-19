@@ -303,6 +303,8 @@ class TurnSummaryPersistenceTests(unittest.TestCase):
             state_after_first = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertIn("loop_metrics", state_after_first)
             self.assertEqual(state_after_first["loop_metrics"]["turns"], 1)
+            self.assertIn("rewrite_only_violations", state_after_first["loop_metrics"])
+            self.assertIn("finalization_stalls", state_after_first["loop_metrics"])
 
             model2 = ScriptedModel(
                 scripted_turns=[ModelTurn(text="done-2", stop_reason="end_turn")]

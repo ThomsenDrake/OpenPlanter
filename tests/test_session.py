@@ -8,7 +8,7 @@ from pathlib import Path
 from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
-from agent.model import ModelTurn, ScriptedModel
+from agent.model import Conversation, ModelTurn, ScriptedModel
 from agent.runtime import SessionRuntime, _has_reasoning_content
 from agent.tools import WorkspaceTools
 
@@ -329,6 +329,65 @@ class SessionRuntimeTests(unittest.TestCase):
             patch_dir = root / ".openplanter" / "sessions" / "session-patch" / "artifacts" / "patches"
             patches = sorted(patch_dir.glob("*.patch"))
             self.assertGreaterEqual(len(patches), 1)
+
+    def test_runtime_result_event_records_cancelled_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=4,
+                session_root_dir=".openplanter",
+            )
+
+            engine_holder: dict[str, RLMEngine] = {}
+
+            class CancelAfterFirstTurnModel:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
+                    return Conversation(_provider_messages=[{"role": "user", "content": initial_user_message}])
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.calls += 1
+                    if self.calls == 1:
+                        engine_holder["engine"].cancel()
+                        return ModelTurn(tool_calls=[_tc("think", note="cancel after this turn")])
+                    return ModelTurn(text="unexpected", stop_reason="end_turn")
+
+                def append_assistant_turn(self, conversation: Conversation, turn: ModelTurn) -> None:
+                    pass
+
+                def append_tool_results(self, conversation: Conversation, results) -> None:
+                    pass
+
+            model = CancelAfterFirstTurnModel()
+            engine = RLMEngine(model=model, tools=WorkspaceTools(root=root), config=cfg)
+            engine_holder["engine"] = engine
+            runtime = SessionRuntime.bootstrap(
+                engine=engine,
+                config=cfg,
+                session_id="session-cancelled",
+                resume=False,
+            )
+
+            result = runtime.solve("cancel this run")
+            self.assertEqual(result, "Task cancelled.")
+
+            session_dir = root / ".openplanter" / "sessions" / "session-cancelled"
+            state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["turn_history"][-1]["result_preview"], "Task cancelled.")
+            self.assertEqual(state["loop_metrics"]["termination_reason"], "cancelled")
+
+            result_events = [
+                json.loads(line)
+                for line in (session_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip() and json.loads(line).get("type") == "result"
+            ]
+            self.assertGreaterEqual(len(result_events), 1)
+            self.assertEqual(result_events[-1]["payload"]["status"], "cancelled")
+            self.assertEqual(result_events[-1]["payload"]["text"], "Task cancelled.")
 
 
 if __name__ == "__main__":
