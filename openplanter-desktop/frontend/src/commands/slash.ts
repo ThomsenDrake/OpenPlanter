@@ -111,6 +111,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
           `Embeddings:  ${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})`,
           `Retrieval:   ${s.embeddingsStatusDetail}`,
+          `Vectorize:   ${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}`,
           `Web search:  ${s.webSearchProvider || "exa"}`,
           `Continuity:  ${s.continuityMode || "auto"}`,
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,

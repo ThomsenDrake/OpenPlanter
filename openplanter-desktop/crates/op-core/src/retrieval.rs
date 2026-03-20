@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -13,9 +14,10 @@ use crate::config::normalize_embeddings_provider;
 pub const VOYAGE_EMBEDDING_MODEL: &str = "voyage-4";
 pub const MISTRAL_EMBEDDING_MODEL: &str = "mistral-embed";
 
-const INDEX_VERSION: &str = "embeddings-v1";
+const INDEX_VERSION: &str = "embeddings-v2";
 const CHUNK_TARGET_CHARS: usize = 1200;
 const CHUNK_OVERLAP_CHARS: usize = 200;
+const STRUCTURED_RECORD_MAX_CHARS: usize = CHUNK_TARGET_CHARS + CHUNK_OVERLAP_CHARS;
 const MAX_EXCERPT_CHARS: usize = 280;
 const WORKSPACE_TOP_K: usize = 4;
 const SESSION_TOP_K: usize = 4;
@@ -35,6 +37,15 @@ const EXCLUDED_DIR_NAMES: &[&str] = &[
     "target",
     "vendor",
 ];
+const IGNORED_FILE_NAMES: &[&str] = &[".DS_Store", "Thumbs.db"];
+const IGNORED_FILE_PREFIXES: &[&str] = &["._"];
+
+#[derive(Debug, Clone, Copy)]
+struct EmbeddingsProviderLimits {
+    batch_size: usize,
+    input_char_limit: usize,
+    emergency_input_char_limit: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalStatus {
@@ -50,6 +61,45 @@ pub struct RetrievalBuildResult {
     pub status: RetrievalStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalProgress {
+    pub corpus: String,
+    pub phase: String,
+    pub documents_done: usize,
+    pub documents_total: usize,
+    pub chunks_done: usize,
+    pub chunks_total: usize,
+    pub reused_documents: usize,
+    pub message: String,
+}
+
+impl RetrievalProgress {
+    pub fn percent(&self) -> u32 {
+        if self.documents_total == 0 {
+            return 0;
+        }
+        (((self.documents_done as f64 / self.documents_total as f64) * 100.0).round() as i64)
+            .clamp(0, 100) as u32
+    }
+
+    pub fn to_trace_message(&self) -> String {
+        format!(
+            "[retrieval:progress] {}",
+            json!({
+                "corpus": self.corpus,
+                "phase": self.phase,
+                "documents_done": self.documents_done,
+                "documents_total": self.documents_total,
+                "chunks_done": self.chunks_done,
+                "chunks_total": self.chunks_total,
+                "reused_documents": self.reused_documents,
+                "percent": self.percent(),
+                "message": self.message,
+            })
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SourceDocument {
     source_id: String,
@@ -59,6 +109,28 @@ struct SourceDocument {
     fingerprint: String,
     kind: String,
     metadata: Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticRecord {
+    record_path: String,
+    content_role: String,
+    text: String,
+    metadata: Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingChunk {
+    source_id: String,
+    path: String,
+    title: String,
+    text: String,
+    fingerprint: String,
+    kind: String,
+    metadata: Map<String, Value>,
+    record_path: String,
+    content_role: String,
+    vector: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +144,12 @@ struct ChunkRecord {
     fingerprint: String,
     kind: String,
     metadata: Map<String, Value>,
+    #[serde(default)]
+    record_path: String,
+    #[serde(default)]
+    content_role: String,
+    #[serde(default)]
+    subchunk_index: usize,
     vector: Vec<f64>,
 }
 
@@ -84,6 +162,9 @@ impl ChunkRecord {
             "excerpt": self.excerpt,
             "source_id": self.source_id,
             "kind": self.kind,
+            "record_path": self.record_path,
+            "content_role": self.content_role,
+            "subchunk_index": self.subchunk_index,
             "metadata": self.metadata,
         })
     }
@@ -93,6 +174,7 @@ struct EmbeddingsClient {
     provider: String,
     model: String,
     api_key: String,
+    limits: EmbeddingsProviderLimits,
     http: Client,
 }
 
@@ -104,20 +186,21 @@ impl EmbeddingsClient {
             provider: normalized,
             model,
             api_key: api_key.trim().to_string(),
+            limits: provider_limits(provider),
             http: Client::new(),
         }
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>> {
-        self.embed(texts, "document").await
-    }
-
     async fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f64>> {
-        let vectors = self.embed(&[text.to_string()], "query").await?;
-        vectors
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("embeddings provider returned no query vector"))
+        let windows = split_query_windows(text, self.limits.input_char_limit);
+        let vectors = self.embed(&windows, "query").await?;
+        if vectors.is_empty() {
+            return Err(anyhow!("embeddings provider returned no query vector"));
+        }
+        if vectors.len() == 1 {
+            return Ok(vectors.into_iter().next().unwrap_or_default());
+        }
+        Ok(mean_pool_vectors(&vectors))
     }
 
     async fn embed(&self, texts: &[String], input_type: &str) -> anyhow::Result<Vec<Vec<f64>>> {
@@ -125,7 +208,7 @@ impl EmbeddingsClient {
             return Ok(Vec::new());
         }
         let mut all = Vec::new();
-        for batch in texts.chunks(BATCH_SIZE) {
+        for batch in texts.chunks(self.limits.batch_size) {
             let mut payload = json!({
                 "model": self.model,
                 "input": batch,
@@ -208,6 +291,49 @@ impl EmbeddingsClient {
     }
 }
 
+fn provider_limits(provider: &str) -> EmbeddingsProviderLimits {
+    if normalize_embeddings_provider(Some(provider)) == "voyage" {
+        EmbeddingsProviderLimits {
+            batch_size: BATCH_SIZE,
+            input_char_limit: 24_000,
+            emergency_input_char_limit: 6_000,
+        }
+    } else {
+        EmbeddingsProviderLimits {
+            batch_size: BATCH_SIZE,
+            input_char_limit: 12_000,
+            emergency_input_char_limit: 4_000,
+        }
+    }
+}
+
+#[async_trait]
+trait DocumentEmbeddingsBackend: Sync {
+    fn provider(&self) -> &str;
+    fn model(&self) -> &str;
+    fn limits(&self) -> EmbeddingsProviderLimits;
+    async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>>;
+}
+
+#[async_trait]
+impl DocumentEmbeddingsBackend for EmbeddingsClient {
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn limits(&self) -> EmbeddingsProviderLimits {
+        self.limits
+    }
+
+    async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>> {
+        self.embed(texts, "document").await
+    }
+}
+
 pub fn embedding_model_for_provider(provider: &str) -> &'static str {
     if normalize_embeddings_provider(Some(provider)) == "voyage" {
         VOYAGE_EMBEDDING_MODEL
@@ -252,7 +378,7 @@ pub fn build_embeddings_status(
     }
 }
 
-pub async fn build_retrieval_packet(
+pub async fn build_retrieval_packet<F>(
     workspace: &Path,
     session_dir: Option<&Path>,
     session_root_dir: &str,
@@ -261,7 +387,11 @@ pub async fn build_retrieval_packet(
     embeddings_provider: &str,
     voyage_api_key: Option<&str>,
     mistral_api_key: Option<&str>,
-) -> anyhow::Result<RetrievalBuildResult> {
+    mut emit_trace: F,
+) -> anyhow::Result<RetrievalBuildResult>
+where
+    F: FnMut(String),
+{
     let status = build_embeddings_status(
         embeddings_provider,
         voyage_api_key,
@@ -280,6 +410,16 @@ pub async fn build_retrieval_packet(
         mistral_api_key.unwrap_or_default()
     };
     let client = EmbeddingsClient::new(&status.provider, api_key);
+    emit_retrieval_progress(&mut emit_trace, RetrievalProgress {
+        corpus: "all".to_string(),
+        phase: "scan".to_string(),
+        documents_done: 0,
+        documents_total: 0,
+        chunks_done: 0,
+        chunks_total: 0,
+        reused_documents: 0,
+        message: "Scanning workspace and session documents for retrieval.".to_string(),
+    });
     let workspace_docs = collect_workspace_documents(workspace, session_root_dir);
     let session_docs = collect_session_documents(workspace, session_dir);
     let total_docs = workspace_docs.len() + session_docs.len();
@@ -304,9 +444,8 @@ pub async fn build_retrieval_packet(
         Some(&workspace_index_dir),
         &workspace_docs,
         &client,
-        &status.provider,
-        &status.model,
         "workspace",
+        &mut emit_trace,
     )
     .await?;
 
@@ -315,9 +454,8 @@ pub async fn build_retrieval_packet(
             Some(&session_dir.join("embeddings")),
             &session_docs,
             &client,
-            &status.provider,
-            &status.model,
             "session",
+            &mut emit_trace,
         )
         .await?
     } else {
@@ -424,6 +562,9 @@ fn documents_from_walk(root: &Path, workspace: &Path, kind: &str) -> Vec<SourceD
 }
 
 fn documents_from_file(path: &Path, workspace: &Path, kind: &str) -> Vec<SourceDocument> {
+    if is_junk_path(path) {
+        return Vec::new();
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -534,14 +675,16 @@ fn documents_from_investigation_state(path: &Path, workspace: &Path) -> Vec<Sour
     docs
 }
 
-async fn refresh_index(
+async fn refresh_index<B>(
     index_dir: Option<&Path>,
     documents: &[SourceDocument],
-    client: &EmbeddingsClient,
-    provider: &str,
-    model: &str,
+    client: &B,
     corpus: &str,
-) -> anyhow::Result<Vec<ChunkRecord>> {
+    emit_trace: &mut impl FnMut(String),
+) -> anyhow::Result<Vec<ChunkRecord>>
+where
+    B: DocumentEmbeddingsBackend,
+{
     let Some(index_dir) = index_dir else {
         return Ok(Vec::new());
     };
@@ -550,7 +693,7 @@ async fn refresh_index(
     })?;
     let meta_path = index_dir.join("meta.json");
     let chunks_path = index_dir.join("chunks.jsonl");
-    let existing = if load_meta(&meta_path, provider, model, corpus) {
+    let existing = if load_meta(&meta_path, client.provider(), client.model(), corpus) {
         load_existing_chunks(&chunks_path)
     } else {
         HashMap::new()
@@ -558,56 +701,132 @@ async fn refresh_index(
 
     let mut resolved = Vec::new();
     let mut pending_records = Vec::new();
-    let mut pending_texts = Vec::new();
+    let mut reused_documents = 0usize;
+    let mut reused_chunks = 0usize;
     for doc in documents {
         if let Some(prior) = existing.get(&doc.source_id) {
             if prior.iter().all(|chunk| chunk.fingerprint == doc.fingerprint) {
+                reused_documents += 1;
+                reused_chunks += prior.len();
                 resolved.extend(prior.clone());
                 continue;
             }
         }
-        for (chunk_index, text) in chunk_document(doc).into_iter().enumerate() {
-            let mut metadata = doc.metadata.clone();
-            metadata.insert(
-                "chunk_index".to_string(),
-                Value::Number((chunk_index as u64).into()),
-            );
-            pending_records.push(ChunkRecord {
-                chunk_id: format!("{}::chunk:{chunk_index}", doc.source_id),
-                source_id: doc.source_id.clone(),
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                text: text.clone(),
-                excerpt: make_excerpt(&text),
-                fingerprint: doc.fingerprint.clone(),
-                kind: doc.kind.clone(),
-                metadata,
-                vector: Vec::new(),
-            });
-            pending_texts.push(text);
-        }
+        pending_records.extend(build_pending_chunks_for_document(doc));
     }
+    pending_records = preflight_pending_chunks(
+        pending_records,
+        client.limits().input_char_limit,
+        emit_trace,
+        "preflight",
+    );
 
-    if !pending_records.is_empty() {
-        let vectors = client.embed_documents(&pending_texts).await?;
-        for (record, vector) in pending_records.iter_mut().zip(vectors.into_iter()) {
-            record.vector = vector;
+    let total_documents = documents.len();
+    let total_chunks = reused_chunks + pending_records.len();
+    if pending_records.is_empty() {
+        emit_retrieval_progress(emit_trace, RetrievalProgress {
+            corpus: corpus.to_string(),
+            phase: "writing".to_string(),
+            documents_done: total_documents,
+            documents_total: total_documents,
+            chunks_done: total_chunks,
+            chunks_total: total_chunks,
+            reused_documents,
+            message: format!("Writing cached {corpus} retrieval index."),
+        });
+    } else {
+        emit_retrieval_progress(emit_trace, RetrievalProgress {
+            corpus: corpus.to_string(),
+            phase: "embedding".to_string(),
+            documents_done: reused_documents,
+            documents_total: total_documents,
+            chunks_done: reused_chunks,
+            chunks_total: total_chunks,
+            reused_documents,
+            message: format!("Embedding {corpus} retrieval index."),
+        });
+        let mut batch_start = 0usize;
+        while batch_start < pending_records.len() {
+            let chunk_boundaries = pending_chunk_boundaries(&pending_records);
+            let chunks_total = reused_chunks + pending_records.len();
+            let batch_end = (batch_start + client.limits().batch_size).min(pending_records.len());
+            let prepared = preflight_pending_chunks(
+                pending_records[batch_start..batch_end].to_vec(),
+                client.limits().input_char_limit,
+                emit_trace,
+                "batch",
+            );
+            if prepared.len() != (batch_end - batch_start) {
+                pending_records.splice(batch_start..batch_end, prepared);
+                continue;
+            }
+
+            let texts = pending_records[batch_start..batch_end]
+                .iter()
+                .map(|record| record.text.clone())
+                .collect::<Vec<_>>();
+            let vectors = match client.embed_documents(&texts).await {
+                Ok(vectors) => vectors,
+                Err(err) => {
+                    if retry_oversized_batch(
+                        &mut pending_records,
+                        batch_start,
+                        &err.to_string(),
+                        client.limits(),
+                        emit_trace,
+                    ) {
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+            for (record, vector) in pending_records[batch_start..batch_end]
+                .iter_mut()
+                .zip(vectors.into_iter())
+            {
+                record.vector = vector;
+            }
+            batch_start = batch_end;
+            let completed_pending_docs =
+                chunk_boundaries.partition_point(|boundary| *boundary <= batch_start);
+            emit_retrieval_progress(emit_trace, RetrievalProgress {
+                corpus: corpus.to_string(),
+                phase: "embedding".to_string(),
+                documents_done: reused_documents + completed_pending_docs,
+                documents_total: total_documents,
+                chunks_done: reused_chunks + batch_start,
+                chunks_total,
+                reused_documents,
+                message: format!("Embedding {corpus} retrieval index."),
+            });
         }
-        resolved.extend(pending_records);
     }
+    resolved.extend(finalize_pending_chunks(pending_records));
 
     resolved.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
             .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
+    let final_chunks_total = resolved.len();
+
+    emit_retrieval_progress(emit_trace, RetrievalProgress {
+        corpus: corpus.to_string(),
+        phase: "writing".to_string(),
+        documents_done: total_documents,
+        documents_total: total_documents,
+        chunks_done: final_chunks_total,
+        chunks_total: final_chunks_total,
+        reused_documents,
+        message: format!("Writing {corpus} retrieval index files."),
+    });
 
     fs::write(
         &meta_path,
         serde_json::to_string_pretty(&json!({
             "version": INDEX_VERSION,
-            "provider": provider,
-            "model": model,
+            "provider": client.provider(),
+            "model": client.model(),
             "corpus": corpus,
             "chunk_target_chars": CHUNK_TARGET_CHARS,
             "chunk_overlap_chars": CHUNK_OVERLAP_CHARS,
@@ -622,6 +841,16 @@ async fn refresh_index(
         .join("\n");
     fs::write(&chunks_path, serialized)
         .with_context(|| format!("failed to write {}", chunks_path.display()))?;
+    emit_retrieval_progress(emit_trace, RetrievalProgress {
+        corpus: corpus.to_string(),
+        phase: "done".to_string(),
+        documents_done: total_documents,
+        documents_total: total_documents,
+        chunks_done: final_chunks_total,
+        chunks_total: final_chunks_total,
+        reused_documents,
+        message: format!("{} retrieval index ready.", capitalize(corpus)),
+    });
     Ok(resolved)
 }
 
@@ -729,7 +958,202 @@ fn build_query(objective: &str, question_reasoning_packet: Option<&Value>) -> St
         .join("\n\n")
 }
 
-fn chunk_document(doc: &SourceDocument) -> Vec<String> {
+fn emit_retrieval_progress(
+    emit_trace: &mut impl FnMut(String),
+    progress: RetrievalProgress,
+) {
+    emit_trace(progress.to_trace_message());
+}
+
+fn emit_retrieval_trace(emit_trace: &mut impl FnMut(String), message: String) {
+    emit_trace(message);
+}
+
+fn build_pending_chunks_for_document(doc: &SourceDocument) -> Vec<PendingChunk> {
+    let mut pending = Vec::new();
+    for record in semantic_records_for_document(doc) {
+        for text in chunk_semantic_record(&record, doc) {
+            let stripped = text.trim();
+            if stripped.is_empty() {
+                continue;
+            }
+            pending.push(PendingChunk {
+                source_id: doc.source_id.clone(),
+                path: doc.path.clone(),
+                title: doc.title.clone(),
+                text: stripped.to_string(),
+                fingerprint: doc.fingerprint.clone(),
+                kind: doc.kind.clone(),
+                metadata: record.metadata.clone(),
+                record_path: record.record_path.clone(),
+                content_role: record.content_role.clone(),
+                vector: Vec::new(),
+            });
+        }
+    }
+    pending
+}
+
+fn finalize_pending_chunks(chunks: Vec<PendingChunk>) -> Vec<ChunkRecord> {
+    let mut finalized = Vec::new();
+    let mut chunk_indexes: HashMap<String, usize> = HashMap::new();
+    let mut record_subchunks: HashMap<(String, String), usize> = HashMap::new();
+    for chunk in chunks {
+        let chunk_index = chunk_indexes.get(&chunk.source_id).copied().unwrap_or(0);
+        let record_key = (chunk.source_id.clone(), chunk.record_path.clone());
+        let subchunk_index = record_subchunks.get(&record_key).copied().unwrap_or(0);
+        let mut metadata = chunk.metadata.clone();
+        metadata.insert(
+            "chunk_index".to_string(),
+            Value::Number((chunk_index as u64).into()),
+        );
+        metadata.insert(
+            "record_path".to_string(),
+            Value::String(chunk.record_path.clone()),
+        );
+        metadata.insert(
+            "content_role".to_string(),
+            Value::String(chunk.content_role.clone()),
+        );
+        metadata.insert(
+            "subchunk_index".to_string(),
+            Value::Number((subchunk_index as u64).into()),
+        );
+        finalized.push(ChunkRecord {
+            chunk_id: format!("{}::chunk:{chunk_index}", chunk.source_id),
+            source_id: chunk.source_id.clone(),
+            path: chunk.path.clone(),
+            title: chunk.title.clone(),
+            text: chunk.text.clone(),
+            excerpt: make_excerpt(&chunk.text),
+            fingerprint: chunk.fingerprint.clone(),
+            kind: chunk.kind.clone(),
+            metadata,
+            record_path: chunk.record_path.clone(),
+            content_role: chunk.content_role.clone(),
+            subchunk_index,
+            vector: chunk.vector.clone(),
+        });
+        chunk_indexes.insert(chunk.source_id.clone(), chunk_index + 1);
+        record_subchunks.insert(record_key, subchunk_index + 1);
+    }
+    finalized
+}
+
+fn pending_chunk_boundaries(chunks: &[PendingChunk]) -> Vec<usize> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    let mut boundaries = Vec::new();
+    let mut running = 0usize;
+    for (index, chunk) in chunks.iter().enumerate() {
+        running += 1;
+        let next_source = chunks.get(index + 1).map(|item| item.source_id.as_str());
+        if next_source != Some(chunk.source_id.as_str()) {
+            boundaries.push(running);
+        }
+    }
+    boundaries
+}
+
+fn preflight_pending_chunks(
+    chunks: Vec<PendingChunk>,
+    max_chars: usize,
+    emit_trace: &mut impl FnMut(String),
+    reason: &str,
+) -> Vec<PendingChunk> {
+    let mut prepared = Vec::new();
+    for chunk in chunks {
+        if chunk.text.chars().count() <= max_chars {
+            prepared.push(chunk);
+            continue;
+        }
+        let replacements = split_pending_chunk_for_limit(&chunk, max_chars);
+        if replacements.len() > 1 {
+            emit_retrieval_trace(
+                emit_trace,
+                format!(
+                    "[retrieval] auto-resplit oversized chunk reason={reason} source={} record_path={} chars={} limit={} chunks={}",
+                    chunk.path,
+                    chunk.record_path,
+                    chunk.text.chars().count(),
+                    max_chars,
+                    replacements.len()
+                ),
+            );
+        }
+        prepared.extend(replacements);
+    }
+    prepared
+}
+
+fn retry_oversized_batch(
+    pending_records: &mut Vec<PendingChunk>,
+    batch_start: usize,
+    error: &str,
+    limits: EmbeddingsProviderLimits,
+    emit_trace: &mut impl FnMut(String),
+) -> bool {
+    let Some(input_id) = extract_oversize_input_id(error) else {
+        return false;
+    };
+    let absolute_index = batch_start + input_id;
+    let Some(offending) = pending_records.get(absolute_index).cloned() else {
+        return false;
+    };
+    let emergency_limit = limits
+        .emergency_input_char_limit
+        .min((offending.text.chars().count() / 2).max(400));
+    let replacements = split_pending_chunk_for_limit(&offending, emergency_limit);
+    if replacements.len() <= 1 {
+        return false;
+    }
+    pending_records.splice(absolute_index..absolute_index + 1, replacements.clone());
+    emit_retrieval_trace(
+        emit_trace,
+        format!(
+            "[retrieval] retrying batch after provider oversize source={} record_path={} input_id={} chars={} retry_limit={} chunks={}",
+            offending.path,
+            offending.record_path,
+            input_id,
+            offending.text.chars().count(),
+            emergency_limit,
+            replacements.len()
+        ),
+    );
+    true
+}
+
+fn split_pending_chunk_for_limit(chunk: &PendingChunk, max_chars: usize) -> Vec<PendingChunk> {
+    if chunk.text.chars().count() <= max_chars {
+        return vec![chunk.clone()];
+    }
+    let target_chars = CHUNK_TARGET_CHARS.min(max_chars).max(400);
+    let overlap_chars = CHUNK_OVERLAP_CHARS
+        .min((target_chars / 5).max(80))
+        .min(target_chars.saturating_sub(1));
+    let windows = sliding_windows(&chunk.text, target_chars, overlap_chars);
+    if windows.len() <= 1 {
+        return vec![chunk.clone()];
+    }
+    windows
+        .into_iter()
+        .map(|window| PendingChunk {
+            source_id: chunk.source_id.clone(),
+            path: chunk.path.clone(),
+            title: chunk.title.clone(),
+            text: window,
+            fingerprint: chunk.fingerprint.clone(),
+            kind: chunk.kind.clone(),
+            metadata: chunk.metadata.clone(),
+            record_path: chunk.record_path.clone(),
+            content_role: chunk.content_role.clone(),
+            vector: Vec::new(),
+        })
+        .collect()
+}
+
+fn semantic_records_for_document(doc: &SourceDocument) -> Vec<SemanticRecord> {
     let suffix = doc
         .path
         .split('#')
@@ -739,12 +1163,336 @@ fn chunk_document(doc: &SourceDocument) -> Vec<String> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match doc.kind.as_str() {
-        "evidence" | "session_memory" => chunk_atomic_text(&doc.text),
-        _ if suffix == "json" => chunk_json(&doc.text),
-        _ if suffix == "csv" => chunk_delimited(&doc.text, ','),
-        _ if suffix == "tsv" => chunk_delimited(&doc.text, '\t'),
-        _ => chunk_paragraph_text(&doc.text),
+        "evidence" | "session_memory" => body_semantic_records(&doc.text, &doc.metadata),
+        _ if suffix == "json" => {
+            let Ok(parsed) = serde_json::from_str::<Value>(&doc.text) else {
+                return body_semantic_records(&doc.text, &doc.metadata);
+            };
+            if let Some(obj) = parsed.as_object() {
+                let records = semantic_records_from_wrapper_payload(obj, &doc.metadata);
+                if !records.is_empty() {
+                    return records;
+                }
+            }
+            let records =
+                semantic_records_from_json_value(&parsed, "root", "structured", &doc.metadata);
+            if records.is_empty() {
+                body_semantic_records(&doc.text, &doc.metadata)
+            } else {
+                records
+            }
+        }
+        _ if suffix == "csv" => {
+            let records = semantic_records_from_delimited(&doc.text, ',', &doc.metadata);
+            if records.is_empty() {
+                body_semantic_records(&doc.text, &doc.metadata)
+            } else {
+                records
+            }
+        }
+        _ if suffix == "tsv" => {
+            let records = semantic_records_from_delimited(&doc.text, '\t', &doc.metadata);
+            if records.is_empty() {
+                body_semantic_records(&doc.text, &doc.metadata)
+            } else {
+                records
+            }
+        }
+        _ => body_semantic_records(&doc.text, &doc.metadata),
     }
+}
+
+fn body_semantic_records(text: &str, metadata: &Map<String, Value>) -> Vec<SemanticRecord> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    vec![SemanticRecord {
+        record_path: "body".to_string(),
+        content_role: "body".to_string(),
+        text: trimmed.to_string(),
+        metadata: metadata.clone(),
+    }]
+}
+
+fn semantic_records_from_wrapper_payload(
+    payload: &Map<String, Value>,
+    metadata: &Map<String, Value>,
+) -> Vec<SemanticRecord> {
+    if !is_wrapper_artifact(payload) {
+        return Vec::new();
+    }
+    let mut records = Vec::new();
+    let mut summary_lines = Vec::new();
+    for key in ["provider", "service", "operation", "model", "path"] {
+        if let Some(value) = payload.get(key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                summary_lines.push(format!("{key}: {}", value.trim()));
+            }
+        }
+    }
+    for key in ["file", "options", "artifacts"] {
+        if let Some(value) = payload.get(key) {
+            if let Some(compact) = compact_json(value, 320) {
+                summary_lines.push(format!("{key}: {compact}"));
+            }
+        }
+    }
+    if !summary_lines.is_empty() {
+        records.push(SemanticRecord {
+            record_path: "summary".to_string(),
+            content_role: "summary".to_string(),
+            text: summary_lines.join("\n"),
+            metadata: metadata.clone(),
+        });
+    }
+    if let Some(text_value) = payload.get("text") {
+        records.extend(semantic_records_from_json_value(
+            text_value,
+            "text",
+            "body",
+            metadata,
+        ));
+    }
+    if let Some(response) = payload.get("response") {
+        records.extend(semantic_records_from_json_value(
+            response,
+            "response",
+            "structured",
+            metadata,
+        ));
+    }
+    for extra in ["pages", "segments", "document_annotation"] {
+        if let Some(value) = payload.get(extra) {
+            if extra == "response" || extra == "text" {
+                continue;
+            }
+            records.extend(semantic_records_from_json_value(
+                value,
+                extra,
+                &json_child_role(extra, "structured"),
+                metadata,
+            ));
+        }
+    }
+    records
+}
+
+fn semantic_records_from_json_value(
+    value: &Value,
+    record_path: &str,
+    content_role: &str,
+    metadata: &Map<String, Value>,
+) -> Vec<SemanticRecord> {
+    match value {
+        Value::Object(map) => {
+            let serialized = json_text(value, true);
+            if serialized.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
+                return vec![SemanticRecord {
+                    record_path: record_path.to_string(),
+                    content_role: content_role.to_string(),
+                    text: serialized,
+                    metadata: metadata.clone(),
+                }];
+            }
+            let mut records = Vec::new();
+            for (key, child) in map {
+                let child_path = if record_path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{record_path}.{key}")
+                };
+                records.extend(semantic_records_from_json_value(
+                    child,
+                    &child_path,
+                    &json_child_role(key, content_role),
+                    metadata,
+                ));
+            }
+            records
+        }
+        Value::Array(items) => {
+            let serialized = json_text(value, true);
+            if serialized.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
+                return vec![SemanticRecord {
+                    record_path: record_path.to_string(),
+                    content_role: content_role.to_string(),
+                    text: serialized,
+                    metadata: metadata.clone(),
+                }];
+            }
+            let mut records = Vec::new();
+            for (index, child) in items.iter().enumerate() {
+                let child_path = format!("{record_path}[{index}]");
+                records.extend(semantic_records_from_json_value(
+                    child,
+                    &child_path,
+                    &json_list_role(record_path, content_role),
+                    metadata,
+                ));
+            }
+            records
+        }
+        Value::String(text) => {
+            let stripped = text.trim();
+            if stripped.is_empty() {
+                return Vec::new();
+            }
+            let leaf = format_leaf_text(stripped, record_path, content_role);
+            if leaf.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
+                return vec![SemanticRecord {
+                    record_path: record_path.to_string(),
+                    content_role: content_role.to_string(),
+                    text: leaf,
+                    metadata: metadata.clone(),
+                }];
+            }
+            sliding_windows(&leaf, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS)
+                .into_iter()
+                .map(|window| SemanticRecord {
+                    record_path: record_path.to_string(),
+                    content_role: content_role.to_string(),
+                    text: window,
+                    metadata: metadata.clone(),
+                })
+                .collect()
+        }
+        _ => {
+            let Some(scalar) = json_scalar_text(value) else {
+                return Vec::new();
+            };
+            vec![SemanticRecord {
+                record_path: record_path.to_string(),
+                content_role: content_role.to_string(),
+                text: format_leaf_text(&scalar, record_path, content_role),
+                metadata: metadata.clone(),
+            }]
+        }
+    }
+}
+
+fn semantic_records_from_delimited(
+    text: &str,
+    delimiter: char,
+    metadata: &Map<String, Value>,
+) -> Vec<SemanticRecord> {
+    let mut lines = text.lines();
+    let Some(header_line) = lines.next() else {
+        return Vec::new();
+    };
+    let headers: Vec<&str> = header_line.split(delimiter).collect();
+    if headers.is_empty() {
+        return body_semantic_records(text, metadata);
+    }
+    let mut records = vec![SemanticRecord {
+        record_path: "schema".to_string(),
+        content_role: "table_schema".to_string(),
+        text: format!("columns: {}", headers.join(&delimiter.to_string())),
+        metadata: metadata.clone(),
+    }];
+    for (row_index, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let values: Vec<&str> = line.split(delimiter).collect();
+        let mut row = BTreeMap::new();
+        for (idx, header) in headers.iter().enumerate() {
+            row.insert(
+                header.trim().to_string(),
+                values.get(idx).copied().unwrap_or_default().trim().to_string(),
+            );
+        }
+        records.extend(semantic_records_from_table_row(
+            &row,
+            &format!("row[{row_index}]"),
+            metadata,
+        ));
+    }
+    records
+}
+
+fn semantic_records_from_table_row(
+    row: &BTreeMap<String, String>,
+    record_path: &str,
+    metadata: &Map<String, Value>,
+) -> Vec<SemanticRecord> {
+    let serialized = serde_json::to_string(row).unwrap_or_default();
+    if serialized.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
+        return vec![SemanticRecord {
+            record_path: record_path.to_string(),
+            content_role: "table_row".to_string(),
+            text: serialized,
+            metadata: metadata.clone(),
+        }];
+    }
+    let mut records = Vec::new();
+    let mut current = BTreeMap::new();
+    for (key, value) in row {
+        let trimmed = value.trim().to_string();
+        let field_path = format!("{record_path}.{key}");
+        if trimmed.chars().count() > STRUCTURED_RECORD_MAX_CHARS {
+            if !current.is_empty() {
+                records.push(SemanticRecord {
+                    record_path: record_path.to_string(),
+                    content_role: "table_row".to_string(),
+                    text: serde_json::to_string(&current).unwrap_or_default(),
+                    metadata: metadata.clone(),
+                });
+                current.clear();
+            }
+            records.extend(semantic_records_from_json_value(
+                &Value::String(trimmed),
+                &field_path,
+                "table_field",
+                metadata,
+            ));
+            continue;
+        }
+        let mut candidate = current.clone();
+        candidate.insert(key.clone(), trimmed.clone());
+        if !current.is_empty()
+            && serde_json::to_string(&candidate)
+                .unwrap_or_default()
+                .chars()
+                .count()
+                > STRUCTURED_RECORD_MAX_CHARS
+        {
+            records.push(SemanticRecord {
+                record_path: record_path.to_string(),
+                content_role: "table_row".to_string(),
+                text: serde_json::to_string(&current).unwrap_or_default(),
+                metadata: metadata.clone(),
+            });
+            current.clear();
+        }
+        current.insert(key.clone(), trimmed);
+    }
+    if !current.is_empty() {
+        records.push(SemanticRecord {
+            record_path: record_path.to_string(),
+            content_role: "table_row".to_string(),
+            text: serde_json::to_string(&current).unwrap_or_default(),
+            metadata: metadata.clone(),
+        });
+    }
+    records
+}
+
+fn chunk_semantic_record(record: &SemanticRecord, doc: &SourceDocument) -> Vec<String> {
+    let trimmed = record.text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if matches!(doc.kind.as_str(), "evidence" | "session_memory") {
+        return chunk_atomic_text(trimmed);
+    }
+    if matches!(
+        record.content_role.as_str(),
+        "body" | "page_markdown" | "annotation" | "summary" | "table_schema"
+    ) {
+        return chunk_paragraph_text(trimmed);
+    }
+    chunk_atomic_text(trimmed)
 }
 
 fn chunk_atomic_text(text: &str) -> Vec<String> {
@@ -752,96 +1500,10 @@ fn chunk_atomic_text(text: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    if trimmed.len() <= CHUNK_TARGET_CHARS {
+    if trimmed.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
         return vec![trimmed.to_string()];
     }
-    sliding_windows(trimmed)
-}
-
-fn chunk_json(text: &str) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
-        return chunk_paragraph_text(text);
-    };
-    let mut records = Vec::new();
-    match parsed {
-        Value::Array(items) => {
-            for item in items {
-                records.push(
-                    serde_json::to_string_pretty(&item).unwrap_or_else(|_| item.to_string())
-                );
-            }
-        }
-        Value::Object(map) => {
-            for (key, value) in map {
-                records.push(
-                    serde_json::to_string_pretty(&json!({ key: value }))
-                        .unwrap_or_else(|_| value.to_string())
-                );
-            }
-        }
-        other => records.push(
-            serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string())
-        ),
-    }
-    group_records(&records)
-}
-
-fn chunk_delimited(text: &str, delimiter: char) -> Vec<String> {
-    let mut lines = text.lines();
-    let Some(header_line) = lines.next() else {
-        return Vec::new();
-    };
-    let headers: Vec<&str> = header_line.split(delimiter).collect();
-    if headers.is_empty() {
-        return chunk_paragraph_text(text);
-    }
-    let mut records = vec![header_line.to_string()];
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let values: Vec<&str> = line.split(delimiter).collect();
-        let mut record = Map::new();
-        for (idx, header) in headers.iter().enumerate() {
-            record.insert(
-                header.trim().to_string(),
-                Value::String(values.get(idx).copied().unwrap_or_default().trim().to_string()),
-            );
-        }
-        records.push(Value::Object(record).to_string());
-    }
-    group_records(&records)
-}
-
-fn group_records(records: &[String]) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for record in records {
-        let value = record.trim();
-        if value.is_empty() {
-            continue;
-        }
-        let candidate = if current.is_empty() {
-            value.to_string()
-        } else {
-            format!("{current}\n{value}")
-        };
-        if !current.is_empty() && candidate.len() > CHUNK_TARGET_CHARS {
-            chunks.push(current.clone());
-            let overlap = tail_chars(&current, CHUNK_OVERLAP_CHARS);
-            current = if overlap.is_empty() {
-                value.to_string()
-            } else {
-                format!("{overlap}\n{value}")
-            };
-        } else {
-            current = candidate;
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+    sliding_windows(trimmed, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS)
 }
 
 fn chunk_paragraph_text(text: &str) -> Vec<String> {
@@ -875,25 +1537,25 @@ fn chunk_paragraph_text(text: &str) -> Vec<String> {
 
     let mut expanded = Vec::new();
     for chunk in chunks {
-        if chunk.len() <= (CHUNK_TARGET_CHARS + CHUNK_OVERLAP_CHARS) {
+        if chunk.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
             expanded.push(chunk);
         } else {
-            expanded.extend(sliding_windows(&chunk));
+            expanded.extend(sliding_windows(&chunk, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS));
         }
     }
     expanded
 }
 
-fn sliding_windows(text: &str) -> Vec<String> {
+fn sliding_windows(text: &str, target_chars: usize, overlap_chars: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
-    let step = CHUNK_TARGET_CHARS.saturating_sub(CHUNK_OVERLAP_CHARS).max(1);
+    let step = target_chars.saturating_sub(overlap_chars).max(1);
     let mut windows = Vec::new();
     let mut start = 0usize;
     while start < trimmed.len() {
-        let end = clamp_boundary(trimmed, (start + CHUNK_TARGET_CHARS).min(trimmed.len()));
+        let end = clamp_boundary(trimmed, (start + target_chars).min(trimmed.len()));
         let slice = trimmed[start..end].trim();
         if !slice.is_empty() {
             windows.push(slice.to_string());
@@ -904,6 +1566,142 @@ fn sliding_windows(text: &str) -> Vec<String> {
         start = clamp_boundary(trimmed, start + step);
     }
     windows
+}
+
+fn split_query_windows(text: &str, max_chars: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return vec![trimmed.to_string()];
+    }
+    let overlap_chars = max_chars.saturating_div(4).clamp(1, 400).min(max_chars.saturating_sub(1));
+    sliding_windows(trimmed, max_chars, overlap_chars)
+}
+
+fn json_text(value: &Value, pretty: bool) -> String {
+    if pretty {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+    }
+}
+
+fn compact_json(value: &Value, max_chars: usize) -> Option<String> {
+    let compact = json_text(value, false);
+    if compact.trim().is_empty() {
+        return None;
+    }
+    if compact.chars().count() <= max_chars {
+        return Some(compact);
+    }
+    Some(truncate(&compact, max_chars))
+}
+
+fn json_scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Bool(flag) => Some(if *flag { "true".to_string() } else { "false".to_string() }),
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        other => Some(json_text(other, false)),
+    }
+}
+
+fn format_leaf_text(value: &str, record_path: &str, content_role: &str) -> String {
+    if matches!(
+        content_role,
+        "body" | "page_markdown" | "annotation" | "summary" | "transcript_segment"
+    ) {
+        return value.to_string();
+    }
+    let mut label = record_path.rsplit('.').next().unwrap_or(record_path).to_string();
+    if let Some((prefix, _)) = label.split_once('[') {
+        label = prefix.to_string();
+    }
+    if !label.is_empty() && !matches!(label.as_str(), "root" | "body") {
+        format!("{label}: {value}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn json_child_role(key: &str, parent_role: &str) -> String {
+    let lowered = key.to_ascii_lowercase();
+    if lowered == "markdown" {
+        return "page_markdown".to_string();
+    }
+    if matches!(lowered.as_str(), "text" | "content" | "summary" | "description" | "body") {
+        return "body".to_string();
+    }
+    if matches!(lowered.as_str(), "document_annotation" | "annotation") {
+        return "annotation".to_string();
+    }
+    if matches!(lowered.as_str(), "segment" | "segments" | "transcript" | "transcription") {
+        return "transcript_segment".to_string();
+    }
+    if matches!(
+        lowered.as_str(),
+        "provider" | "service" | "model" | "operation" | "options" | "artifacts" | "usage_info" | "file" | "path"
+    ) {
+        return "metadata".to_string();
+    }
+    if parent_role == "transcript_segment" {
+        return "transcript_segment".to_string();
+    }
+    "structured".to_string()
+}
+
+fn json_list_role(record_path: &str, parent_role: &str) -> String {
+    if record_path.ends_with(".pages") {
+        return "page_markdown".to_string();
+    }
+    if record_path.ends_with(".segments") {
+        return "transcript_segment".to_string();
+    }
+    parent_role.to_string()
+}
+
+fn is_wrapper_artifact(payload: &Map<String, Value>) -> bool {
+    let mut count = 0usize;
+    for key in ["provider", "operation", "response", "text", "artifacts", "service"] {
+        if payload.contains_key(key) {
+            count += 1;
+        }
+    }
+    count >= 3
+}
+
+fn extract_oversize_input_id(message: &str) -> Option<usize> {
+    let lowered = message.to_ascii_lowercase();
+    let start = lowered.find("input id ")? + "input id ".len();
+    let digits = lowered[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() || !lowered.contains("exceeding max") {
+        return None;
+    }
+    digits.parse::<usize>().ok()
+}
+
+fn mean_pool_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
+    let width = vectors.iter().map(Vec::len).min().unwrap_or(0);
+    if width == 0 {
+        return Vec::new();
+    }
+    let pooled = (0..width)
+        .map(|index| vectors.iter().map(|vector| vector[index]).sum::<f64>() / vectors.len() as f64)
+        .collect::<Vec<_>>();
+    normalize_vector(pooled)
 }
 
 fn split_paragraphs(text: &str) -> Vec<String> {
@@ -936,10 +1734,26 @@ fn should_skip_walk_entry(path: &Path, workspace: &Path, session_root_dir: &str)
     if parts.iter().any(|part| EXCLUDED_DIR_NAMES.contains(part)) {
         return true;
     }
+    if parts.iter().any(|part| is_junk_name(part)) {
+        return true;
+    }
     if parts.first().copied() == Some(session_root_dir) {
         return !(parts.get(1).copied() == Some("wiki"));
     }
     false
+}
+
+fn is_junk_name(name: &str) -> bool {
+    IGNORED_FILE_NAMES.contains(&name)
+        || IGNORED_FILE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+fn is_junk_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(is_junk_name)
 }
 
 fn make_excerpt(text: &str) -> String {
@@ -1009,6 +1823,234 @@ fn truncate(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max_chars.saturating_sub(3)).collect::<String>() + "..."
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().collect::<String>() + chars.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_documents_from_file_ignores_junk_files() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("._notes.md"), "junk").unwrap();
+        fs::write(root.join(".DS_Store"), "junk").unwrap();
+        fs::write(root.join("notes.md"), "hello").unwrap();
+
+        assert!(documents_from_file(&root.join("._notes.md"), root, "workspace").is_empty());
+        assert!(documents_from_file(&root.join(".DS_Store"), root, "workspace").is_empty());
+        let docs = documents_from_file(&root.join("notes.md"), root, "workspace");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].path, "notes.md");
+    }
+
+    #[test]
+    fn test_retrieval_progress_formats_trace_message() {
+        let line = RetrievalProgress {
+            corpus: "workspace".to_string(),
+            phase: "embedding".to_string(),
+            documents_done: 12,
+            documents_total: 48,
+            chunks_done: 80,
+            chunks_total: 320,
+            reused_documents: 0,
+            message: "Embedding workspace retrieval index.".to_string(),
+        }
+        .to_trace_message();
+
+        assert!(line.starts_with("[retrieval:progress] "));
+        assert!(line.contains("\"percent\":25"));
+    }
+
+    #[test]
+    fn test_build_pending_chunks_normalizes_ocr_wrapper_json() {
+        let doc = SourceDocument {
+            source_id: "scan.pdf.ocr.json".to_string(),
+            path: "scan.pdf.ocr.json".to_string(),
+            title: "scan.pdf.ocr.json".to_string(),
+            text: json!({
+                "provider": "mistral",
+                "service": "document_ai",
+                "operation": "ocr",
+                "model": "mistral-ocr-latest",
+                "path": "scan.pdf",
+                "artifacts": {"markdown_path": "scan.pdf.ocr.md"},
+                "text": "OCR text ".repeat(4000),
+                "response": {
+                    "pages": [
+                        {"index": 0, "markdown": format!("# Page 1\n{}", "Alpha ".repeat(1500))},
+                        {"index": 1, "markdown": format!("# Page 2\n{}", "Beta ".repeat(1500))},
+                    ],
+                    "usage_info": {"pages_processed": 2}
+                }
+            })
+            .to_string(),
+            fingerprint: "ocr-doc".to_string(),
+            kind: "workspace".to_string(),
+            metadata: {
+                let mut metadata = Map::new();
+                metadata.insert("extension".to_string(), Value::String(".json".to_string()));
+                metadata
+            },
+        };
+
+        let pending = build_pending_chunks_for_document(&doc);
+
+        assert!(!pending.is_empty());
+        assert!(pending.iter().any(|chunk| chunk.record_path == "summary"));
+        assert!(pending.iter().any(|chunk| chunk.record_path.starts_with("text")));
+        assert!(pending.iter().any(|chunk| chunk.record_path.contains("response.pages")));
+        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+    }
+
+    #[test]
+    fn test_build_pending_chunks_recursively_splits_large_json_field() {
+        let doc = SourceDocument {
+            source_id: "records.json".to_string(),
+            path: "records.json".to_string(),
+            title: "records.json".to_string(),
+            text: json!({
+                "items": [
+                    {
+                        "id": "42",
+                        "note": "Alpha ".repeat(1500),
+                        "status": "open"
+                    }
+                ]
+            })
+            .to_string(),
+            fingerprint: "json-doc".to_string(),
+            kind: "workspace".to_string(),
+            metadata: {
+                let mut metadata = Map::new();
+                metadata.insert("extension".to_string(), Value::String(".json".to_string()));
+                metadata
+            },
+        };
+
+        let pending = build_pending_chunks_for_document(&doc);
+
+        assert!(pending.iter().any(|chunk| chunk.record_path.contains("items[0].note")));
+        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+    }
+
+    #[test]
+    fn test_build_pending_chunks_recursively_splits_large_csv_field() {
+        let doc = SourceDocument {
+            source_id: "records.csv".to_string(),
+            path: "records.csv".to_string(),
+            title: "records.csv".to_string(),
+            text: format!("id,notes,status\n1,{},open\n", "value ".repeat(1500)),
+            fingerprint: "csv-doc".to_string(),
+            kind: "workspace".to_string(),
+            metadata: {
+                let mut metadata = Map::new();
+                metadata.insert("extension".to_string(), Value::String(".csv".to_string()));
+                metadata
+            },
+        };
+
+        let pending = build_pending_chunks_for_document(&doc);
+
+        assert!(pending.iter().any(|chunk| chunk.record_path.ends_with(".notes")));
+        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+    }
+
+    #[test]
+    fn test_query_windows_and_mean_pool() {
+        let windows = split_query_windows("0123456789abcdef", 12);
+        assert_eq!(windows.len(), 2);
+        let pooled = mean_pool_vectors(&[vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!((pooled[0] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((pooled[1] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    struct FakeBackend {
+        limits: EmbeddingsProviderLimits,
+        fail_first: AtomicBool,
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl DocumentEmbeddingsBackend for FakeBackend {
+        fn provider(&self) -> &str {
+            "mistral"
+        }
+
+        fn model(&self) -> &str {
+            MISTRAL_EMBEDDING_MODEL
+        }
+
+        fn limits(&self) -> EmbeddingsProviderLimits {
+            self.limits
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>> {
+            self.calls.lock().unwrap().push(texts.to_vec());
+            if self.fail_first.swap(false, Ordering::SeqCst) {
+                return Err(anyhow!(
+                    "mistral embeddings HTTP 400: {{\"message\":\"Input id 0 has 9000 tokens, exceeding max 8192 tokens.\"}}"
+                ));
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_index_retries_after_oversize_error() {
+        let tmp = tempdir().unwrap();
+        let index_dir = tmp.path().join(".openplanter/embeddings/workspace");
+        let doc = SourceDocument {
+            source_id: "notes.md".to_string(),
+            path: "notes.md".to_string(),
+            title: "notes.md".to_string(),
+            text: "Long paragraph ".repeat(300),
+            fingerprint: "notes-doc".to_string(),
+            kind: "workspace".to_string(),
+            metadata: {
+                let mut metadata = Map::new();
+                metadata.insert("extension".to_string(), Value::String(".md".to_string()));
+                metadata
+            },
+        };
+        let backend = FakeBackend {
+            limits: EmbeddingsProviderLimits {
+                batch_size: 32,
+                input_char_limit: 5_000,
+                emergency_input_char_limit: 800,
+            },
+            fail_first: AtomicBool::new(true),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut events = Vec::new();
+
+        let chunks = refresh_index(
+            Some(&index_dir),
+            &[doc],
+            &backend,
+            "workspace",
+            &mut |message| events.push(message),
+        )
+        .await
+        .unwrap();
+
+        assert!(chunks.len() > 1);
+        assert!(events.iter().any(|line| line.contains("retrying batch after provider oversize")));
+    }
 }
 
 fn tail_chars(text: &str, count: usize) -> String {

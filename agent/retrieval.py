@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import csv
 import hashlib
 import json
@@ -9,7 +10,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .config import normalize_embeddings_provider
 
@@ -17,8 +18,9 @@ VOYAGE_EMBEDDING_MODEL = "voyage-4"
 MISTRAL_EMBEDDING_MODEL = "mistral-embed"
 _CHUNK_TARGET_CHARS = 1200
 _CHUNK_OVERLAP_CHARS = 200
+_STRUCTURED_RECORD_MAX_CHARS = _CHUNK_TARGET_CHARS + _CHUNK_OVERLAP_CHARS
 _MAX_EXCERPT_CHARS = 280
-_INDEX_VERSION = "embeddings-v1"
+_INDEX_VERSION = "embeddings-v2"
 _WORKSPACE_TOP_K = 4
 _SESSION_TOP_K = 4
 _MAX_HITS_PER_SOURCE = 2
@@ -36,9 +38,19 @@ _EXCLUDED_DIR_NAMES = {
     "target",
     "vendor",
 }
+_IGNORED_FILE_NAMES = {".DS_Store", "Thumbs.db"}
+_IGNORED_FILE_PREFIXES = ("._",)
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
 _WS_RE = re.compile(r"\s+")
+_OVERSIZE_INPUT_ID_RE = re.compile(r"input id\s+(\d+).+exceeding max", re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class EmbeddingsProviderLimits:
+    batch_size: int
+    input_char_limit: int
+    emergency_input_char_limit: int
 
 
 @dataclass(slots=True)
@@ -59,6 +71,43 @@ class RetrievalBuildResult:
 
 
 @dataclass(slots=True)
+class RetrievalProgress:
+    corpus: str
+    phase: str
+    documents_done: int
+    documents_total: int
+    chunks_done: int
+    chunks_total: int
+    reused_documents: int = 0
+    message: str = ""
+
+    def percent(self) -> int:
+        if self.documents_total <= 0:
+            return 0
+        return max(
+            0,
+            min(100, round((self.documents_done / self.documents_total) * 100)),
+        )
+
+    def to_trace_message(self) -> str:
+        return "[retrieval:progress] " + json.dumps(
+            {
+                "corpus": self.corpus,
+                "phase": self.phase,
+                "documents_done": self.documents_done,
+                "documents_total": self.documents_total,
+                "chunks_done": self.chunks_done,
+                "chunks_total": self.chunks_total,
+                "reused_documents": self.reused_documents,
+                "percent": self.percent(),
+                "message": self.message,
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+
+@dataclass(slots=True)
 class SourceDocument:
     source_id: str
     path: str
@@ -67,6 +116,28 @@ class SourceDocument:
     fingerprint: str
     kind: str
     metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
+class SemanticRecord:
+    record_path: str
+    content_role: str
+    text: str
+    metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
+class PendingChunk:
+    source_id: str
+    path: str
+    title: str
+    text: str
+    fingerprint: str
+    kind: str
+    metadata: dict[str, Any]
+    record_path: str
+    content_role: str
+    vector: list[float]
 
 
 @dataclass(slots=True)
@@ -80,6 +151,9 @@ class ChunkRecord:
     fingerprint: str
     kind: str
     metadata: dict[str, Any]
+    record_path: str
+    content_role: str
+    subchunk_index: int
     vector: list[float]
 
     def to_json(self, *, provider: str, model: str) -> dict[str, Any]:
@@ -93,6 +167,9 @@ class ChunkRecord:
             "fingerprint": self.fingerprint,
             "kind": self.kind,
             "metadata": self.metadata,
+            "record_path": self.record_path,
+            "content_role": self.content_role,
+            "subchunk_index": self.subchunk_index,
             "provider": provider,
             "model": model,
             "vector": self.vector,
@@ -116,12 +193,42 @@ class ChunkRecord:
             fingerprint=str(payload.get("fingerprint") or ""),
             kind=str(payload.get("kind") or "text"),
             metadata=_as_dict(payload.get("metadata")),
+            record_path=str(
+                payload.get("record_path")
+                or _as_dict(payload.get("metadata")).get("record_path")
+                or "body"
+            ),
+            content_role=str(
+                payload.get("content_role")
+                or _as_dict(payload.get("metadata")).get("content_role")
+                or "body"
+            ),
+            subchunk_index=int(
+                payload.get("subchunk_index")
+                or _as_dict(payload.get("metadata")).get("subchunk_index")
+                or 0
+            ),
             vector=_normalize_vector(vector),
         )
 
 
 class RetrievalError(RuntimeError):
     pass
+
+
+def _provider_limits(provider: str) -> EmbeddingsProviderLimits:
+    normalized = normalize_embeddings_provider(provider)
+    if normalized == "voyage":
+        return EmbeddingsProviderLimits(
+            batch_size=_BATCH_SIZE,
+            input_char_limit=24_000,
+            emergency_input_char_limit=6_000,
+        )
+    return EmbeddingsProviderLimits(
+        batch_size=_BATCH_SIZE,
+        input_char_limit=12_000,
+        emergency_input_char_limit=4_000,
+    )
 
 
 class EmbeddingsClient:
@@ -133,15 +240,22 @@ class EmbeddingsClient:
             if self.provider == "voyage"
             else MISTRAL_EMBEDDING_MODEL
         )
+        self.limits = _provider_limits(self.provider)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts, input_type="document")
 
     def embed_query(self, text: str) -> list[float]:
-        vectors = self._embed([text], input_type="query")
+        query_windows = _split_query_windows(
+            text,
+            max_chars=self.limits.input_char_limit,
+        )
+        vectors = self._embed(query_windows, input_type="query")
         if not vectors:
             raise RetrievalError("Embeddings provider returned no query vector")
-        return vectors[0]
+        if len(vectors) == 1:
+            return vectors[0]
+        return _mean_pool_vectors(vectors)
 
     def _endpoint(self) -> str:
         if self.provider == "voyage":
@@ -152,8 +266,8 @@ class EmbeddingsClient:
         if not texts:
             return []
         all_vectors: list[list[float]] = []
-        for start in range(0, len(texts), _BATCH_SIZE):
-            batch = texts[start : start + _BATCH_SIZE]
+        for start in range(0, len(texts), self.limits.batch_size):
+            batch = texts[start : start + self.limits.batch_size]
             payload: dict[str, Any] = {
                 "model": self.model,
                 "input": batch,
@@ -267,7 +381,7 @@ def build_retrieval_packet(
     embeddings_provider: str,
     voyage_api_key: str | None,
     mistral_api_key: str | None,
-    on_event: callable | None = None,
+    on_event: Callable[[str], None] | None = None,
 ) -> RetrievalBuildResult:
     status = build_embeddings_status(
         provider=embeddings_provider,
@@ -285,6 +399,18 @@ def build_retrieval_packet(
 
     api_key = (voyage_api_key or "").strip() if status.provider == "voyage" else (mistral_api_key or "").strip()
     client = EmbeddingsClient(status.provider, api_key)
+    _emit_progress(
+        on_event,
+        RetrievalProgress(
+            corpus="all",
+            phase="scan",
+            documents_done=0,
+            documents_total=0,
+            chunks_done=0,
+            chunks_total=0,
+            message="Scanning workspace and session documents for retrieval.",
+        ),
+    )
     workspace_docs = _collect_workspace_documents(
         workspace=workspace,
         session_root_dir=session_root_dir,
@@ -324,6 +450,7 @@ def build_retrieval_packet(
         provider=status.provider,
         model=status.model,
         corpus="workspace",
+        on_event=on_event,
     )
     session_chunks = _refresh_index(
         index_dir=session_index_dir,
@@ -332,6 +459,7 @@ def build_retrieval_packet(
         provider=status.provider,
         model=status.model,
         corpus="session",
+        on_event=on_event,
     )
 
     query = _build_query(objective, question_reasoning_packet)
@@ -459,6 +587,8 @@ def _documents_from_paths(
 
 
 def _documents_from_file(path: Path, *, workspace: Path, kind: str) -> list[SourceDocument]:
+    if _is_junk_path(path):
+        return []
     if path.suffix.lower() not in _TEXT_EXTENSIONS:
         return []
     try:
@@ -559,6 +689,7 @@ def _refresh_index(
     provider: str,
     model: str,
     corpus: str,
+    on_event: Callable[[str], None] | None = None,
 ) -> list[ChunkRecord]:
     if index_dir is None:
         return []
@@ -570,40 +701,117 @@ def _refresh_index(
         existing_chunks = _load_existing_chunks(chunks_path)
 
     resolved_chunks: list[ChunkRecord] = []
-    pending_texts: list[str] = []
-    pending_records: list[ChunkRecord] = []
+    pending_records: list[PendingChunk] = []
+    reused_documents = 0
+    reused_chunks = 0
     for doc in documents:
         prior = existing_chunks.get(doc.source_id, [])
         if prior and all(chunk.fingerprint == doc.fingerprint for chunk in prior):
+            reused_documents += 1
+            reused_chunks += len(prior)
             resolved_chunks.extend(prior)
             continue
-        for chunk_index, text in enumerate(_chunk_document(doc)):
-            excerpt = _make_excerpt(text)
-            metadata = dict(doc.metadata)
-            metadata["chunk_index"] = chunk_index
-            pending_records.append(
-                ChunkRecord(
-                    chunk_id=f"{doc.source_id}::chunk:{chunk_index}",
-                    source_id=doc.source_id,
-                    path=doc.path,
-                    title=doc.title,
-                    text=text,
-                    excerpt=excerpt,
-                    fingerprint=doc.fingerprint,
-                    kind=doc.kind,
-                    metadata=metadata,
-                    vector=[],
-                )
-            )
-            pending_texts.append(text)
+        pending_records.extend(_build_pending_chunks_for_document(doc))
 
-    if pending_records:
-        vectors = client.embed_documents(pending_texts)
-        for record, vector in zip(pending_records, vectors, strict=True):
-            record.vector = vector
-        resolved_chunks.extend(pending_records)
+    pending_records = _preflight_pending_chunks(
+        pending_records,
+        max_chars=client.limits.input_char_limit,
+        on_event=on_event,
+        reason="preflight",
+    )
+
+    total_documents = len(documents)
+    total_chunks = reused_chunks + len(pending_records)
+    if not pending_records:
+        _emit_progress(
+            on_event,
+            RetrievalProgress(
+                corpus=corpus,
+                phase="writing",
+                documents_done=total_documents,
+                documents_total=total_documents,
+                chunks_done=total_chunks,
+                chunks_total=total_chunks,
+                reused_documents=reused_documents,
+                message=f"Writing cached {corpus} retrieval index.",
+            ),
+        )
+    else:
+        _emit_progress(
+            on_event,
+            RetrievalProgress(
+                corpus=corpus,
+                phase="embedding",
+                documents_done=reused_documents,
+                documents_total=total_documents,
+                chunks_done=reused_chunks,
+                chunks_total=total_chunks,
+                reused_documents=reused_documents,
+                message=f"Embedding {corpus} retrieval index.",
+            ),
+        )
+        batch_start = 0
+        while batch_start < len(pending_records):
+            chunk_boundaries = _pending_chunk_boundaries(pending_records)
+            total_chunks = reused_chunks + len(pending_records)
+            batch_records = pending_records[batch_start : batch_start + client.limits.batch_size]
+            prepared = _preflight_pending_chunks(
+                batch_records,
+                max_chars=client.limits.input_char_limit,
+                on_event=on_event,
+                reason="batch",
+            )
+            if len(prepared) != len(batch_records):
+                pending_records[batch_start : batch_start + len(batch_records)] = prepared
+                continue
+            try:
+                batch_vectors = client.embed_documents([record.text for record in batch_records])
+            except RetrievalError as exc:
+                if _retry_oversized_batch(
+                    pending_records,
+                    batch_start=batch_start,
+                    error=exc,
+                    client=client,
+                    on_event=on_event,
+                ):
+                    continue
+                raise
+            for record, vector in zip(batch_records, batch_vectors, strict=True):
+                record.vector = vector
+            batch_start += len(batch_records)
+            completed_pending_docs = bisect.bisect_right(
+                chunk_boundaries,
+                batch_start,
+            )
+            _emit_progress(
+                on_event,
+                RetrievalProgress(
+                    corpus=corpus,
+                    phase="embedding",
+                    documents_done=reused_documents + completed_pending_docs,
+                    documents_total=total_documents,
+                    chunks_done=reused_chunks + batch_start,
+                    chunks_total=total_chunks,
+                    reused_documents=reused_documents,
+                    message=f"Embedding {corpus} retrieval index.",
+                ),
+            )
+        resolved_chunks.extend(_finalize_pending_chunks(pending_records))
 
     resolved_chunks.sort(key=lambda chunk: (chunk.path, chunk.chunk_id))
+    _emit_progress(
+        on_event,
+        RetrievalProgress(
+            corpus=corpus,
+            phase="writing",
+            documents_done=total_documents,
+            documents_total=total_documents,
+            chunks_done=total_chunks,
+            chunks_total=total_chunks,
+            reused_documents=reused_documents,
+            message=f"Writing {corpus} retrieval index files.",
+        ),
+    )
     meta_path.write_text(
         json.dumps(
             {
@@ -627,6 +835,19 @@ def _refresh_index(
             for chunk in resolved_chunks
         ),
         encoding="utf-8",
+    )
+    _emit_progress(
+        on_event,
+        RetrievalProgress(
+            corpus=corpus,
+            phase="done",
+            documents_done=total_documents,
+            documents_total=total_documents,
+            chunks_done=total_chunks,
+            chunks_total=total_chunks,
+            reused_documents=reused_documents,
+            message=f"{corpus.capitalize()} retrieval index ready.",
+        ),
     )
     return resolved_chunks
 
@@ -707,6 +928,9 @@ def _search_chunks(
                 "excerpt": chunk.excerpt,
                 "source_id": chunk.source_id,
                 "kind": chunk.kind,
+                "record_path": chunk.record_path,
+                "content_role": chunk.content_role,
+                "subchunk_index": chunk.subchunk_index,
                 "metadata": chunk.metadata,
             }
         )
@@ -736,87 +960,507 @@ def _build_query(objective: str, question_reasoning_packet: dict[str, Any] | Non
     return "\n\n".join(part for part in parts if part)
 
 
-def _chunk_document(doc: SourceDocument) -> list[str]:
+def _build_pending_chunks_for_document(doc: SourceDocument) -> list[PendingChunk]:
+    pending: list[PendingChunk] = []
+    for record in _semantic_records_for_document(doc):
+        for text in _chunk_semantic_record(record, doc=doc):
+            stripped = text.strip()
+            if not stripped:
+                continue
+            pending.append(
+                PendingChunk(
+                    source_id=doc.source_id,
+                    path=doc.path,
+                    title=doc.title,
+                    text=stripped,
+                    fingerprint=doc.fingerprint,
+                    kind=doc.kind,
+                    metadata=dict(record.metadata),
+                    record_path=record.record_path,
+                    content_role=record.content_role,
+                    vector=[],
+                )
+            )
+    return pending
+
+
+def _finalize_pending_chunks(chunks: list[PendingChunk]) -> list[ChunkRecord]:
+    finalized: list[ChunkRecord] = []
+    chunk_indexes: dict[str, int] = {}
+    record_subchunks: dict[tuple[str, str], int] = {}
+    for chunk in chunks:
+        chunk_index = chunk_indexes.get(chunk.source_id, 0)
+        record_key = (chunk.source_id, chunk.record_path)
+        subchunk_index = record_subchunks.get(record_key, 0)
+        metadata = dict(chunk.metadata)
+        metadata["chunk_index"] = chunk_index
+        metadata["record_path"] = chunk.record_path
+        metadata["content_role"] = chunk.content_role
+        metadata["subchunk_index"] = subchunk_index
+        finalized.append(
+            ChunkRecord(
+                chunk_id=f"{chunk.source_id}::chunk:{chunk_index}",
+                source_id=chunk.source_id,
+                path=chunk.path,
+                title=chunk.title,
+                text=chunk.text,
+                excerpt=_make_excerpt(chunk.text),
+                fingerprint=chunk.fingerprint,
+                kind=chunk.kind,
+                metadata=metadata,
+                record_path=chunk.record_path,
+                content_role=chunk.content_role,
+                subchunk_index=subchunk_index,
+                vector=chunk.vector,
+            )
+        )
+        chunk_indexes[chunk.source_id] = chunk_index + 1
+        record_subchunks[record_key] = subchunk_index + 1
+    return finalized
+
+
+def _pending_chunk_boundaries(chunks: list[PendingChunk]) -> list[int]:
+    if not chunks:
+        return []
+    boundaries: list[int] = []
+    running = 0
+    for index, chunk in enumerate(chunks):
+        running += 1
+        next_source = chunks[index + 1].source_id if index + 1 < len(chunks) else None
+        if next_source != chunk.source_id:
+            boundaries.append(running)
+    return boundaries
+
+
+def _preflight_pending_chunks(
+    chunks: list[PendingChunk],
+    *,
+    max_chars: int,
+    on_event: Callable[[str], None] | None,
+    reason: str,
+) -> list[PendingChunk]:
+    prepared: list[PendingChunk] = []
+    for chunk in chunks:
+        if len(chunk.text) <= max_chars:
+            prepared.append(chunk)
+            continue
+        replacements = _split_pending_chunk_for_limit(chunk, max_chars=max_chars)
+        if len(replacements) > 1:
+            _emit_trace(
+                on_event,
+                (
+                    "[retrieval] auto-resplit oversized chunk "
+                    f"reason={reason} source={chunk.path} record_path={chunk.record_path} "
+                    f"chars={len(chunk.text)} limit={max_chars} chunks={len(replacements)}"
+                ),
+            )
+        prepared.extend(replacements)
+    return prepared
+
+
+def _retry_oversized_batch(
+    pending_records: list[PendingChunk],
+    *,
+    batch_start: int,
+    error: RetrievalError,
+    client: EmbeddingsClient,
+    on_event: Callable[[str], None] | None,
+) -> bool:
+    message = str(error)
+    input_id = _extract_oversize_input_id(message)
+    if input_id is None:
+        return False
+    absolute_index = batch_start + input_id
+    if absolute_index >= len(pending_records):
+        return False
+    offending = pending_records[absolute_index]
+    emergency_limit = min(
+        client.limits.emergency_input_char_limit,
+        max(400, len(offending.text) // 2),
+    )
+    replacements = _split_pending_chunk_for_limit(
+        offending,
+        max_chars=emergency_limit,
+    )
+    if len(replacements) <= 1:
+        return False
+    pending_records[absolute_index : absolute_index + 1] = replacements
+    _emit_trace(
+        on_event,
+        (
+            "[retrieval] retrying batch after provider oversize "
+            f"source={offending.path} record_path={offending.record_path} "
+            f"input_id={input_id} chars={len(offending.text)} retry_limit={emergency_limit} "
+            f"chunks={len(replacements)}"
+        ),
+    )
+    return True
+
+
+def _split_pending_chunk_for_limit(chunk: PendingChunk, *, max_chars: int) -> list[PendingChunk]:
+    if len(chunk.text) <= max_chars:
+        return [chunk]
+    target_chars = max(400, min(_CHUNK_TARGET_CHARS, max_chars))
+    overlap_chars = min(
+        max(0, target_chars - 1),
+        min(_CHUNK_OVERLAP_CHARS, max(80, target_chars // 5)),
+    )
+    windows = _sliding_windows(
+        chunk.text,
+        target_chars=target_chars,
+        overlap_chars=overlap_chars,
+    )
+    if len(windows) <= 1:
+        return [chunk]
+    return [
+        PendingChunk(
+            source_id=chunk.source_id,
+            path=chunk.path,
+            title=chunk.title,
+            text=window,
+            fingerprint=chunk.fingerprint,
+            kind=chunk.kind,
+            metadata=dict(chunk.metadata),
+            record_path=chunk.record_path,
+            content_role=chunk.content_role,
+            vector=[],
+        )
+        for window in windows
+    ]
+
+
+def _semantic_records_for_document(doc: SourceDocument) -> list[SemanticRecord]:
     suffix = Path(doc.path.split("#", 1)[0]).suffix.lower()
     if doc.kind in {"evidence", "session_memory"}:
-        return _chunk_atomic_text(doc.text)
+        return _body_semantic_records(doc.text, metadata=doc.metadata)
     if suffix == ".json":
-        return _chunk_json(doc.text)
+        try:
+            parsed = json.loads(doc.text)
+        except json.JSONDecodeError:
+            return _body_semantic_records(doc.text, metadata=doc.metadata)
+        if isinstance(parsed, dict) and _is_wrapper_artifact(parsed):
+            records = _semantic_records_from_wrapper_payload(parsed, metadata=doc.metadata)
+            if records:
+                return records
+        records = _semantic_records_from_json_value(
+            parsed,
+            record_path="root",
+            content_role="structured",
+            metadata=doc.metadata,
+        )
+        return records or _body_semantic_records(doc.text, metadata=doc.metadata)
     if suffix in {".csv", ".tsv"}:
-        return _chunk_delimited(doc.text, delimiter="," if suffix == ".csv" else "\t")
-    return _chunk_paragraph_text(doc.text)
+        records = _semantic_records_from_delimited(
+            doc.text,
+            delimiter="," if suffix == ".csv" else "\t",
+            metadata=doc.metadata,
+        )
+        return records or _body_semantic_records(doc.text, metadata=doc.metadata)
+    return _body_semantic_records(doc.text, metadata=doc.metadata)
 
 
-def _chunk_atomic_text(text: str) -> list[str]:
-    text = text.strip()
-    if not text:
+def _body_semantic_records(text: str, *, metadata: dict[str, Any]) -> list[SemanticRecord]:
+    stripped = text.strip()
+    if not stripped:
         return []
-    if len(text) <= _CHUNK_TARGET_CHARS:
-        return [text]
-    return _sliding_windows(text)
+    return [SemanticRecord(record_path="body", content_role="body", text=stripped, metadata=dict(metadata))]
 
 
-def _chunk_json(text: str) -> list[str]:
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return _chunk_paragraph_text(text)
-    records: list[str] = []
-    if isinstance(parsed, list):
-        records = [
-            json.dumps(item, indent=2, ensure_ascii=False)
-            for item in parsed
+def _semantic_records_from_wrapper_payload(
+    payload: dict[str, Any],
+    *,
+    metadata: dict[str, Any],
+) -> list[SemanticRecord]:
+    records: list[SemanticRecord] = []
+    summary_lines: list[str] = []
+    for key in ("provider", "service", "operation", "model", "path"):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            summary_lines.append(f"{key}: {value}")
+    for key in ("file", "options", "artifacts"):
+        value = payload.get(key)
+        compact = _compact_json(value, max_chars=320)
+        if compact:
+            summary_lines.append(f"{key}: {compact}")
+    if summary_lines:
+        records.append(
+            SemanticRecord(
+                record_path="summary",
+                content_role="summary",
+                text="\n".join(summary_lines),
+                metadata=dict(metadata),
+            )
+        )
+
+    text_value = payload.get("text")
+    if isinstance(text_value, str) and text_value.strip():
+        records.extend(
+            _semantic_records_from_json_value(
+                text_value,
+                record_path="text",
+                content_role="body",
+                metadata=metadata,
+            )
+        )
+
+    response = payload.get("response")
+    if response is not None:
+        records.extend(
+            _semantic_records_from_json_value(
+                response,
+                record_path="response",
+                content_role="structured",
+                metadata=metadata,
+            )
+        )
+
+    for extra_key in ("pages", "segments", "document_annotation"):
+        if extra_key in payload and extra_key not in {"text", "response"}:
+            records.extend(
+                _semantic_records_from_json_value(
+                    payload[extra_key],
+                    record_path=extra_key,
+                    content_role=_json_child_role(extra_key, payload[extra_key], parent_role="structured"),
+                    metadata=metadata,
+                )
+            )
+    return [record for record in records if record.text.strip()]
+
+
+def _semantic_records_from_json_value(
+    value: Any,
+    *,
+    record_path: str,
+    content_role: str,
+    metadata: dict[str, Any],
+) -> list[SemanticRecord]:
+    if isinstance(value, dict):
+        serialized = _json_text(value)
+        if len(serialized) <= _STRUCTURED_RECORD_MAX_CHARS:
+            return [
+                SemanticRecord(
+                    record_path=record_path or "root",
+                    content_role=content_role,
+                    text=serialized,
+                    metadata=dict(metadata),
+                )
+            ]
+        records: list[SemanticRecord] = []
+        for key, child in value.items():
+            child_path = f"{record_path}.{key}" if record_path else str(key)
+            records.extend(
+                _semantic_records_from_json_value(
+                    child,
+                    record_path=child_path,
+                    content_role=_json_child_role(str(key), child, parent_role=content_role),
+                    metadata=metadata,
+                )
+            )
+        return records
+
+    if isinstance(value, list):
+        serialized = _json_text(value)
+        if len(serialized) <= _STRUCTURED_RECORD_MAX_CHARS:
+            return [
+                SemanticRecord(
+                    record_path=record_path or "root",
+                    content_role=content_role,
+                    text=serialized,
+                    metadata=dict(metadata),
+                )
+            ]
+        records: list[SemanticRecord] = []
+        for index, child in enumerate(value):
+            child_path = f"{record_path}[{index}]"
+            records.extend(
+                _semantic_records_from_json_value(
+                    child,
+                    record_path=child_path,
+                    content_role=_json_list_role(record_path, child, parent_role=content_role),
+                    metadata=metadata,
+                )
+            )
+        return records
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        leaf_text = _format_leaf_text(
+            stripped,
+            record_path=record_path,
+            content_role=content_role,
+        )
+        if len(leaf_text) <= _STRUCTURED_RECORD_MAX_CHARS:
+            return [
+                SemanticRecord(
+                    record_path=record_path or "root",
+                    content_role=content_role,
+                    text=leaf_text,
+                    metadata=dict(metadata),
+                )
+            ]
+        return [
+            SemanticRecord(
+                record_path=record_path or "root",
+                content_role=content_role,
+                text=window,
+                metadata=dict(metadata),
+            )
+            for window in _sliding_windows(
+                leaf_text,
+                target_chars=_CHUNK_TARGET_CHARS,
+                overlap_chars=_CHUNK_OVERLAP_CHARS,
+            )
         ]
-    elif isinstance(parsed, dict):
-        records = [
-            json.dumps({key: value}, indent=2, ensure_ascii=False)
-            for key, value in parsed.items()
-        ]
-    else:
-        records = [json.dumps(parsed, indent=2, ensure_ascii=False)]
-    return _group_records(records)
+
+    scalar = _json_scalar_text(value)
+    if not scalar:
+        return []
+    return [
+        SemanticRecord(
+            record_path=record_path or "root",
+            content_role=content_role,
+            text=_format_leaf_text(
+                scalar,
+                record_path=record_path,
+                content_role=content_role,
+            ),
+            metadata=dict(metadata),
+        )
+    ]
 
 
-def _chunk_delimited(text: str, *, delimiter: str) -> list[str]:
-    rows: list[str] = []
+def _semantic_records_from_delimited(
+    text: str,
+    *,
+    delimiter: str,
+    metadata: dict[str, Any],
+) -> list[SemanticRecord]:
+    rows: list[SemanticRecord] = []
     try:
         reader = csv.reader(text.splitlines(), delimiter=delimiter)
         header: list[str] | None = None
         for index, row in enumerate(reader):
             if index == 0:
                 header = row
-                rows.append(delimiter.join(row))
+                if header:
+                    rows.append(
+                        SemanticRecord(
+                            record_path="schema",
+                            content_role="table_schema",
+                            text=f"columns: {delimiter.join(header)}",
+                            metadata=dict(metadata),
+                        )
+                    )
                 continue
-            if header:
-                record = {
-                    header[col]: row[col] if col < len(row) else ""
-                    for col in range(len(header))
-                }
-                rows.append(json.dumps(record, ensure_ascii=False))
-            else:
-                rows.append(delimiter.join(row))
+            if not header:
+                continue
+            record = {
+                header[col]: row[col] if col < len(row) else ""
+                for col in range(len(header))
+            }
+            rows.extend(
+                _semantic_records_from_table_row(
+                    record,
+                    record_path=f"row[{index - 1}]",
+                    metadata=metadata,
+                )
+            )
     except csv.Error:
-        return _chunk_paragraph_text(text)
-    return _group_records(rows)
+        return _body_semantic_records(text, metadata=metadata)
+    return rows
 
 
-def _group_records(records: list[str]) -> list[str]:
-    chunks: list[str] = []
-    current = ""
-    for record in records:
-        value = record.strip()
-        if not value:
+def _semantic_records_from_table_row(
+    row: dict[str, str],
+    *,
+    record_path: str,
+    metadata: dict[str, Any],
+) -> list[SemanticRecord]:
+    serialized = _json_text(row, pretty=False)
+    if len(serialized) <= _STRUCTURED_RECORD_MAX_CHARS:
+        return [
+            SemanticRecord(
+                record_path=record_path,
+                content_role="table_row",
+                text=serialized,
+                metadata=dict(metadata),
+            )
+        ]
+    records: list[SemanticRecord] = []
+    current_fields: dict[str, str] = {}
+    for key, value in row.items():
+        field_value = str(value).strip()
+        field_path = f"{record_path}.{key}"
+        if len(field_value) > _STRUCTURED_RECORD_MAX_CHARS:
+            if current_fields:
+                records.append(
+                    SemanticRecord(
+                        record_path=record_path,
+                        content_role="table_row",
+                        text=_json_text(current_fields, pretty=False),
+                        metadata=dict(metadata),
+                    )
+                )
+                current_fields = {}
+            records.extend(
+                _semantic_records_from_json_value(
+                    field_value,
+                    record_path=field_path,
+                    content_role="table_field",
+                    metadata=metadata,
+                )
+            )
             continue
-        candidate = value if not current else f"{current}\n{value}"
-        if current and len(candidate) > _CHUNK_TARGET_CHARS:
-            chunks.append(current)
-            overlap = current[-_CHUNK_OVERLAP_CHARS :]
-            current = f"{overlap}\n{value}".strip()
+        candidate = dict(current_fields)
+        candidate[key] = field_value
+        if current_fields and len(_json_text(candidate, pretty=False)) > _STRUCTURED_RECORD_MAX_CHARS:
+            records.append(
+                SemanticRecord(
+                    record_path=record_path,
+                    content_role="table_row",
+                    text=_json_text(current_fields, pretty=False),
+                    metadata=dict(metadata),
+                )
+            )
+            current_fields = {key: field_value}
         else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+            current_fields = candidate
+    if current_fields:
+        records.append(
+            SemanticRecord(
+                record_path=record_path,
+                content_role="table_row",
+                text=_json_text(current_fields, pretty=False),
+                metadata=dict(metadata),
+            )
+        )
+    return records
+
+
+def _chunk_semantic_record(record: SemanticRecord, *, doc: SourceDocument) -> list[str]:
+    text = record.text.strip()
+    if not text:
+        return []
+    if doc.kind in {"evidence", "session_memory"}:
+        return _chunk_atomic_text(text)
+    if record.content_role in {"body", "page_markdown", "annotation", "summary", "table_schema"}:
+        return _chunk_paragraph_text(text)
+    return _chunk_atomic_text(text)
+
+
+def _chunk_atomic_text(text: str) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= _STRUCTURED_RECORD_MAX_CHARS:
+        return [text]
+    return _sliding_windows(
+        text,
+        target_chars=_CHUNK_TARGET_CHARS,
+        overlap_chars=_CHUNK_OVERLAP_CHARS,
+    )
 
 
 def _chunk_paragraph_text(text: str) -> list[str]:
@@ -839,37 +1483,186 @@ def _chunk_paragraph_text(text: str) -> list[str]:
 
     expanded: list[str] = []
     for chunk in chunks:
-        if len(chunk) <= (_CHUNK_TARGET_CHARS + _CHUNK_OVERLAP_CHARS):
+        if len(chunk) <= _STRUCTURED_RECORD_MAX_CHARS:
             expanded.append(chunk)
         else:
-            expanded.extend(_sliding_windows(chunk))
+            expanded.extend(
+                _sliding_windows(
+                    chunk,
+                    target_chars=_CHUNK_TARGET_CHARS,
+                    overlap_chars=_CHUNK_OVERLAP_CHARS,
+                )
+            )
     return expanded
 
 
-def _sliding_windows(text: str) -> list[str]:
+def _sliding_windows(
+    text: str,
+    *,
+    target_chars: int,
+    overlap_chars: int,
+) -> list[str]:
     stripped = text.strip()
     if not stripped:
         return []
     windows: list[str] = []
-    step = max(1, _CHUNK_TARGET_CHARS - _CHUNK_OVERLAP_CHARS)
+    step = max(1, target_chars - overlap_chars)
     for start in range(0, len(stripped), step):
-        window = stripped[start : start + _CHUNK_TARGET_CHARS].strip()
+        window = stripped[start : start + target_chars].strip()
         if window:
             windows.append(window)
-        if start + _CHUNK_TARGET_CHARS >= len(stripped):
+        if start + target_chars >= len(stripped):
             break
     return windows
+
+
+def _split_query_windows(text: str, *, max_chars: int) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if len(stripped) <= max_chars:
+        return [stripped]
+    overlap_chars = min(max(0, max_chars - 1), max(1, min(400, max_chars // 4)))
+    return _sliding_windows(
+        stripped,
+        target_chars=max_chars,
+        overlap_chars=overlap_chars,
+    )
+
+
+def _emit_trace(on_event: Callable[[str], None] | None, message: str) -> None:
+    if on_event is None:
+        return
+    try:
+        on_event(message)
+    except Exception:
+        pass
+
+
+def _json_text(value: Any, *, pretty: bool = True) -> str:
+    if pretty:
+        return json.dumps(value, indent=2, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_json(value: Any, *, max_chars: int) -> str:
+    if value is None:
+        return ""
+    compact = _json_text(value, pretty=False)
+    if len(compact) <= max_chars:
+        return compact
+    return f"{compact[: max_chars - 3]}..."
+
+
+def _json_scalar_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    return _json_text(value, pretty=False)
+
+
+def _format_leaf_text(value: str, *, record_path: str, content_role: str) -> str:
+    if content_role in {"body", "page_markdown", "annotation", "summary", "transcript_segment"}:
+        return value
+    label = record_path.rsplit(".", 1)[-1].strip()
+    if "[" in label:
+        label = label.split("[", 1)[0]
+    if label and label not in {"root", "body"}:
+        return f"{label}: {value}"
+    return value
+
+
+def _json_child_role(key: str, value: Any, *, parent_role: str) -> str:
+    lowered = key.lower()
+    if lowered == "markdown":
+        return "page_markdown"
+    if lowered in {"text", "content", "summary", "description", "body"}:
+        return "body"
+    if lowered in {"document_annotation", "annotation"}:
+        return "annotation"
+    if lowered in {"segment", "segments", "transcript", "transcription"}:
+        return "transcript_segment"
+    if lowered in {"provider", "service", "model", "operation", "options", "artifacts", "usage_info", "file", "path"}:
+        return "metadata"
+    if parent_role == "transcript_segment":
+        return "transcript_segment"
+    return "structured"
+
+
+def _json_list_role(record_path: str, value: Any, *, parent_role: str) -> str:
+    if record_path.endswith(".pages"):
+        return "page_markdown"
+    if record_path.endswith(".segments"):
+        return "transcript_segment"
+    return parent_role if parent_role != "structured" else _json_child_role(record_path, value, parent_role=parent_role)
+
+
+def _is_wrapper_artifact(payload: dict[str, Any]) -> bool:
+    keys = {"provider", "operation", "response", "text", "artifacts", "service"}
+    return len(keys.intersection(payload.keys())) >= 3
+
+
+def _extract_oversize_input_id(message: str) -> int | None:
+    match = _OVERSIZE_INPUT_ID_RE.search(message)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _mean_pool_vectors(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    width = min((len(vector) for vector in vectors), default=0)
+    if width <= 0:
+        return []
+    pooled = [
+        sum(vector[index] for vector in vectors) / len(vectors)
+        for index in range(width)
+    ]
+    return _normalize_vector(pooled)
 
 
 def _skip_workspace_path(path: Path, *, workspace: Path, session_root_dir: str) -> bool:
     rel_parts = path.relative_to(workspace).parts
     if any(part in _EXCLUDED_DIR_NAMES for part in rel_parts):
         return True
+    if any(_is_junk_name(part) for part in rel_parts):
+        return True
     if rel_parts and rel_parts[0] == session_root_dir:
         if len(rel_parts) >= 2 and rel_parts[1] == "wiki":
             return False
         return True
     return False
+
+
+def _emit_progress(
+    on_event: Callable[[str], None] | None,
+    progress: RetrievalProgress,
+) -> None:
+    if on_event is None:
+        return
+    try:
+        on_event(progress.to_trace_message())
+    except Exception:
+        pass
+
+
+def _is_junk_name(name: str) -> bool:
+    return name in _IGNORED_FILE_NAMES or any(
+        name.startswith(prefix) for prefix in _IGNORED_FILE_PREFIXES
+    )
+
+
+def _is_junk_path(path: Path) -> bool:
+    return _is_junk_name(path.name)
 
 
 def _make_excerpt(text: str) -> str:

@@ -126,6 +126,9 @@ export function createInputBar(): HTMLElement {
       loopHealth: null,
       lastLoopMetrics: null,
       lastCompletion: null,
+      retrievalProgressActive: false,
+      retrievalProgressLabel: null,
+      retrievalProgressPercent: null,
       messages: [
         ...s.messages,
         {
@@ -157,6 +160,9 @@ export function createInputBar(): HTMLElement {
       appState.update((s) => ({
         ...s,
         isRunning: false,
+        retrievalProgressActive: false,
+        retrievalProgressLabel: null,
+        retrievalProgressPercent: null,
         messages: [
           ...s.messages,
           {

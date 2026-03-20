@@ -167,14 +167,18 @@ fn resolve_continuity(
     }
 }
 
-async fn build_solve_initial_context(
+async fn build_solve_initial_context<F>(
     config: &op_core::config::AgentConfig,
     session_dir: &Path,
     session_id: &str,
     objective: &str,
     configured_mode: &str,
     max_turn_summaries: usize,
-) -> (SolveInitialContext, Option<String>, Option<String>) {
+    mut emit_trace: F,
+) -> (SolveInitialContext, Option<String>, Option<String>)
+where
+    F: FnMut(String),
+{
     let mut initial_context = SolveInitialContext {
         session_id: Some(session_id.to_string()),
         session_dir: Some(session_dir.display().to_string()),
@@ -210,6 +214,7 @@ async fn build_solve_initial_context(
                 &config.embeddings_provider,
                 config.voyage_api_key.as_deref(),
                 config.mistral_api_key.as_deref(),
+                |message| emit_trace(message),
             )
             .await
             {
@@ -333,6 +338,7 @@ pub async fn solve(
         &objective,
         &cfg.continuity_mode,
         cfg.max_turn_summaries.max(1) as usize,
+        |message| emitter.emit_trace(&message),
     )
     .await;
     if let Some(warning) = initial_context_warning.as_deref() {
@@ -459,9 +465,16 @@ mod tests {
         .unwrap();
 
         let cfg = test_config(tmp.path());
-        let (context, warning, retrieval_detail) =
-            build_solve_initial_context(&cfg, tmp.path(), "sid", "Investigate this", "auto", 50)
-                .await;
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
+            tmp.path(),
+            "sid",
+            "Investigate this",
+            "auto",
+            50,
+            |_| {},
+        )
+        .await;
         assert!(warning.is_none());
         assert!(retrieval_detail.is_some());
         let packet = context
@@ -484,9 +497,16 @@ mod tests {
             .unwrap();
 
         let cfg = test_config(tmp.path());
-        let (context, warning, retrieval_detail) =
-            build_solve_initial_context(&cfg, tmp.path(), "sid", "Investigate this", "auto", 50)
-                .await;
+        let (context, warning, retrieval_detail) = build_solve_initial_context(
+            &cfg,
+            tmp.path(),
+            "sid",
+            "Investigate this",
+            "auto",
+            50,
+            |_| {},
+        )
+        .await;
         assert!(warning.is_none());
         assert!(retrieval_detail.is_some());
         assert!(context.question_reasoning_packet.is_none());
@@ -516,6 +536,7 @@ mod tests {
             "Why does that matter?",
             "auto",
             50,
+            |_| {},
         )
         .await;
         assert!(warning.is_none());
@@ -547,6 +568,7 @@ mod tests {
             "Compare donor network addresses",
             "auto",
             50,
+            |_| {},
         )
         .await;
         assert!(warning.is_none());
@@ -582,6 +604,7 @@ mod tests {
             "Summarize zoning permits in Boston",
             "auto",
             50,
+            |_| {},
         )
         .await;
         assert!(warning.is_none());
@@ -613,6 +636,7 @@ mod tests {
             "How do we structure a CI pipeline?",
             "auto",
             50,
+            |_| {},
         )
         .await;
         assert!(warning.is_none());

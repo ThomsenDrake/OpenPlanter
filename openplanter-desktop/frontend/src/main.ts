@@ -22,6 +22,8 @@ const SPLASH_ART = [
   " \\___/          |_|                                                    \\___/ ",
 ].join("\n");
 
+const RETRIEVAL_PROGRESS_PREFIX = "[retrieval:progress] ";
+
 function formatRecursionMode(state: {
   recursive: boolean;
   recursionPolicy: string;
@@ -31,6 +33,49 @@ function formatRecursionMode(state: {
   if (!state.recursive) return "flat";
   const policy = state.recursionPolicy.replace(/_/g, "-");
   return `recursive:${policy} min:${state.minSubtaskDepth} max:${state.maxDepth}`;
+}
+
+function parseRetrievalProgress(message: string): {
+  corpus: string;
+  phase: string;
+  documents_done: number;
+  documents_total: number;
+  percent: number;
+  message: string;
+} | null {
+  if (!message.startsWith(RETRIEVAL_PROGRESS_PREFIX)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(message.slice(RETRIEVAL_PROGRESS_PREFIX.length));
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      corpus: String((parsed as any).corpus || "all"),
+      phase: String((parsed as any).phase || "scan"),
+      documents_done: Number((parsed as any).documents_done || 0),
+      documents_total: Number((parsed as any).documents_total || 0),
+      percent: Number((parsed as any).percent || 0),
+      message: String((parsed as any).message || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatRetrievalProgressLabel(progress: {
+  corpus: string;
+  phase: string;
+  documents_done: number;
+  documents_total: number;
+  percent: number;
+  message: string;
+}): string {
+  const corpus = progress.corpus === "all" ? "all corpora" : progress.corpus;
+  const counts =
+    progress.documents_total > 0
+      ? `${progress.phase} ${progress.percent}% (${progress.documents_done}/${progress.documents_total} docs)`
+      : progress.phase;
+  return progress.message ? `${corpus}: ${counts} - ${progress.message}` : `${corpus}: ${counts}`;
 }
 
 async function init() {
@@ -133,6 +178,15 @@ async function init() {
 
   // Subscribe to agent events — await each to ensure listeners are registered
   await onAgentTrace((msg) => {
+    const retrievalProgress = parseRetrievalProgress(msg);
+    if (retrievalProgress) {
+      appState.update((s) => ({
+        ...s,
+        retrievalProgressActive: retrievalProgress.phase !== "done",
+        retrievalProgressLabel: formatRetrievalProgressLabel(retrievalProgress),
+        retrievalProgressPercent: retrievalProgress.percent,
+      }));
+    }
     console.log("[trace]", msg);
   });
 
@@ -164,6 +218,9 @@ async function init() {
       currentDepth: 0,
       currentConversationPath: null,
       loopHealth: null,
+      retrievalProgressActive: false,
+      retrievalProgressLabel: null,
+      retrievalProgressPercent: null,
       lastLoopMetrics: event.loop_metrics ?? s.lastLoopMetrics,
       lastCompletion: event.completion ?? null,
       messages: [
@@ -203,6 +260,9 @@ async function init() {
       currentDepth: 0,
       currentConversationPath: null,
       loopHealth: null,
+      retrievalProgressActive: false,
+      retrievalProgressLabel: null,
+      retrievalProgressPercent: null,
       lastCompletion: null,
       messages: [
         ...s.messages,

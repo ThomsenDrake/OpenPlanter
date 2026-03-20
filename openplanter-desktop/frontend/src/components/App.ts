@@ -118,6 +118,8 @@ export function createApp(root: HTMLElement): void {
       `<div><span class="label">model:</span> <span class="value">${s.model || "\u2014"}</span></div>`,
       `<div><span class="label">z.ai plan:</span> <span class="value">${s.zaiPlan || "paygo"}</span></div>`,
       `<div><span class="label">web search:</span> <span class="value">${s.webSearchProvider || "exa"}</span></div>`,
+      `<div><span class="label">retrieval:</span> <span class="value">${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})</span></div>`,
+      `<div><span class="label">vectorization:</span> <span class="value">${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}</span></div>`,
       `<div><span class="label">continuity:</span> <span class="value">${s.continuityMode || "auto"}</span></div>`,
       `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,
       `<div><span class="label">chrome mcp:</span> <span class="value">${s.chromeMcpStatus} (${s.chromeMcpChannel})</span></div>`,
@@ -158,6 +160,9 @@ async function switchToNewSession(sessionList: HTMLElement): Promise<void> {
       loopHealth: null,
       lastLoopMetrics: null,
       lastCompletion: null,
+      retrievalProgressActive: false,
+      retrievalProgressLabel: null,
+      retrievalProgressPercent: null,
       inputQueue: [],
     }));
     // Dispatch event to clear ChatPane DOM
@@ -221,6 +226,9 @@ async function switchToSession(sessionId: string, sessionList: HTMLElement): Pro
       loopHealth: null,
       lastLoopMetrics: null,
       lastCompletion: null,
+      retrievalProgressActive: false,
+      retrievalProgressLabel: null,
+      retrievalProgressPercent: null,
       inputQueue: [],
     }));
     // Dispatch event to clear ChatPane DOM

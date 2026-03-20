@@ -28,6 +28,9 @@ export function createStatusBar(): HTMLElement {
   const embeddingsEl = document.createElement("span");
   embeddingsEl.className = "embeddings";
 
+  const retrievalEl = document.createElement("span");
+  retrievalEl.className = "retrieval-progress";
+
   const modeEl = document.createElement("span");
   modeEl.className = "mode";
 
@@ -43,6 +46,7 @@ export function createStatusBar(): HTMLElement {
   bar.appendChild(zaiPlanEl);
   bar.appendChild(continuityEl);
   bar.appendChild(embeddingsEl);
+  bar.appendChild(retrievalEl);
   bar.appendChild(modeEl);
   bar.appendChild(sessionEl);
   bar.appendChild(tokensEl);
@@ -58,6 +62,9 @@ export function createStatusBar(): HTMLElement {
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
     embeddingsEl.textContent = `emb:${s.embeddingsProvider || "voyage"}:${s.embeddingsStatus || "disabled"}`;
+    retrievalEl.textContent = s.retrievalProgressActive
+      ? `index:${s.retrievalProgressPercent ?? 0}% ${s.retrievalProgressLabel || "vectorizing"}`
+      : "";
     modeEl.textContent = formatModeLabel(
       s.recursive,
       s.recursionPolicy,

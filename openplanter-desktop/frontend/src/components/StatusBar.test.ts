@@ -26,6 +26,7 @@ describe("createStatusBar", () => {
     expect(bar.querySelector(".reasoning")).not.toBeNull();
     expect(bar.querySelector(".zai-plan")).not.toBeNull();
     expect(bar.querySelector(".continuity")).not.toBeNull();
+    expect(bar.querySelector(".retrieval-progress")).not.toBeNull();
     expect(bar.querySelector(".mode")).not.toBeNull();
     expect(bar.querySelector(".session")).not.toBeNull();
     expect(bar.querySelector(".tokens")).not.toBeNull();
@@ -66,6 +67,19 @@ describe("createStatusBar", () => {
     appState.update((s) => ({ ...s, continuityMode: "continue" }));
     const bar = createStatusBar();
     expect(bar.querySelector(".continuity")!.textContent).toBe("continuity:continue");
+  });
+
+  it("renders retrieval progress when vectorization is active", () => {
+    appState.update((s) => ({
+      ...s,
+      retrievalProgressActive: true,
+      retrievalProgressPercent: 42,
+      retrievalProgressLabel: "workspace: embedding 42% (21/50 docs) - Embedding workspace retrieval index.",
+    }));
+    const bar = createStatusBar();
+    expect(bar.querySelector(".retrieval-progress")!.textContent).toBe(
+      "index:42% workspace: embedding 42% (21/50 docs) - Embedding workspace retrieval index."
+    );
   });
 
   it("hides Z.AI plan when provider is not zai", () => {

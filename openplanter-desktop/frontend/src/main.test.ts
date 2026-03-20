@@ -183,4 +183,37 @@ describe("main queue handling", () => {
       });
     });
   });
+
+  it("tracks retrieval progress from trace events", async () => {
+    const { appState } = await import("./state/store");
+
+    await import("./main");
+    await vi.waitFor(() => expect(typeof mocks.handlers.trace).toBe("function"));
+
+    mocks.handlers.trace?.(
+      '[retrieval:progress] {"corpus":"workspace","phase":"embedding","documents_done":12,"documents_total":48,"chunks_done":80,"chunks_total":320,"reused_documents":0,"percent":25,"message":"Embedding workspace retrieval index."}'
+    );
+
+    await vi.waitFor(() => {
+      const state = appState.get();
+      expect(state.retrievalProgressActive).toBe(true);
+      expect(state.retrievalProgressPercent).toBe(25);
+      expect(state.retrievalProgressLabel).toBe(
+        "workspace: embedding 25% (12/48 docs) - Embedding workspace retrieval index."
+      );
+    });
+
+    mocks.handlers.trace?.(
+      '[retrieval:progress] {"corpus":"workspace","phase":"done","documents_done":48,"documents_total":48,"chunks_done":320,"chunks_total":320,"reused_documents":0,"percent":100,"message":"Workspace retrieval index ready."}'
+    );
+
+    await vi.waitFor(() => {
+      const state = appState.get();
+      expect(state.retrievalProgressActive).toBe(false);
+      expect(state.retrievalProgressPercent).toBe(100);
+      expect(state.retrievalProgressLabel).toBe(
+        "workspace: done 100% (48/48 docs) - Workspace retrieval index ready."
+      );
+    });
+  });
 });

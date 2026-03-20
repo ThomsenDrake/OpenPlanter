@@ -78,6 +78,9 @@ export interface AppState {
   embeddingsProvider: string;
   embeddingsStatus: string;
   embeddingsStatusDetail: string;
+  retrievalProgressActive: boolean;
+  retrievalProgressLabel: string | null;
+  retrievalProgressPercent: number | null;
   continuityMode: string;
   mistralDocumentAiUseSharedKey: boolean;
   chromeMcpEnabled: boolean;
@@ -130,6 +133,9 @@ export const appState = new Store<AppState>({
   embeddingsProvider: "voyage",
   embeddingsStatus: "disabled",
   embeddingsStatusDetail: "Retrieval disabled: VOYAGE_API_KEY is not configured for voyage.",
+  retrievalProgressActive: false,
+  retrievalProgressLabel: null,
+  retrievalProgressPercent: null,
   continuityMode: "auto",
   mistralDocumentAiUseSharedKey: true,
   chromeMcpEnabled: false,

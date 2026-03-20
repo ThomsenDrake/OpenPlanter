@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -575,6 +576,7 @@ _RE_SUBTASK = re.compile(r">> entering subtask")
 _RE_EXECUTE = re.compile(r">> executing leaf")
 _RE_ERROR = re.compile(r"model error:", re.IGNORECASE)
 _RE_TOOL_START = re.compile(r"(\w+)\((.*)?\)$")
+_RE_RETRIEVAL_PROGRESS = re.compile(r"^\[retrieval:progress\]\s+(\{.*\})\s*$")
 
 # Max characters to display per trace event line (first line only for multi-line).
 _EVENT_MAX_CHARS = 300
@@ -582,6 +584,9 @@ _EVENT_MAX_CHARS = 300
 
 def _clip_event(text: str) -> str:
     """Clip a trace event body to a reasonable display length."""
+    retrieval = _parse_retrieval_progress(text)
+    if retrieval is not None:
+        return _format_retrieval_progress_text(retrieval)
     first_line, _, rest = text.partition("\n")
     if len(first_line) > _EVENT_MAX_CHARS:
         return first_line[:_EVENT_MAX_CHARS] + "..."
@@ -589,6 +594,33 @@ def _clip_event(text: str) -> str:
         extra_lines = rest.count("\n") + 1
         return first_line + f"  (+{extra_lines} lines)"
     return first_line
+
+
+def _parse_retrieval_progress(text: str) -> dict[str, Any] | None:
+    match = _RE_RETRIEVAL_PROGRESS.match(text.strip())
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _format_retrieval_progress_text(payload: dict[str, Any]) -> str:
+    corpus = str(payload.get("corpus") or "all")
+    phase = str(payload.get("phase") or "scan")
+    documents_done = int(payload.get("documents_done") or 0)
+    documents_total = int(payload.get("documents_total") or 0)
+    percent = int(payload.get("percent") or 0)
+    message = str(payload.get("message") or "").strip()
+    corpus_label = "all corpora" if corpus == "all" else corpus
+    detail = f"{phase} {percent}% ({documents_done}/{documents_total} docs)"
+    if documents_total <= 0:
+        detail = phase
+    if message:
+        return f"vectorizing {corpus_label}: {detail} - {message}"
+    return f"vectorizing {corpus_label}: {detail}"
 
 
 # Map tool names to their most informative argument for compact display.
@@ -678,7 +710,7 @@ class _ActivityDisplay:
         self._censor_fn = censor_fn
         self._lock = threading.Lock()
         self._text_buf: str = ""
-        self._mode: str = "thinking"  # thinking | streaming | tool | tool_args
+        self._mode: str = "thinking"  # thinking | streaming | tool | tool_args | retrieval
         self._step_label: str = ""
         self._tool_name: str = ""
         self._tool_key_arg: str = ""
@@ -783,6 +815,16 @@ class _ActivityDisplay:
             self.start(mode="tool", step_label=step_label)
             return
 
+    def set_retrieval_progress(self, text: str) -> None:
+        if not self._active:
+            self.start(mode="retrieval", step_label="")
+        with self._lock:
+            self._mode = "retrieval"
+            self._step_label = ""
+            self._text_buf = text
+            if not self._start_time:
+                self._start_time = time.monotonic()
+
     def set_step_label(self, label: str) -> None:
         with self._lock:
             self._step_label = label
@@ -840,6 +882,8 @@ class _ActivityDisplay:
 
         if mode == "thinking":
             header = f"[bold cyan]Thinking...[/bold cyan]  [dim]({elapsed:.1f}s)[/dim]{step_part}"
+        elif mode == "retrieval":
+            header = f"[bold blue]Vectorizing...[/bold blue]  [dim]({elapsed:.1f}s)[/dim]"
         elif mode == "streaming":
             header = f"[bold green]Responding...[/bold green]  [dim]({elapsed:.1f}s)[/dim]{step_part}"
         elif mode == "tool_args":
@@ -960,6 +1004,13 @@ class RichREPL:
 
     def _on_event(self, msg: str) -> None:
         """Callback for runtime.solve() trace events."""
+        retrieval = _parse_retrieval_progress(msg)
+        if retrieval is not None:
+            self._activity.set_retrieval_progress(_format_retrieval_progress_text(retrieval))
+            if str(retrieval.get("phase") or "") == "done":
+                self._activity.stop()
+            return
+
         m = _RE_PREFIX.match(msg)
         body = msg[m.end():] if m else msg
 
