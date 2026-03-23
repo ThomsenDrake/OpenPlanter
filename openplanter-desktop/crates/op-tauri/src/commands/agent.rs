@@ -174,6 +174,7 @@ async fn build_solve_initial_context<F>(
     objective: &str,
     configured_mode: &str,
     max_turn_summaries: usize,
+    cancel: Option<&CancellationToken>,
     mut emit_trace: F,
 ) -> (SolveInitialContext, Option<String>, Option<String>)
 where
@@ -205,32 +206,17 @@ where
             if has_reasoning_content(&packet) {
                 initial_context.question_reasoning_packet = Some(packet);
             }
-            let retrieval_result = match build_retrieval_packet(
-                &config.workspace,
+            let retrieval_result = build_retrieval_packet(
+                config,
                 Some(session_dir),
-                &config.session_root_dir,
                 objective,
                 initial_context.question_reasoning_packet.as_ref(),
-                &config.embeddings_provider,
-                config.voyage_api_key.as_deref(),
-                config.mistral_api_key.as_deref(),
+                cancel,
                 |message| emit_trace(message),
             )
             .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    return (
-                        initial_context,
-                        None,
-                        Some(format!(
-                            "[retrieval] failed to build retrieval packet; continuing without semantic context: {err}"
-                        )),
-                    );
-                }
-            };
-            initial_context.retrieval_packet = retrieval_result.packet;
-            (initial_context, None, Some(format!("[retrieval] {}", retrieval_result.status.detail)))
+            .map_err(|err| err.to_string());
+            apply_retrieval_result(initial_context, retrieval_result)
         }
         Err(err) => (
             initial_context,
@@ -238,6 +224,29 @@ where
                 "[solve] failed to load investigation state for continuity and reasoning packet; continuing without session memory: {err}"
             )),
             None,
+        ),
+    }
+}
+
+fn apply_retrieval_result(
+    mut initial_context: SolveInitialContext,
+    retrieval_result: Result<op_core::retrieval::RetrievalBuildResult, String>,
+) -> (SolveInitialContext, Option<String>, Option<String>) {
+    match retrieval_result {
+        Ok(result) => {
+            initial_context.retrieval_packet = result.packet;
+            (
+                initial_context,
+                None,
+                Some(format!("[retrieval] {}", result.status.detail)),
+            )
+        }
+        Err(err) => (
+            initial_context,
+            None,
+            Some(format!(
+                "[retrieval] failed to build retrieval packet; continuing without semantic context: {err}"
+            )),
         ),
     }
 }
@@ -338,6 +347,7 @@ pub async fn solve(
         &objective,
         &cfg.continuity_mode,
         cfg.max_turn_summaries.max(1) as usize,
+        Some(&token),
         |message| emitter.emit_trace(&message),
     )
     .await;
@@ -472,6 +482,7 @@ mod tests {
             "Investigate this",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -504,6 +515,7 @@ mod tests {
             "Investigate this",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -536,6 +548,7 @@ mod tests {
             "Why does that matter?",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -568,6 +581,7 @@ mod tests {
             "Compare donor network addresses",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -604,6 +618,7 @@ mod tests {
             "Summarize zoning permits in Boston",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -636,6 +651,7 @@ mod tests {
             "How do we structure a CI pipeline?",
             "auto",
             50,
+            None,
             |_| {},
         )
         .await;
@@ -644,5 +660,40 @@ mod tests {
         assert!(context.turn_history.is_none());
         assert!(context.continuity_mode.is_none());
         assert!(context.continuity_reason.is_none());
+    }
+
+    #[test]
+    fn test_apply_retrieval_result_uses_degraded_detail_without_generic_failure_warning() {
+        let initial_context = SolveInitialContext {
+            session_id: Some("sid".to_string()),
+            session_dir: Some("/tmp/sid".to_string()),
+            turn_history: None,
+            continuity_mode: None,
+            continuity_reason: None,
+            question_reasoning_packet: None,
+            retrieval_packet: None,
+        };
+
+        let (context, warning, detail) = apply_retrieval_result(
+            initial_context,
+            Ok(op_core::retrieval::RetrievalBuildResult {
+                packet: None,
+                status: op_core::retrieval::RetrievalStatus {
+                    provider: "mistral".to_string(),
+                    model: "mistral-embed".to_string(),
+                    status: "degraded".to_string(),
+                    detail: "Retrieval degraded via mistral (mistral-embed); semantic context was skipped for this solve.".to_string(),
+                },
+            }),
+        );
+
+        assert!(warning.is_none());
+        assert!(context.retrieval_packet.is_none());
+        assert_eq!(
+            detail.as_deref(),
+            Some(
+                "[retrieval] Retrieval degraded via mistral (mistral-embed); semantic context was skipped for this solve."
+            )
+        );
     }
 }

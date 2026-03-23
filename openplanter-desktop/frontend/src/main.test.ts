@@ -216,4 +216,24 @@ describe("main queue handling", () => {
       );
     });
   });
+
+  it("treats failed retrieval progress as terminal", async () => {
+    const { appState } = await import("./state/store");
+
+    await import("./main");
+    await vi.waitFor(() => expect(typeof mocks.handlers.trace).toBe("function"));
+
+    mocks.handlers.trace?.(
+      '[retrieval:progress] {"corpus":"workspace","phase":"failed","documents_done":12,"documents_total":48,"chunks_done":80,"chunks_total":320,"reused_documents":0,"percent":25,"message":"workspace retrieval indexing failed after retries; cached 12/48 docs for future runs."}'
+    );
+
+    await vi.waitFor(() => {
+      const state = appState.get();
+      expect(state.retrievalProgressActive).toBe(false);
+      expect(state.retrievalProgressPercent).toBe(25);
+      expect(state.retrievalProgressLabel).toBe(
+        "workspace: failed 25% (12/48 docs) - workspace retrieval indexing failed after retries; cached 12/48 docs for future runs."
+      );
+    });
+  });
 });

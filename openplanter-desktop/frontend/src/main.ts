@@ -78,6 +78,10 @@ function formatRetrievalProgressLabel(progress: {
   return progress.message ? `${corpus}: ${counts} - ${progress.message}` : `${corpus}: ${counts}`;
 }
 
+function isTerminalRetrievalPhase(phase: string): boolean {
+  return phase === "done" || phase === "failed";
+}
+
 async function init() {
   const app = document.getElementById("app")!;
   createApp(app);
@@ -182,7 +186,7 @@ async function init() {
     if (retrievalProgress) {
       appState.update((s) => ({
         ...s,
-        retrievalProgressActive: retrievalProgress.phase !== "done",
+        retrievalProgressActive: !isTerminalRetrievalPhase(retrievalProgress.phase),
         retrievalProgressLabel: formatRetrievalProgressLabel(retrievalProgress),
         retrievalProgressPercent: retrievalProgress.percent,
       }));

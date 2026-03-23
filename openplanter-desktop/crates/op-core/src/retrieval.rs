@@ -1,15 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
 
-use crate::config::normalize_embeddings_provider;
+use crate::config::{AgentConfig, normalize_embeddings_provider};
 
 pub const VOYAGE_EMBEDDING_MODEL: &str = "voyage-4";
 pub const MISTRAL_EMBEDDING_MODEL: &str = "mistral-embed";
@@ -23,6 +27,8 @@ const WORKSPACE_TOP_K: usize = 4;
 const SESSION_TOP_K: usize = 4;
 const MAX_HITS_PER_SOURCE: usize = 2;
 const BATCH_SIZE: usize = 32;
+const RETRIEVAL_MAX_TRANSIENT_RETRIES: usize = 4;
+const RETRIEVAL_STARTUP_RETRY_DELAY_CAP_SEC: f64 = 10.0;
 
 const TEXT_EXTENSIONS: &[&str] = &["md", "txt", "json", "csv", "tsv", "yaml", "yml", "patch"];
 const EXCLUDED_DIR_NAMES: &[&str] = &[
@@ -45,6 +51,98 @@ struct EmbeddingsProviderLimits {
     batch_size: usize,
     input_char_limit: usize,
     emergency_input_char_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EmbeddingsRetryPolicy {
+    max_retries: usize,
+    backoff_base_sec: f64,
+    backoff_max_sec: f64,
+    retry_after_cap_sec: f64,
+}
+
+impl EmbeddingsRetryPolicy {
+    fn from_config(config: &AgentConfig) -> Self {
+        Self {
+            max_retries: (config.rate_limit_max_retries.max(0) as usize)
+                .min(RETRIEVAL_MAX_TRANSIENT_RETRIES),
+            backoff_base_sec: config.rate_limit_backoff_base_sec.max(0.0),
+            backoff_max_sec: config.rate_limit_backoff_max_sec.max(0.0),
+            retry_after_cap_sec: config.rate_limit_retry_after_cap_sec.max(0.0),
+        }
+    }
+
+    fn compute_delay_sec(&self, retry_count: usize, retry_after_sec: Option<f64>) -> f64 {
+        let delay = retry_after_sec
+            .map(|value| value.max(0.0).min(self.retry_after_cap_sec))
+            .unwrap_or_else(|| self.backoff_base_sec * 2_f64.powi((retry_count.saturating_sub(1)) as i32));
+        delay
+            .min(self.backoff_max_sec)
+            .min(RETRIEVAL_STARTUP_RETRY_DELAY_CAP_SEC)
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+enum EmbeddingsRequestError {
+    #[error("{detail}")]
+    Oversize { input_id: usize, detail: String },
+    #[error("{detail}")]
+    RetryableTransient {
+        status_code: Option<u16>,
+        provider_code: Option<String>,
+        retry_after_sec: Option<f64>,
+        detail: String,
+    },
+    #[error("{detail}")]
+    Fatal {
+        status_code: Option<u16>,
+        detail: String,
+    },
+}
+
+impl EmbeddingsRequestError {
+    fn detail(&self) -> &str {
+        match self {
+            Self::Oversize { detail, .. }
+            | Self::RetryableTransient { detail, .. }
+            | Self::Fatal { detail, .. } => detail,
+        }
+    }
+
+    fn provider_code(&self) -> Option<&str> {
+        match self {
+            Self::RetryableTransient { provider_code, .. } => provider_code.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn retry_after_sec(&self) -> Option<f64> {
+        match self {
+            Self::RetryableTransient { retry_after_sec, .. } => *retry_after_sec,
+            _ => None,
+        }
+    }
+
+    fn status_code(&self) -> Option<u16> {
+        match self {
+            Self::RetryableTransient { status_code, .. } | Self::Fatal { status_code, .. } => {
+                *status_code
+            }
+            Self::Oversize { .. } => Some(400),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RefreshIndexOutcome {
+    Complete { chunks: Vec<ChunkRecord> },
+    PartialCached {
+        documents_done: usize,
+        documents_total: usize,
+        chunks_done: usize,
+        chunks_total: usize,
+        failure_detail: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,19 +289,7 @@ impl EmbeddingsClient {
         }
     }
 
-    async fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f64>> {
-        let windows = split_query_windows(text, self.limits.input_char_limit);
-        let vectors = self.embed(&windows, "query").await?;
-        if vectors.is_empty() {
-            return Err(anyhow!("embeddings provider returned no query vector"));
-        }
-        if vectors.len() == 1 {
-            return Ok(vectors.into_iter().next().unwrap_or_default());
-        }
-        Ok(mean_pool_vectors(&vectors))
-    }
-
-    async fn embed(&self, texts: &[String], input_type: &str) -> anyhow::Result<Vec<Vec<f64>>> {
+    async fn embed(&self, texts: &[String], input_type: &str) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -224,28 +310,36 @@ impl EmbeddingsClient {
                 .json(&payload)
                 .send()
                 .await
-                .with_context(|| format!("{} embeddings request failed", self.provider))?;
+                .map_err(|err| classify_embeddings_transport_error(&self.provider, err))?;
             let status = response.status();
+            let headers = response.headers().clone();
             let text = response
                 .text()
                 .await
-                .with_context(|| format!("{} embeddings response read failed", self.provider))?;
+                .map_err(|err| classify_embeddings_transport_error(&self.provider, err))?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "{} embeddings HTTP {}: {}",
-                    self.provider,
+                return Err(classify_embeddings_http_error(
+                    &self.provider,
                     status,
-                    truncate(&text, 500)
+                    &headers,
+                    &text,
                 ));
             }
-            let parsed: Value = serde_json::from_str(&text).with_context(|| {
-                format!("{} embeddings returned non-JSON payload", self.provider)
+            let parsed: Value = serde_json::from_str(&text).map_err(|_| {
+                EmbeddingsRequestError::Fatal {
+                    status_code: Some(status.as_u16()),
+                    detail: format!(
+                        "{} embeddings returned non-JSON payload: {}",
+                        self.provider,
+                        truncate(&text, 500)
+                    ),
+                }
             })?;
             let Some(data) = parsed.get("data").and_then(Value::as_array) else {
-                return Err(anyhow!(
-                    "{} embeddings returned unexpected payload shape",
-                    self.provider
-                ));
+                return Err(EmbeddingsRequestError::Fatal {
+                    status_code: Some(status.as_u16()),
+                    detail: format!("{} embeddings returned unexpected payload shape", self.provider),
+                });
             };
             let mut ordered: Vec<(usize, Vec<f64>)> = Vec::new();
             for (idx, item) in data.iter().enumerate() {
@@ -270,12 +364,15 @@ impl EmbeddingsClient {
             }
             ordered.sort_by_key(|item| item.0);
             if ordered.len() != batch.len() {
-                return Err(anyhow!(
-                    "{} embeddings returned {} vectors for {} inputs",
-                    self.provider,
-                    ordered.len(),
-                    batch.len()
-                ));
+                return Err(EmbeddingsRequestError::Fatal {
+                    status_code: Some(status.as_u16()),
+                    detail: format!(
+                        "{} embeddings returned {} vectors for {} inputs",
+                        self.provider,
+                        ordered.len(),
+                        batch.len()
+                    ),
+                });
             }
             all.extend(ordered.into_iter().map(|(_, vector)| vector));
         }
@@ -312,7 +409,8 @@ trait DocumentEmbeddingsBackend: Sync {
     fn provider(&self) -> &str;
     fn model(&self) -> &str;
     fn limits(&self) -> EmbeddingsProviderLimits;
-    async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>>;
+    async fn embed(&self, texts: &[String], input_type: &str)
+        -> Result<Vec<Vec<f64>>, EmbeddingsRequestError>;
 }
 
 #[async_trait]
@@ -329,8 +427,12 @@ impl DocumentEmbeddingsBackend for EmbeddingsClient {
         self.limits
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>> {
-        self.embed(texts, "document").await
+    async fn embed(
+        &self,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError> {
+        self.embed(texts, input_type).await
     }
 }
 
@@ -379,23 +481,20 @@ pub fn build_embeddings_status(
 }
 
 pub async fn build_retrieval_packet<F>(
-    workspace: &Path,
+    config: &AgentConfig,
     session_dir: Option<&Path>,
-    session_root_dir: &str,
     objective: &str,
     question_reasoning_packet: Option<&Value>,
-    embeddings_provider: &str,
-    voyage_api_key: Option<&str>,
-    mistral_api_key: Option<&str>,
+    cancel: Option<&CancellationToken>,
     mut emit_trace: F,
 ) -> anyhow::Result<RetrievalBuildResult>
 where
     F: FnMut(String),
 {
     let status = build_embeddings_status(
-        embeddings_provider,
-        voyage_api_key,
-        mistral_api_key,
+        &config.embeddings_provider,
+        config.voyage_api_key.as_deref(),
+        config.mistral_api_key.as_deref(),
     );
     if status.status != "enabled" {
         return Ok(RetrievalBuildResult {
@@ -405,12 +504,44 @@ where
     }
 
     let api_key = if status.provider == "voyage" {
-        voyage_api_key.unwrap_or_default()
+        config.voyage_api_key.as_deref().unwrap_or_default()
     } else {
-        mistral_api_key.unwrap_or_default()
+        config.mistral_api_key.as_deref().unwrap_or_default()
     };
     let client = EmbeddingsClient::new(&status.provider, api_key);
-    emit_retrieval_progress(&mut emit_trace, RetrievalProgress {
+    let retry_policy = EmbeddingsRetryPolicy::from_config(config);
+    build_retrieval_packet_with_backend(
+        &config.workspace,
+        session_dir,
+        &config.session_root_dir,
+        objective,
+        question_reasoning_packet,
+        &client,
+        &status,
+        retry_policy,
+        cancel,
+        &mut emit_trace,
+    )
+    .await
+}
+
+async fn build_retrieval_packet_with_backend<B, F>(
+    workspace: &Path,
+    session_dir: Option<&Path>,
+    session_root_dir: &str,
+    objective: &str,
+    question_reasoning_packet: Option<&Value>,
+    client: &B,
+    status: &RetrievalStatus,
+    retry_policy: EmbeddingsRetryPolicy,
+    cancel: Option<&CancellationToken>,
+    emit_trace: &mut F,
+) -> anyhow::Result<RetrievalBuildResult>
+where
+    B: DocumentEmbeddingsBackend,
+    F: FnMut(String),
+{
+    emit_retrieval_progress(emit_trace, RetrievalProgress {
         corpus: "all".to_string(),
         phase: "scan".to_string(),
         documents_done: 0,
@@ -431,7 +562,7 @@ where
                     "Retrieval enabled via {} ({}), but no indexable documents were found.",
                     status.provider, status.model
                 ),
-                ..status
+                ..status.clone()
             },
         });
     }
@@ -440,24 +571,70 @@ where
         .join(session_root_dir)
         .join("embeddings")
         .join("workspace");
-    let workspace_chunks = refresh_index(
+    let workspace_chunks = match refresh_index(
         Some(&workspace_index_dir),
         &workspace_docs,
-        &client,
+        client,
         "workspace",
-        &mut emit_trace,
+        retry_policy,
+        cancel,
+        emit_trace,
     )
-    .await?;
+    .await?
+    {
+        RefreshIndexOutcome::Complete { chunks } => chunks,
+        RefreshIndexOutcome::PartialCached {
+            documents_done,
+            documents_total,
+            chunks_done,
+            chunks_total,
+            failure_detail,
+        } => {
+            return Ok(RetrievalBuildResult {
+                packet: None,
+                status: degraded_retrieval_status(
+                    status,
+                    format!(
+                        "Retrieval degraded via {} ({}); workspace indexing failed after retries and cached {documents_done}/{documents_total} document(s) ({chunks_done}/{chunks_total} chunks) for a future run. Semantic context was skipped for this solve. Last error: {failure_detail}",
+                        status.provider, status.model
+                    ),
+                ),
+            });
+        }
+    };
 
     let session_chunks = if let Some(session_dir) = session_dir {
-        refresh_index(
+        match refresh_index(
             Some(&session_dir.join("embeddings")),
             &session_docs,
-            &client,
+            client,
             "session",
-            &mut emit_trace,
+            retry_policy,
+            cancel,
+            emit_trace,
         )
         .await?
+        {
+            RefreshIndexOutcome::Complete { chunks } => chunks,
+            RefreshIndexOutcome::PartialCached {
+                documents_done,
+                documents_total,
+                chunks_done,
+                chunks_total,
+                failure_detail,
+            } => {
+                return Ok(RetrievalBuildResult {
+                    packet: None,
+                    status: degraded_retrieval_status(
+                        status,
+                        format!(
+                            "Retrieval degraded via {} ({}); session indexing failed after retries and cached {documents_done}/{documents_total} document(s) ({chunks_done}/{chunks_total} chunks) for a future run. Semantic context was skipped for this solve. Last error: {failure_detail}",
+                            status.provider, status.model
+                        ),
+                    ),
+                });
+            }
+        }
     } else {
         Vec::new()
     };
@@ -471,12 +648,30 @@ where
                     "Retrieval enabled via {} ({}), but no query text was available.",
                     status.provider, status.model
                 ),
-                ..status
+                ..status.clone()
             },
         });
     }
 
-    let query_vector = client.embed_query(&query).await?;
+    let query_vector =
+        match embed_query_with_retry(client, &query, retry_policy, cancel, emit_trace).await {
+            Ok(vector) => vector,
+            Err(err) => {
+                return Ok(RetrievalBuildResult {
+                    packet: None,
+                    status: degraded_retrieval_status(
+                        status,
+                        format!(
+                            "Retrieval degraded via {} ({}); indexed {} document(s), but query embedding failed after retries. Semantic context was skipped for this solve. Last error: {}",
+                            status.provider,
+                            status.model,
+                            total_docs,
+                            err.detail()
+                        ),
+                    ),
+                });
+            }
+        };
     let workspace_hits =
         search_chunks(&workspace_chunks, &query_vector, WORKSPACE_TOP_K, MAX_HITS_PER_SOURCE);
     let session_hits =
@@ -490,7 +685,7 @@ where
                     "Retrieval enabled via {} ({}); indexed {} document(s), but found no strong semantic matches.",
                     status.provider, status.model, total_docs
                 ),
-                ..status
+                ..status.clone()
             },
         });
     }
@@ -508,9 +703,146 @@ where
                 "Retrieval enabled via {} ({}); indexed {} document(s) and selected {} semantic match(es).",
                 status.provider, status.model, total_docs, hit_count
             ),
-            ..status
+            ..status.clone()
         },
     })
+}
+
+fn degraded_retrieval_status(status: &RetrievalStatus, detail: String) -> RetrievalStatus {
+    RetrievalStatus {
+        provider: status.provider.clone(),
+        model: status.model.clone(),
+        status: "degraded".to_string(),
+        detail,
+    }
+}
+
+async fn embed_query_with_retry<B>(
+    client: &B,
+    text: &str,
+    retry_policy: EmbeddingsRetryPolicy,
+    cancel: Option<&CancellationToken>,
+    emit_trace: &mut impl FnMut(String),
+) -> Result<Vec<f64>, EmbeddingsRequestError>
+where
+    B: DocumentEmbeddingsBackend,
+{
+    let mut windows = split_query_windows(text, client.limits().input_char_limit);
+    loop {
+        let vectors = match embed_texts_with_retry(
+            client,
+            &windows,
+            "query",
+            "query",
+            retry_policy,
+            cancel,
+            emit_trace,
+        )
+        .await
+        {
+            Ok(vectors) => vectors,
+            Err(err) => {
+                if retry_oversized_query_windows(&mut windows, &err, client.limits(), emit_trace) {
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+        if vectors.is_empty() {
+            return Err(EmbeddingsRequestError::Fatal {
+                status_code: None,
+                detail: "embeddings provider returned no query vector".to_string(),
+            });
+        }
+        if vectors.len() == 1 {
+            return Ok(vectors.into_iter().next().unwrap_or_default());
+        }
+        return Ok(mean_pool_vectors(&vectors));
+    }
+}
+
+async fn embed_texts_with_retry<B>(
+    client: &B,
+    texts: &[String],
+    input_type: &str,
+    scope: &str,
+    retry_policy: EmbeddingsRetryPolicy,
+    cancel: Option<&CancellationToken>,
+    emit_trace: &mut impl FnMut(String),
+) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError>
+where
+    B: DocumentEmbeddingsBackend,
+{
+    let mut retries = 0usize;
+    loop {
+        match client.embed(texts, input_type).await {
+            Ok(vectors) => return Ok(vectors),
+            Err(err @ EmbeddingsRequestError::RetryableTransient { .. }) => {
+                if retries >= retry_policy.max_retries {
+                    emit_retrieval_trace(
+                        emit_trace,
+                        format!(
+                            "[retrieval] degraded provider={} scope={} attempts={} status={} detail={}",
+                            client.provider(),
+                            scope,
+                            retries + 1,
+                            err.status_code()
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "n/a".to_string()),
+                            truncate(err.detail(), 240)
+                        ),
+                    );
+                    return Err(err);
+                }
+                retries += 1;
+                let delay_sec = retry_policy.compute_delay_sec(retries, err.retry_after_sec());
+                let provider_code = err
+                    .provider_code()
+                    .map(|code| format!(" ({code})"))
+                    .unwrap_or_default();
+                emit_retrieval_trace(
+                    emit_trace,
+                    format!(
+                        "[retrieval] transient embeddings failure provider={}{} scope={} status={} detail={} retry {}/{} in {:.1}s",
+                        client.provider(),
+                        provider_code,
+                        scope,
+                        err.status_code()
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "n/a".to_string()),
+                        truncate(err.detail(), 240),
+                        retries,
+                        retry_policy.max_retries,
+                        delay_sec
+                    ),
+                );
+                if delay_sec > 0.0 {
+                    if let Some(cancel) = cancel {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                emit_retrieval_trace(
+                                    emit_trace,
+                                    format!(
+                                        "[retrieval] retry wait cancelled provider={} scope={}",
+                                        client.provider(),
+                                        scope
+                                    ),
+                                );
+                                return Err(EmbeddingsRequestError::Fatal {
+                                    status_code: None,
+                                    detail: "Cancelled".to_string(),
+                                });
+                            }
+                            _ = sleep(Duration::from_secs_f64(delay_sec)) => {}
+                        }
+                    } else {
+                        sleep(Duration::from_secs_f64(delay_sec)).await;
+                    }
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn collect_workspace_documents(workspace: &Path, session_root_dir: &str) -> Vec<SourceDocument> {
@@ -680,13 +1012,15 @@ async fn refresh_index<B>(
     documents: &[SourceDocument],
     client: &B,
     corpus: &str,
+    retry_policy: EmbeddingsRetryPolicy,
+    cancel: Option<&CancellationToken>,
     emit_trace: &mut impl FnMut(String),
-) -> anyhow::Result<Vec<ChunkRecord>>
+) -> anyhow::Result<RefreshIndexOutcome>
 where
     B: DocumentEmbeddingsBackend,
 {
     let Some(index_dir) = index_dir else {
-        return Ok(Vec::new());
+        return Ok(RefreshIndexOutcome::Complete { chunks: Vec::new() });
     };
     fs::create_dir_all(index_dir).with_context(|| {
         format!("failed to create embeddings index directory {}", index_dir.display())
@@ -765,19 +1099,85 @@ where
                 .iter()
                 .map(|record| record.text.clone())
                 .collect::<Vec<_>>();
-            let vectors = match client.embed_documents(&texts).await {
+            let vectors = match embed_texts_with_retry(
+                client,
+                &texts,
+                "document",
+                corpus,
+                retry_policy,
+                cancel,
+                emit_trace,
+            )
+            .await
+            {
                 Ok(vectors) => vectors,
                 Err(err) => {
                     if retry_oversized_batch(
                         &mut pending_records,
                         batch_start,
-                        &err.to_string(),
+                        &err,
                         client.limits(),
                         emit_trace,
                     ) {
                         continue;
                     }
-                    return Err(err);
+                    let completed_pending_docs =
+                        chunk_boundaries.partition_point(|boundary| *boundary <= batch_start);
+                    let documents_done = reused_documents + completed_pending_docs;
+                    let chunks_done = reused_chunks + batch_start;
+                    let failure_detail = err.detail().to_string();
+                    if chunks_done > 0 {
+                        let mut cached_chunks = resolved.clone();
+                        cached_chunks.extend(finalize_pending_chunks(pending_records[..batch_start].to_vec()));
+                        sort_chunk_records(&mut cached_chunks);
+                        write_index_snapshot(
+                            &meta_path,
+                            &chunks_path,
+                            client.provider(),
+                            client.model(),
+                            corpus,
+                            "partial",
+                            documents_done,
+                            total_documents,
+                            chunks_done,
+                            reused_chunks + pending_records.len(),
+                            Some(&failure_detail),
+                            &cached_chunks,
+                        )?;
+                        emit_retrieval_trace(
+                            emit_trace,
+                            format!(
+                                "[retrieval] cached partial {corpus} index provider={} documents_done={documents_done}/{total_documents} chunks_done={chunks_done}/{}",
+                                client.provider(),
+                                reused_chunks + pending_records.len()
+                            ),
+                        );
+                    }
+                    emit_retrieval_progress(emit_trace, RetrievalProgress {
+                        corpus: corpus.to_string(),
+                        phase: "failed".to_string(),
+                        documents_done,
+                        documents_total: total_documents,
+                        chunks_done,
+                        chunks_total: reused_chunks + pending_records.len(),
+                        reused_documents,
+                        message: if chunks_done > 0 {
+                            format!(
+                                "{corpus} retrieval indexing failed after retries; cached {documents_done}/{total_documents} docs for future runs."
+                            )
+                        } else {
+                            format!(
+                                "{corpus} retrieval indexing failed before any cacheable chunks were written."
+                            )
+                        },
+                    });
+                    return Ok(RefreshIndexOutcome::PartialCached {
+                        documents_done,
+                        documents_total: total_documents,
+                        chunks_done,
+                        chunks_total: reused_chunks + pending_records.len(),
+                        failure_detail,
+                    });
                 }
             };
             for (record, vector) in pending_records[batch_start..batch_end]
@@ -802,12 +1202,7 @@ where
         }
     }
     resolved.extend(finalize_pending_chunks(pending_records));
-
-    resolved.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-    });
+    sort_chunk_records(&mut resolved);
     let final_chunks_total = resolved.len();
 
     emit_retrieval_progress(emit_trace, RetrievalProgress {
@@ -821,26 +1216,20 @@ where
         message: format!("Writing {corpus} retrieval index files."),
     });
 
-    fs::write(
+    write_index_snapshot(
         &meta_path,
-        serde_json::to_string_pretty(&json!({
-            "version": INDEX_VERSION,
-            "provider": client.provider(),
-            "model": client.model(),
-            "corpus": corpus,
-            "chunk_target_chars": CHUNK_TARGET_CHARS,
-            "chunk_overlap_chars": CHUNK_OVERLAP_CHARS,
-        }))?,
-    )
-    .with_context(|| format!("failed to write {}", meta_path.display()))?;
-
-    let serialized = resolved
-        .iter()
-        .map(|chunk| serde_json::to_string(chunk))
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
-    fs::write(&chunks_path, serialized)
-        .with_context(|| format!("failed to write {}", chunks_path.display()))?;
+        &chunks_path,
+        client.provider(),
+        client.model(),
+        corpus,
+        "complete",
+        total_documents,
+        total_documents,
+        final_chunks_total,
+        final_chunks_total,
+        None,
+        &resolved,
+    )?;
     emit_retrieval_progress(emit_trace, RetrievalProgress {
         corpus: corpus.to_string(),
         phase: "done".to_string(),
@@ -851,7 +1240,81 @@ where
         reused_documents,
         message: format!("{} retrieval index ready.", capitalize(corpus)),
     });
-    Ok(resolved)
+    Ok(RefreshIndexOutcome::Complete { chunks: resolved })
+}
+
+fn sort_chunk_records(chunks: &mut [ChunkRecord]) {
+    chunks.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+}
+
+fn write_index_snapshot(
+    meta_path: &Path,
+    chunks_path: &Path,
+    provider: &str,
+    model: &str,
+    corpus: &str,
+    completion: &str,
+    documents_done: usize,
+    documents_total: usize,
+    chunks_done: usize,
+    chunks_total: usize,
+    last_failure: Option<&str>,
+    chunks: &[ChunkRecord],
+) -> anyhow::Result<()> {
+    let meta = json!({
+        "version": INDEX_VERSION,
+        "provider": provider,
+        "model": model,
+        "corpus": corpus,
+        "chunk_target_chars": CHUNK_TARGET_CHARS,
+        "chunk_overlap_chars": CHUNK_OVERLAP_CHARS,
+        "completion": completion,
+        "documents_done": documents_done,
+        "documents_total": documents_total,
+        "chunks_done": chunks_done,
+        "chunks_total": chunks_total,
+        "last_failure": last_failure,
+    });
+    write_text_atomically(meta_path, &serde_json::to_string_pretty(&meta)?)
+        .with_context(|| format!("failed to write {}", meta_path.display()))?;
+
+    let serialized = chunks
+        .iter()
+        .map(|chunk| serde_json::to_string(chunk))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    write_text_atomically(chunks_path, &serialized)
+        .with_context(|| format!("failed to write {}", chunks_path.display()))?;
+    Ok(())
+}
+
+fn write_text_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let tmp_path = atomic_temp_path(path);
+    fs::write(&tmp_path, contents)?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        if path.exists() {
+            fs::remove_file(path)?;
+            fs::rename(&tmp_path, path)?;
+        } else {
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("index");
+    let tmp_name = format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4());
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(tmp_name)
 }
 
 fn load_meta(meta_path: &Path, provider: &str, model: &str, corpus: &str) -> bool {
@@ -967,6 +1430,209 @@ fn emit_retrieval_progress(
 
 fn emit_retrieval_trace(emit_trace: &mut impl FnMut(String), message: String) {
     emit_trace(message);
+}
+
+fn classify_embeddings_transport_error(
+    provider: &str,
+    err: reqwest::Error,
+) -> EmbeddingsRequestError {
+    let detail = format!("{provider} embeddings request failed: {err}");
+    let lowered = detail.to_ascii_lowercase();
+    if err.is_timeout()
+        || err.is_connect()
+        || lowered.contains("connection reset")
+        || lowered.contains("disconnect")
+        || lowered.contains("reset before headers")
+        || lowered.contains("upstream connect error")
+        || lowered.contains("overflow")
+        || lowered.contains("gateway")
+        || lowered.contains("temporarily unavailable")
+        || lowered.contains("service unavailable")
+    {
+        return EmbeddingsRequestError::RetryableTransient {
+            status_code: None,
+            provider_code: None,
+            retry_after_sec: None,
+            detail,
+        };
+    }
+    EmbeddingsRequestError::Fatal {
+        status_code: None,
+        detail,
+    }
+}
+
+fn classify_embeddings_http_error(
+    provider: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> EmbeddingsRequestError {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let (message, provider_code, body_retry_after) = parsed
+        .as_ref()
+        .map(extract_provider_error_fields)
+        .unwrap_or_else(|| (String::new(), None, None));
+    let retry_after_sec = parse_retry_after_header(headers).or(body_retry_after);
+    let detail_body = if !message.is_empty() {
+        message
+    } else if !body.trim().is_empty() {
+        truncate(body, 500)
+    } else {
+        status.to_string()
+    };
+    let detail = format!("{provider} embeddings HTTP {}: {detail_body}", status.as_u16());
+    if let Some(input_id) = extract_oversize_input_id(&detail) {
+        return EmbeddingsRequestError::Oversize { input_id, detail };
+    }
+    if is_retryable_status_code(status.as_u16()) || is_retryable_transient_text(&detail) {
+        return EmbeddingsRequestError::RetryableTransient {
+            status_code: Some(status.as_u16()),
+            provider_code,
+            retry_after_sec,
+            detail,
+        };
+    }
+    EmbeddingsRequestError::Fatal {
+        status_code: Some(status.as_u16()),
+        detail,
+    }
+}
+
+fn is_retryable_status_code(status_code: u16) -> bool {
+    matches!(status_code, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+fn is_retryable_transient_text(detail: &str) -> bool {
+    let lowered = detail.to_ascii_lowercase();
+    lowered.contains("timeout")
+        || lowered.contains("timed out")
+        || lowered.contains("service unavailable")
+        || lowered.contains("temporarily unavailable")
+        || lowered.contains("upstream connect error")
+        || lowered.contains("disconnect")
+        || lowered.contains("connection reset")
+        || lowered.contains("reset before headers")
+        || lowered.contains("gateway")
+        || lowered.contains("overflow")
+}
+
+fn extract_provider_error_fields(payload: &Value) -> (String, Option<String>, Option<f64>) {
+    if let Some(obj) = payload.as_object() {
+        if let Some(error) = obj.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let provider_code = extract_provider_code(error.get("code"));
+            let retry_after = parse_retry_after_value(error.get("retry_after"))
+                .or_else(|| parse_retry_after_value(obj.get("retry_after")));
+            return (message, provider_code, retry_after);
+        }
+        let message = obj
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let provider_code = extract_provider_code(obj.get("code"));
+        let retry_after = parse_retry_after_value(obj.get("retry_after"));
+        return (message, provider_code, retry_after);
+    }
+    (String::new(), None, None)
+}
+
+fn extract_provider_code(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => Some(text.trim().to_string()).filter(|value| !value.is_empty()),
+        Some(Value::Number(num)) => Some(num.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_retry_after_value(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(num)) => num.as_f64().map(|v| v.max(0.0)),
+        Some(Value::String(text)) => parse_retry_after_text(text),
+        _ => None,
+    }
+}
+
+fn parse_retry_after_text(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = trimmed.parse::<f64>() {
+        return Some(seconds.max(0.0));
+    }
+    let parsed = DateTime::parse_from_rfc2822(trimmed).ok()?;
+    Some(
+        (parsed.with_timezone(&Utc) - Utc::now())
+            .num_milliseconds()
+            .max(0) as f64
+            / 1000.0,
+    )
+}
+
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<f64> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?;
+    let text = value.to_str().ok()?;
+    parse_retry_after_text(text)
+}
+
+fn retry_oversized_query_windows(
+    windows: &mut Vec<String>,
+    error: &EmbeddingsRequestError,
+    limits: EmbeddingsProviderLimits,
+    emit_trace: &mut impl FnMut(String),
+) -> bool {
+    let EmbeddingsRequestError::Oversize { input_id, .. } = error else {
+        return false;
+    };
+    let Some(offending) = windows.get(*input_id).cloned() else {
+        return false;
+    };
+    let emergency_limit = limits
+        .emergency_input_char_limit
+        .min((offending.chars().count() / 2).max(400));
+    let replacements = split_text_for_limit(&offending, emergency_limit);
+    if replacements.len() <= 1 {
+        return false;
+    }
+    windows.splice(*input_id..*input_id + 1, replacements.clone());
+    emit_retrieval_trace(
+        emit_trace,
+        format!(
+            "[retrieval] retrying query after provider oversize input_id={} chars={} retry_limit={} windows={}",
+            input_id,
+            offending.chars().count(),
+            emergency_limit,
+            replacements.len()
+        ),
+    );
+    true
+}
+
+fn split_text_for_limit(text: &str, max_chars: usize) -> Vec<String> {
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+    let target_chars = CHUNK_TARGET_CHARS.min(max_chars).max(400);
+    let overlap_chars = CHUNK_OVERLAP_CHARS
+        .min((target_chars / 5).max(80))
+        .min(target_chars.saturating_sub(1));
+    let windows = sliding_windows(text, target_chars, overlap_chars);
+    if windows.len() <= 1 {
+        return vec![text.to_string()];
+    }
+    windows
+        .into_iter()
+        .map(|window| window.trim().to_string())
+        .filter(|window| !window.is_empty())
+        .collect()
 }
 
 fn build_pending_chunks_for_document(doc: &SourceDocument) -> Vec<PendingChunk> {
@@ -1090,14 +1756,14 @@ fn preflight_pending_chunks(
 fn retry_oversized_batch(
     pending_records: &mut Vec<PendingChunk>,
     batch_start: usize,
-    error: &str,
+    error: &EmbeddingsRequestError,
     limits: EmbeddingsProviderLimits,
     emit_trace: &mut impl FnMut(String),
 ) -> bool {
-    let Some(input_id) = extract_oversize_input_id(error) else {
+    let EmbeddingsRequestError::Oversize { input_id, .. } = error else {
         return false;
     };
-    let absolute_index = batch_start + input_id;
+    let absolute_index = batch_start + *input_id;
     let Some(offending) = pending_records.get(absolute_index).cloned() else {
         return false;
     };
@@ -1836,10 +2502,10 @@ fn capitalize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::{
         Arc,
         Mutex,
-        atomic::{AtomicBool, Ordering},
     };
     use tempfile::tempdir;
 
@@ -1979,10 +2645,26 @@ mod tests {
         assert!((pooled[1] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
     }
 
+    #[derive(Clone)]
+    enum FakeResponse {
+        Success,
+        Error(EmbeddingsRequestError),
+    }
+
     struct FakeBackend {
         limits: EmbeddingsProviderLimits,
-        fail_first: AtomicBool,
-        calls: Arc<Mutex<Vec<Vec<String>>>>,
+        responses: Arc<Mutex<VecDeque<FakeResponse>>>,
+        calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    }
+
+    impl FakeBackend {
+        fn new(limits: EmbeddingsProviderLimits, responses: Vec<FakeResponse>) -> Self {
+            Self {
+                limits,
+                responses: Arc::new(Mutex::new(responses.into())),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait]
@@ -1999,57 +2681,352 @@ mod tests {
             self.limits
         }
 
-        async fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f64>>> {
-            self.calls.lock().unwrap().push(texts.to_vec());
-            if self.fail_first.swap(false, Ordering::SeqCst) {
-                return Err(anyhow!(
-                    "mistral embeddings HTTP 400: {{\"message\":\"Input id 0 has 9000 tokens, exceeding max 8192 tokens.\"}}"
-                ));
+        async fn embed(
+            &self,
+            texts: &[String],
+            input_type: &str,
+        ) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((input_type.to_string(), texts.to_vec()));
+            match self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(FakeResponse::Success)
+            {
+                FakeResponse::Success => {
+                    Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+                }
+                FakeResponse::Error(err) => Err(err),
             }
-            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
         }
     }
 
-    #[tokio::test]
-    async fn test_refresh_index_retries_after_oversize_error() {
-        let tmp = tempdir().unwrap();
-        let index_dir = tmp.path().join(".openplanter/embeddings/workspace");
-        let doc = SourceDocument {
-            source_id: "notes.md".to_string(),
-            path: "notes.md".to_string(),
-            title: "notes.md".to_string(),
-            text: "Long paragraph ".repeat(300),
-            fingerprint: "notes-doc".to_string(),
+    fn test_retry_policy(max_retries: usize) -> EmbeddingsRetryPolicy {
+        EmbeddingsRetryPolicy {
+            max_retries,
+            backoff_base_sec: 0.0,
+            backoff_max_sec: 0.0,
+            retry_after_cap_sec: 10.0,
+        }
+    }
+
+    fn test_limits(batch_size: usize) -> EmbeddingsProviderLimits {
+        EmbeddingsProviderLimits {
+            batch_size,
+            input_char_limit: 5_000,
+            emergency_input_char_limit: 800,
+        }
+    }
+
+    fn test_doc(name: &str, text: &str) -> SourceDocument {
+        SourceDocument {
+            source_id: name.to_string(),
+            path: name.to_string(),
+            title: name.to_string(),
+            text: text.to_string(),
+            fingerprint: fingerprint_text(text),
             kind: "workspace".to_string(),
             metadata: {
                 let mut metadata = Map::new();
                 metadata.insert("extension".to_string(), Value::String(".md".to_string()));
                 metadata
             },
-        };
-        let backend = FakeBackend {
-            limits: EmbeddingsProviderLimits {
-                batch_size: 32,
-                input_char_limit: 5_000,
-                emergency_input_char_limit: 800,
-            },
-            fail_first: AtomicBool::new(true),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        };
+        }
+    }
+
+    fn enabled_status() -> RetrievalStatus {
+        RetrievalStatus {
+            provider: "mistral".to_string(),
+            model: MISTRAL_EMBEDDING_MODEL.to_string(),
+            status: "enabled".to_string(),
+            detail: "enabled".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_embed_texts_with_retry_retries_transient_503_then_succeeds() {
+        let backend = FakeBackend::new(
+            test_limits(32),
+            vec![
+                FakeResponse::Error(EmbeddingsRequestError::RetryableTransient {
+                    status_code: Some(503),
+                    provider_code: None,
+                    retry_after_sec: None,
+                    detail: "mistral embeddings HTTP 503: upstream overflow".to_string(),
+                }),
+                FakeResponse::Success,
+            ],
+        );
         let mut events = Vec::new();
 
-        let chunks = refresh_index(
-            Some(&index_dir),
-            &[doc],
+        let vectors = embed_texts_with_retry(
             &backend,
+            &[String::from("hello world")],
+            "document",
             "workspace",
-            &mut |message| events.push(message),
+            test_retry_policy(1),
+            None,
+            &mut |message: String| events.push(message),
         )
         .await
         .unwrap();
 
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(backend.calls.lock().unwrap().len(), 2);
+        assert!(events.iter().any(|line| line.contains("transient embeddings failure")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_embed_texts_with_retry_honors_retry_after_for_429() {
+        let backend = FakeBackend::new(
+            test_limits(32),
+            vec![
+                FakeResponse::Error(EmbeddingsRequestError::RetryableTransient {
+                    status_code: Some(429),
+                    provider_code: Some("rate_limit".to_string()),
+                    retry_after_sec: Some(4.0),
+                    detail: "mistral embeddings HTTP 429: too many requests".to_string(),
+                }),
+                FakeResponse::Success,
+            ],
+        );
+        let mut events = Vec::new();
+        let retry_policy = EmbeddingsRetryPolicy {
+            max_retries: 1,
+            backoff_base_sec: 0.0,
+            backoff_max_sec: 10.0,
+            retry_after_cap_sec: 10.0,
+        };
+
+        let vectors = embed_texts_with_retry(
+            &backend,
+            &[String::from("hello world")],
+            "document",
+            "workspace",
+            retry_policy,
+            None,
+            &mut |message: String| events.push(message),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(vectors.len(), 1);
+        assert!(events.iter().any(|line| line.contains("in 4.0s")));
+    }
+
+    #[tokio::test]
+    async fn test_embed_texts_with_retry_does_not_retry_non_retryable_401() {
+        let backend = FakeBackend::new(
+            test_limits(32),
+            vec![FakeResponse::Error(EmbeddingsRequestError::Fatal {
+                status_code: Some(401),
+                detail: "mistral embeddings HTTP 401: unauthorized".to_string(),
+            })],
+        );
+
+        let err = embed_texts_with_retry(
+            &backend,
+            &[String::from("hello world")],
+            "document",
+            "workspace",
+            test_retry_policy(2),
+            None,
+            &mut |_message: String| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EmbeddingsRequestError::Fatal {
+                status_code: Some(401),
+                ..
+            }
+        ));
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_index_retries_after_oversize_error() {
+        let tmp = tempdir().unwrap();
+        let index_dir = tmp.path().join(".openplanter/embeddings/workspace");
+        let doc = test_doc("notes.md", &"Long paragraph ".repeat(300));
+        let backend = FakeBackend::new(
+            test_limits(32),
+            vec![
+                FakeResponse::Error(EmbeddingsRequestError::Oversize {
+                    input_id: 0,
+                    detail: "mistral embeddings HTTP 400: input too large".to_string(),
+                }),
+                FakeResponse::Success,
+            ],
+        );
+        let mut events = Vec::new();
+
+        let outcome = refresh_index(
+            Some(&index_dir),
+            &[doc],
+            &backend,
+            "workspace",
+            test_retry_policy(0),
+            None,
+            &mut |message: String| events.push(message),
+        )
+        .await
+        .unwrap();
+        let RefreshIndexOutcome::Complete { chunks } = outcome else {
+            panic!("expected complete index outcome");
+        };
+
         assert!(chunks.len() > 1);
         assert!(events.iter().any(|line| line.contains("retrying batch after provider oversize")));
+    }
+
+    #[tokio::test]
+    async fn test_build_retrieval_packet_returns_degraded_and_writes_partial_snapshot() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("a.md"), "alpha document").unwrap();
+        fs::write(tmp.path().join("b.md"), "beta document").unwrap();
+        let backend = FakeBackend::new(
+            test_limits(1),
+            vec![
+                FakeResponse::Success,
+                FakeResponse::Error(EmbeddingsRequestError::RetryableTransient {
+                    status_code: Some(503),
+                    provider_code: None,
+                    retry_after_sec: None,
+                    detail: "mistral embeddings HTTP 503: upstream overflow".to_string(),
+                }),
+            ],
+        );
+        let mut events = Vec::new();
+
+        let result = build_retrieval_packet_with_backend(
+            tmp.path(),
+            None,
+            ".openplanter",
+            "alpha",
+            None,
+            &backend,
+            &enabled_status(),
+            test_retry_policy(0),
+            None,
+            &mut |message: String| events.push(message),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.packet.is_none());
+        assert_eq!(result.status.status, "degraded");
+        assert!(result.status.detail.contains("Semantic context was skipped"));
+        assert!(events.iter().any(|line| line.contains("\"phase\":\"failed\"")));
+
+        let meta = fs::read_to_string(
+            tmp.path()
+                .join(".openplanter/embeddings/workspace/meta.json"),
+        )
+        .unwrap();
+        let chunks = fs::read_to_string(
+            tmp.path()
+                .join(".openplanter/embeddings/workspace/chunks.jsonl"),
+        )
+        .unwrap();
+        assert!(meta.contains("\"completion\": \"partial\""));
+        assert_eq!(chunks.lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_index_reuses_partial_snapshot_and_completes_follow_up_run() {
+        let tmp = tempdir().unwrap();
+        let index_dir = tmp.path().join(".openplanter/embeddings/workspace");
+        let docs = vec![test_doc("a.md", "alpha document"), test_doc("b.md", "beta document")];
+
+        let first_backend = FakeBackend::new(
+            test_limits(1),
+            vec![
+                FakeResponse::Success,
+                FakeResponse::Error(EmbeddingsRequestError::RetryableTransient {
+                    status_code: Some(503),
+                    provider_code: None,
+                    retry_after_sec: None,
+                    detail: "mistral embeddings HTTP 503: upstream overflow".to_string(),
+                }),
+            ],
+        );
+        let first = refresh_index(
+            Some(&index_dir),
+            &docs,
+            &first_backend,
+            "workspace",
+            test_retry_policy(0),
+            None,
+            &mut |_message: String| {},
+        )
+        .await
+        .unwrap();
+        assert!(matches!(first, RefreshIndexOutcome::PartialCached { .. }));
+
+        let second_backend = FakeBackend::new(test_limits(1), vec![FakeResponse::Success]);
+        let second = refresh_index(
+            Some(&index_dir),
+            &docs,
+            &second_backend,
+            "workspace",
+            test_retry_policy(0),
+            None,
+            &mut |_message: String| {},
+        )
+        .await
+        .unwrap();
+        let RefreshIndexOutcome::Complete { chunks } = second else {
+            panic!("expected complete index outcome");
+        };
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(second_backend.calls.lock().unwrap().len(), 1);
+        let meta = fs::read_to_string(index_dir.join("meta.json")).unwrap();
+        assert!(meta.contains("\"completion\": \"complete\""));
+    }
+
+    #[tokio::test]
+    async fn test_build_retrieval_packet_degrades_when_query_embedding_fails() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("notes.md"), "alpha retrieval note").unwrap();
+        let backend = FakeBackend::new(
+            test_limits(32),
+            vec![
+                FakeResponse::Success,
+                FakeResponse::Error(EmbeddingsRequestError::RetryableTransient {
+                    status_code: Some(503),
+                    provider_code: None,
+                    retry_after_sec: None,
+                    detail: "mistral embeddings HTTP 503: upstream overflow".to_string(),
+                }),
+            ],
+        );
+
+        let result = build_retrieval_packet_with_backend(
+            tmp.path(),
+            None,
+            ".openplanter",
+            "alpha",
+            None,
+            &backend,
+            &enabled_status(),
+            test_retry_policy(0),
+            None,
+            &mut |_message: String| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(result.packet.is_none());
+        assert_eq!(result.status.status, "degraded");
+        assert!(result.status.detail.contains("query embedding failed"));
     }
 }
 
