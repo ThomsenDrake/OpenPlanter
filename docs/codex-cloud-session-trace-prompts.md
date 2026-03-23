@@ -2,6 +2,14 @@
 
 All paths below are repo-relative. Run each cloud Codex session from the repo root.
 
+Global rules for every cloud session:
+
+- You are not alone in the repo. Only edit the files explicitly assigned to you.
+- Do not revert unrelated changes and do not expand your write scope.
+- Before editing, read the files you own plus the referenced docs.
+- At the end, run the most targeted verification you can for your scope and report exactly what you ran.
+- End with a focused commit on your branch.
+
 ## Execution Order
 
 1. Run Prompt 1 first.
@@ -25,11 +33,14 @@ All paths below are repo-relative. Run each cloud Codex session from the repo ro
 Status: sequential first  
 Depends on: nothing  
 Can run in parallel with: nothing
+Suggested branch: `chore/session-trace-v2-spec`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md and VISION.md.
 
-Create a concrete v2 session trace spec for OpenPlanter. Do not implement code yet.
+You are not alone in the repo. Only edit the file listed below. Do not implement code yet.
+
+Create a concrete v2 session trace spec for OpenPlanter.
 
 Own only:
 - docs/session-trace-v2-spec.md
@@ -44,6 +55,14 @@ Define:
 - Rollout plan and test matrix
 
 Keep the design additive and backwards-compatible. Existing sessions must remain readable without destructive migration.
+
+Deliverable:
+- A spec that is concrete enough for parallel implementation by Python, Rust, and frontend sessions
+
+Verification:
+- Re-read the finished spec for internal consistency and make sure every field needed by later prompts is explicitly named
+
+End by creating a focused commit.
 ```
 
 ## Prompt 2
@@ -51,9 +70,12 @@ Keep the design additive and backwards-compatible. Existing sessions must remain
 Status: parallel after 1  
 Depends on: Prompt 1  
 Can run in parallel with: Prompts 3 and 6
+Suggested branch: `chore/session-trace-python-v2`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md and docs/session-trace-v2-spec.md.
+
+You are not alone in the repo. Only edit the files listed below. Do not touch desktop Rust or frontend files.
 
 Implement the Python-side session/replay compatibility layer.
 
@@ -71,7 +93,11 @@ Goals:
 - Do not rewrite old logs in place
 - Add tests for mixed old/new session directories
 
-Do not edit desktop Rust or frontend files.
+Verification:
+- Run the narrowest relevant Python tests for session and replay behavior
+- Report exactly which tests passed and any gaps
+
+End by creating a focused commit.
 ```
 
 ## Prompt 3
@@ -79,9 +105,12 @@ Do not edit desktop Rust or frontend files.
 Status: parallel after 1  
 Depends on: Prompt 1  
 Can run in parallel with: Prompts 2 and 6
+Suggested branch: `chore/session-trace-desktop-v2`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md and docs/session-trace-v2-spec.md.
+
+You are not alone in the repo. Only edit the files listed below. Do not touch wiki.rs or frontend files.
 
 Implement the desktop-side session contract, logging completeness, and failure taxonomy.
 
@@ -99,7 +128,11 @@ Goals:
 - Remove the per-append full replay scan if possible
 - Keep changes backwards-compatible
 
-Add or update Rust tests where appropriate. Do not edit wiki.rs or frontend files.
+Verification:
+- Run the narrowest relevant Rust tests for replay/session/bridge behavior
+- Report exactly which tests passed and any gaps
+
+End by creating a focused commit.
 ```
 
 ## Prompt 4
@@ -107,9 +140,12 @@ Add or update Rust tests where appropriate. Do not edit wiki.rs or frontend file
 Status: sequential after 3  
 Depends on: Prompt 3  
 Can run in parallel with: nothing important
+Suggested branch: `chore/session-trace-overview-provenance`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md, docs/session-trace-v2-spec.md, and the current desktop session/bridge code.
+
+You are not alone in the repo. Only edit the file listed below. Do not edit frontend files.
 
 Implement backend provenance enrichment for the investigation overview.
 
@@ -122,7 +158,13 @@ Goals:
 - Preserve existing overview behavior where possible
 - Add tests for dedupe/order/provenance behavior
 
-Do not edit frontend files. If you need a payload field that does not exist yet, use the fields added by Prompt 3 rather than introducing a second contract.
+If you need a payload field that does not exist yet, use the fields added by Prompt 3 rather than introducing a second contract.
+
+Verification:
+- Run the narrowest relevant Rust tests around overview/provenance behavior
+- Report exactly which tests passed and any gaps
+
+End by creating a focused commit.
 ```
 
 ## Prompt 5
@@ -130,9 +172,12 @@ Do not edit frontend files. If you need a payload field that does not exist yet,
 Status: sequential after 4  
 Depends on: Prompt 4  
 Can run in parallel with: nothing important
+Suggested branch: `chore/session-trace-overview-ui`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md and the backend overview/provenance changes.
+
+You are not alone in the repo. Only edit the files listed below. Do not edit Rust backend files.
 
 Implement a curated replay + evidence-linked overview UI.
 
@@ -149,7 +194,11 @@ Goals:
 - Make curated replay feel like the primary UX, not a thin summary card
 - Keep the visual language consistent with the existing app
 
-Do not edit Rust backend files.
+Verification:
+- Run the narrowest frontend checks available for this app
+- If no automated frontend verification exists, state that clearly and do a careful code-level consistency pass
+
+End by creating a focused commit.
 ```
 
 ## Prompt 6
@@ -158,9 +207,12 @@ Status: parallel after 1
 Depends on: Prompt 1  
 Can run in parallel with: Prompts 2 and 3  
 Best as: design/spike, not merge-critical
+Suggested branch: `chore/session-change-sets-spike`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md and VISION.md.
+
+You are not alone in the repo. Only edit the files listed below. Do not touch backend files.
 
 Design the next step after basic trace unification: ontology-backed session change sets.
 
@@ -175,7 +227,11 @@ Goals:
 - Do not require backend contract changes in this pass
 - Produce a concrete design with rollout phases
 
-Do not edit backend files.
+Verification:
+- Re-read the design doc and any scaffolding changes for consistency with the existing graph/session behavior
+- If you add code, run the narrowest relevant checks available
+
+End by creating a focused commit.
 ```
 
 ## Prompt 7
@@ -183,9 +239,12 @@ Do not edit backend files.
 Status: sequential last  
 Depends on: Prompts 4 and 5  
 Can run in parallel with: nothing
+Suggested branch: `chore/session-handoffs`
 
 ```text
 Read docs/session-trace-deepdive-2026-03-23.md, the final session trace contract, and the new provenance UI/backend.
+
+You are not alone in the repo. Keep your write scope narrow and centered on the handoff/export path.
 
 Implement a durable handoff/checkpoint package for investigations.
 
@@ -200,4 +259,10 @@ Goals:
 - Avoid broad refactors outside the handoff path
 
 Assume the provenance and replay contract from earlier prompts is already in place.
+
+Verification:
+- Run the narrowest relevant checks for the export/import path you implement
+- Report exactly what passed and any follow-up work still needed
+
+End by creating a focused commit.
 ```
