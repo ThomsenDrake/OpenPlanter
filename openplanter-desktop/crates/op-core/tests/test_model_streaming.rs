@@ -7,13 +7,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use tokio_util::sync::CancellationToken;
 
-use op_core::events::{DeltaEvent, DeltaKind};
+use op_core::events::{DeltaEvent, DeltaKind, StepEvent};
 use op_core::model::anthropic::AnthropicModel;
 use op_core::model::openai::OpenAIModel;
 use op_core::model::{BaseModel, Message, RateLimitError};
@@ -519,7 +519,6 @@ async fn test_anthropic_http_error() {
 async fn test_solve_with_mock_anthropic() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
 
@@ -549,7 +548,12 @@ async fn test_solve_with_mock_anthropic() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev::Step(event));
         }
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events
                 .lock()
                 .unwrap()
@@ -627,7 +631,6 @@ async fn test_solve_with_mock_anthropic() {
 async fn test_solve_with_mock_openai() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
 
@@ -657,7 +660,12 @@ async fn test_solve_with_mock_openai() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev2::Step(event));
         }
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events
                 .lock()
                 .unwrap()
@@ -743,7 +751,6 @@ async fn test_solve_with_mock_openai() {
 async fn test_solve_http_error_emits_error() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     let addr = start_error_server(401, r#"{"error":{"message":"Invalid API key"}}"#).await;
 
@@ -753,8 +760,14 @@ async fn test_solve_http_error_emits_error() {
     impl SolveEmitter for ErrorEmitter {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
-        fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<op_core::events::LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
         fn emit_error(&self, msg: &str) {
             self.errors.lock().unwrap().push(msg.to_string());
         }
@@ -786,7 +799,6 @@ async fn test_solve_http_error_emits_error() {
 async fn test_solve_rate_limit_retry_eventually_completes() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
@@ -810,9 +822,14 @@ async fn test_solve_rate_limit_retry_eventually_completes() {
 
         fn emit_delta(&self, _: DeltaEvent) {}
 
-        fn emit_step(&self, _: StepEvent) {}
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events
                 .lock()
                 .unwrap()
@@ -890,7 +907,6 @@ async fn test_solve_rate_limit_retry_eventually_completes() {
 async fn test_solve_cancel_emits_cancelled() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     // Use a server that returns data but we cancel before processing
     let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
@@ -901,8 +917,14 @@ async fn test_solve_cancel_emits_cancelled() {
     impl SolveEmitter for CancelEmitter {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
-        fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<op_core::events::LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
         fn emit_error(&self, msg: &str) {
             self.events.lock().unwrap().push(msg.to_string());
         }
@@ -938,7 +960,6 @@ async fn test_solve_cancel_emits_cancelled() {
 async fn test_solve_demo_mode_bypasses_llm() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     struct TestEmitter {
         events: Arc<Mutex<Vec<String>>>,
@@ -946,8 +967,13 @@ async fn test_solve_demo_mode_bypasses_llm() {
     impl SolveEmitter for TestEmitter {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
-        fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, result: &str, _loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events.lock().unwrap().push(result.to_string());
         }
         fn emit_error(&self, msg: &str) {
@@ -979,7 +1005,6 @@ async fn test_solve_demo_mode_bypasses_llm() {
 async fn test_solve_missing_key_emits_error() {
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
-    use op_core::events::StepEvent;
 
     struct TestEmitter {
         errors: Arc<Mutex<Vec<String>>>,
@@ -987,8 +1012,14 @@ async fn test_solve_missing_key_emits_error() {
     impl SolveEmitter for TestEmitter {
         fn emit_trace(&self, _: &str) {}
         fn emit_delta(&self, _: DeltaEvent) {}
-        fn emit_step(&self, _: StepEvent) {}
-        fn emit_complete(&self, _: &str, _: Option<op_core::events::LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<op_core::events::LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
         fn emit_error(&self, msg: &str) {
             self.errors.lock().unwrap().push(msg.to_string());
         }
@@ -1054,6 +1085,17 @@ event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":18}}\n\n\
 event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
+const ANTHROPIC_SSE_TOOL_LIST_ALT: &str = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_loop_alt\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":62}}}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Checking again.\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_loop2\",\"name\":\"list_files\",\"input\":{}}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":13}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
 /// SSE body for the follow-up Anthropic response (final text answer after tool result).
 const ANTHROPIC_SSE_FINAL_ANSWER: &str = "\
 event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_loop2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":80}}}\n\n\
@@ -1114,6 +1156,51 @@ async fn start_stateful_mock_server_with_counter(
     (addr, counter)
 }
 
+async fn start_stateful_mock_server_with_requests(
+    responses: Vec<&'static str>,
+) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_app = requests.clone();
+    let counter = Arc::new(Mutex::new(0usize));
+    let counter_for_app = counter.clone();
+    let responses = Arc::new(responses);
+
+    let app = Router::new().route(
+        "/{*path}",
+        post(move |body: Bytes| {
+            let requests = requests_for_app.clone();
+            let counter = counter_for_app.clone();
+            let responses = responses.clone();
+            async move {
+                requests
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+
+                let mut idx = counter.lock().unwrap();
+                let response_body = if *idx < responses.len() {
+                    responses[*idx]
+                } else {
+                    responses.last().unwrap()
+                };
+                *idx += 1;
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .header("cache-control", "no-cache")
+                    .body(Body::from(response_body))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, requests)
+}
+
 #[tokio::test]
 async fn test_solve_multi_step_agentic_loop() {
     use op_core::config::AgentConfig;
@@ -1153,7 +1240,12 @@ async fn test_solve_multi_step_agentic_loop() {
         fn emit_step(&self, event: StepEvent) {
             self.events.lock().unwrap().push(Ev3::Step(event));
         }
-        fn emit_complete(&self, result: &str, loop_metrics: Option<op_core::events::LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events.lock().unwrap().push(Ev3::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1335,7 +1427,12 @@ async fn test_solve_flushes_final_curator_checkpoint_before_complete() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, result: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            _: Option<LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events
                 .lock()
                 .unwrap()
@@ -1434,7 +1531,13 @@ async fn test_solve_flushes_cancelled_checkpoint_before_error() {
             }
         }
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1536,7 +1639,13 @@ async fn test_solve_flushes_model_error_checkpoint_before_error() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1631,7 +1740,13 @@ async fn test_solve_flushes_tool_loop_cancel_checkpoint_before_error() {
 
         fn emit_step(&self, _: op_core::events::StepEvent) {}
 
-        fn emit_complete(&self, _: &str, _: Option<LoopMetrics>, _: Option<op_core::events::CompletionMeta>) {}
+        fn emit_complete(
+            &self,
+            _: &str,
+            _: Option<LoopMetrics>,
+            _: Option<op_core::events::CompletionMeta>,
+        ) {
+        }
 
         fn emit_error(&self, message: &str) {
             self.events
@@ -1707,6 +1822,14 @@ event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12}}\n\n\
 event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
+const ANTHROPIC_SSE_SUBSTANTIVE_FINAL_WITH_TRAILING_PROCESS: &str = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meta_4\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":58}}}\n\n\
+event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Subject: Final deliverable\\n\\nThis run completed the deliverable and the concrete output is ready to use. I will send the rest after I verify more.\"}}\n\n\
+event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":24}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
 #[tokio::test]
 async fn test_solve_rejects_meta_final_until_concrete_completion() {
     use op_core::config::AgentConfig;
@@ -1747,7 +1870,12 @@ async fn test_solve_rejects_meta_final_until_concrete_completion() {
             self.events.lock().unwrap().push(Ev4::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events.lock().unwrap().push(Ev4::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1861,7 +1989,12 @@ async fn test_solve_allows_structural_meta_for_plan_objectives() {
             self.events.lock().unwrap().push(Ev5::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events.lock().unwrap().push(Ev5::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -1964,7 +2097,12 @@ async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
             self.events.lock().unwrap().push(Ev6::Step(event));
         }
 
-        fn emit_complete(&self, result: &str, loop_metrics: Option<LoopMetrics>, _completion: Option<op_core::events::CompletionMeta>) {
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
             self.events.lock().unwrap().push(Ev6::Complete {
                 result: result.to_string(),
                 loop_metrics,
@@ -2021,6 +2159,369 @@ async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
     );
     assert!(
         !recorded.iter().any(|event| matches!(event, Ev6::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_uses_separate_context_finalizer_rescue_before_meta_stall() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::{LoopMetrics, StepEvent};
+
+    let (addr, request_bodies) = start_stateful_mock_server_with_requests(vec![
+        ANTHROPIC_SSE_META_FINAL,
+        ANTHROPIC_SSE_SUBSTANTIVE_FINAL_WITH_TRAILING_PROCESS,
+        ANTHROPIC_SSE_CONCRETE_FINAL,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev7 {
+        Trace(String),
+        Step(StepEvent),
+        Complete {
+            result: String,
+            loop_metrics: Option<LoopMetrics>,
+        },
+        Error(String),
+    }
+
+    struct TestEmitter7 {
+        events: Arc<Mutex<Vec<Ev7>>>,
+    }
+
+    impl SolveEmitter for TestEmitter7 {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev7::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, event: StepEvent) {
+            self.events.lock().unwrap().push(Ev7::Step(event));
+        }
+
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
+            self.events.lock().unwrap().push(Ev7::Complete {
+                result: result.to_string(),
+                loop_metrics,
+            });
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev7::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter7 {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Produce the final answer directly", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev7::Trace(message) if message.contains("starting separate-context finalizer rescue")
+        )),
+        "expected finalizer rescue trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev7::Trace(message) if message.contains("finalizer rescue accepted concrete final answer")
+        )),
+        "expected accepted rescue trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev7::Complete { result, loop_metrics }
+                if result.contains("Completed the task")
+                    && loop_metrics.as_ref().map(|metrics| metrics.final_rejections) == Some(2)
+                    && loop_metrics.as_ref().map(|metrics| metrics.finalization_stalls) == Some(0)
+        )),
+        "expected rescued completion, got: {recorded:?}"
+    );
+
+    let steps: Vec<&StepEvent> = recorded
+        .iter()
+        .filter_map(|event| match event {
+            Ev7::Step(step) => Some(step),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps.len(), 1, "only the rescued final should emit a step");
+    assert!(steps[0].is_final);
+
+    let captured = request_bodies.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3, "expected exactly three model requests");
+    let rescue_request: serde_json::Value = serde_json::from_str(&captured[2]).unwrap();
+    assert!(rescue_request.get("tools").is_none());
+    assert_eq!(
+        rescue_request["messages"].as_array().map(|messages| messages.len()),
+        Some(1)
+    );
+    assert!(rescue_request["system"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Return only the direct final deliverable as plain text."));
+    assert!(rescue_request["messages"][0]["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Failure label: meta_rejection_stall"));
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev7::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_preserves_finalization_stall_when_rescue_is_still_meta() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::LoopMetrics;
+
+    let addr = start_stateful_mock_server(vec![
+        ANTHROPIC_SSE_META_FINAL,
+        ANTHROPIC_SSE_SUBSTANTIVE_FINAL_WITH_TRAILING_PROCESS,
+        ANTHROPIC_SSE_META_FINAL,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev8 {
+        Trace(String),
+        Complete {
+            result: String,
+            loop_metrics: Option<LoopMetrics>,
+        },
+        Error(String),
+    }
+
+    struct TestEmitter8 {
+        events: Arc<Mutex<Vec<Ev8>>>,
+    }
+
+    impl SolveEmitter for TestEmitter8 {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev8::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
+            self.events.lock().unwrap().push(Ev8::Complete {
+                result: result.to_string(),
+                loop_metrics,
+            });
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev8::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter8 {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Produce the final answer directly", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev8::Trace(message) if message.contains("starting separate-context finalizer rescue")
+        )),
+        "expected finalizer rescue attempt, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev8::Trace(message) if message.contains("finalizer rescue rejected")
+        )),
+        "expected rejected rescue trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev8::Complete { result, loop_metrics }
+                if result.contains("Partial completion for objective")
+                    && loop_metrics.as_ref().map(|metrics| metrics.final_rejections) == Some(2)
+                    && loop_metrics.as_ref().map(|metrics| metrics.finalization_stalls) == Some(1)
+        )),
+        "expected finalization stall fallback, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev8::Error(_))),
+        "did not expect errors, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_uses_finalizer_rescue_after_rewrite_only_violation_stall() {
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+    use op_core::events::LoopMetrics;
+
+    let addr = start_stateful_mock_server(vec![
+        ANTHROPIC_SSE_META_FINAL,
+        ANTHROPIC_SSE_TOOL_LIST,
+        ANTHROPIC_SSE_TOOL_LIST_ALT,
+        ANTHROPIC_SSE_CONCRETE_FINAL,
+    ])
+    .await;
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev9 {
+        Trace(String),
+        Complete {
+            result: String,
+            loop_metrics: Option<LoopMetrics>,
+        },
+        Error(String),
+    }
+
+    struct TestEmitter9 {
+        events: Arc<Mutex<Vec<Ev9>>>,
+    }
+
+    impl SolveEmitter for TestEmitter9 {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev9::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: op_core::events::StepEvent) {}
+
+        fn emit_complete(
+            &self,
+            result: &str,
+            loop_metrics: Option<LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
+            self.events.lock().unwrap().push(Ev9::Complete {
+                result: result.to_string(),
+                loop_metrics,
+            });
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev9::Error(message.to_string()));
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = TestEmitter9 {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-5".into(),
+        anthropic_api_key: Some("test-key".into()),
+        anthropic_base_url: format!("http://{addr}"),
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Produce the final answer directly", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev9::Trace(message) if message.contains("rewrite-only finalization retry blocked tool calls")
+        )),
+        "expected rewrite-only violation trace, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(
+            event,
+            Ev9::Trace(message) if message.contains("executing tool: list_files")
+        )),
+        "rewrite-only stall should not execute tools, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev9::Trace(message) if message.contains("finalizer rescue accepted concrete final answer")
+        )),
+        "expected accepted rescue trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            Ev9::Complete { result, loop_metrics }
+                if result.contains("Completed the task")
+                    && loop_metrics.as_ref().map(|metrics| metrics.final_rejections) == Some(1)
+                    && loop_metrics.as_ref().map(|metrics| metrics.rewrite_only_violations) == Some(2)
+                    && loop_metrics.as_ref().map(|metrics| metrics.finalization_stalls) == Some(0)
+        )),
+        "expected rewrite-only rescue completion, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev9::Error(_))),
         "did not expect errors, got: {recorded:?}"
     );
 }

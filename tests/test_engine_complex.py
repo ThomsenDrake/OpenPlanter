@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 from conftest import _tc
 from agent.config import AgentConfig
-from agent.engine import ExternalContext, RLMEngine, StepProgressRecord, _evaluate_budget_extension
+from agent.engine import (
+    ExternalContext,
+    RLMEngine,
+    StepProgressRecord,
+    _FINALIZER_RESCUE_SYSTEM_PROMPT,
+    _evaluate_budget_extension,
+)
 from agent.model import Conversation, ModelTurn, RateLimitError, ScriptedModel, ToolResult
 from agent.tools import WorkspaceTools
 
@@ -154,6 +160,113 @@ class EngineComplexTests(unittest.TestCase):
             self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 1)
             self.assertEqual(engine.last_loop_metrics.get("rewrite_only_violations"), 2)
             self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 1)
+            self.assertFalse((root / "blocked-a.txt").exists())
+            self.assertFalse((root / "blocked-b.txt").exists())
+
+    def test_finalizer_rescue_salvages_meta_stall_in_fresh_no_tools_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            clean_final = (
+                "Subject: Final deliverable\n\n"
+                "This run completed the deliverable and the concrete output is ready to use."
+            )
+
+            class CapturingRescueModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.tool_defs = [{"name": "write_file"}]
+                    self.tool_defs_history: list[list[object]] = []
+                    self.system_prompts: list[str] = []
+                    self.initial_messages: list[str] = []
+
+                def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
+                    self.system_prompts.append(system_prompt)
+                    self.initial_messages.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.tool_defs_history.append(list(self.tool_defs))
+                    return super().complete(conversation)
+
+            model = CapturingRescueModel(
+                scripted_turns=[
+                    ModelTurn(text="Let me draft the final answer next.", stop_reason="end_turn"),
+                    ModelTurn(
+                        text=(
+                            "Subject: Final deliverable\n\n"
+                            "This run completed the deliverable and the concrete output is ready to use.\n\n"
+                            "I will send the rest after I verify more."
+                        ),
+                        stop_reason="end_turn",
+                    ),
+                    ModelTurn(text=clean_final, stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("force a concrete final answer")
+
+            self.assertEqual(result, clean_final)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 2)
+            self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 0)
+            self.assertGreaterEqual(len(model.tool_defs_history[0]), 1)
+            self.assertGreaterEqual(len(model.tool_defs_history[1]), 1)
+            self.assertEqual(model.tool_defs_history[2], [])
+            self.assertEqual(model.system_prompts[1], _FINALIZER_RESCUE_SYSTEM_PROMPT)
+            self.assertIn("Failure label: meta_rejection_stall", model.initial_messages[1])
+            self.assertIn("Rejected final-answer candidate:", model.initial_messages[1])
+
+    def test_finalizer_rescue_preserves_stall_when_rescue_output_is_still_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="Let me draft the final answer next.", stop_reason="end_turn"),
+                    ModelTurn(
+                        text=(
+                            "Subject: Final deliverable\n\n"
+                            "This run completed the deliverable and the concrete output is ready to use.\n\n"
+                            "I will send the rest after I verify more."
+                        ),
+                        stop_reason="end_turn",
+                    ),
+                    ModelTurn(text="I will finish the deliverable next.", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("force rescue fallback")
+
+            self.assertIn("Partial completion for objective", result)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "finalization_stall")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 2)
+            self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 1)
+
+    def test_finalizer_rescue_salvages_rewrite_only_violation_stall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=5)
+            tools = WorkspaceTools(root=root)
+            clean_final = "Concrete final deliverable."
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text="Let me draft the final answer next.", stop_reason="end_turn"),
+                    ModelTurn(tool_calls=[_tc("write_file", path="blocked-a.txt", content="a")]),
+                    ModelTurn(tool_calls=[_tc("write_file", path="blocked-b.txt", content="b")]),
+                    ModelTurn(text=clean_final, stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("force a rewrite-only retry")
+
+            self.assertEqual(result, clean_final)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 1)
+            self.assertEqual(engine.last_loop_metrics.get("rewrite_only_violations"), 2)
+            self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 0)
             self.assertFalse((root / "blocked-a.txt").exists())
             self.assertFalse((root / "blocked-b.txt").exists())
 

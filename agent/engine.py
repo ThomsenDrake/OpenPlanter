@@ -120,6 +120,14 @@ _BUDGET_EXTENSION_WINDOW = 12
 _MIN_EXTENSION_PROGRESS_SIGNALS = 2
 _MIN_MEANINGFUL_RESULT_CHARS = 24
 _NON_PROGRESS_TOOL_NAMES = _RECON_TOOL_NAMES | {"think"}
+_FINALIZER_RESCUE_SYSTEM_PROMPT = (
+    "You are finishing already-completed work.\n"
+    "Return only the direct final deliverable as plain text.\n"
+    "Use only the supplied objective, rejected candidate, and completed-work notes.\n"
+    "Prefer minimally editing the rejected candidate when it already contains the deliverable.\n"
+    "Remove process commentary, future-tense promises, and next-step language.\n"
+    "Do not call tools, create or verify files, claim new verification, or invent new work."
+)
 
 
 def _model_tier(model_name: str, reasoning_effort: str | None = None) -> int:
@@ -441,21 +449,27 @@ def _suggest_next_actions(
     return actions[:4]
 
 
+def _collect_recent_completed_previews(
+    records: list[StepProgressRecord],
+    limit: int = 3,
+) -> list[str]:
+    recent_previews: list[str] = []
+    for record in reversed(records[-_BUDGET_EXTENSION_WINDOW:]):
+        for preview in record.completed_previews:
+            if preview not in recent_previews:
+                recent_previews.append(preview)
+            if len(recent_previews) >= limit:
+                return recent_previews
+    return recent_previews
+
+
 def _render_partial_completion(
     objective: str,
     loop_metrics: dict[str, Any],
     evaluation: dict[str, Any],
     records: list[StepProgressRecord],
 ) -> str:
-    recent_previews: list[str] = []
-    for record in reversed(records[-_BUDGET_EXTENSION_WINDOW:]):
-        for preview in record.completed_previews:
-            if preview not in recent_previews:
-                recent_previews.append(preview)
-            if len(recent_previews) >= 3:
-                break
-        if len(recent_previews) >= 3:
-            break
+    recent_previews = _collect_recent_completed_previews(records)
     next_actions = _suggest_next_actions(objective, evaluation, recent_previews)
     completed = recent_previews or ["The run gathered additional context but did not converge on a final artifact before the bounded limit."]
     reason = str(loop_metrics.get("termination_reason", "budget_no_progress"))
@@ -760,6 +774,133 @@ class RLMEngine:
     def _is_meta_final_text(self, text: str, objective: str = "") -> bool:
         return self._classify_final_answer_text(text, objective) == "reject_meta"
 
+    def _build_finalizer_rescue_payload(
+        self,
+        objective: str,
+        failure_label: str,
+        rejected_candidate: str,
+        previews: list[str],
+    ) -> str:
+        completed_work = (
+            "\n".join(f"- {item}" for item in previews)
+            if previews
+            else "- (no completed-work notes recorded)"
+        )
+        return (
+            f"Objective:\n{objective}\n\n"
+            f"Failure label: {failure_label}\n\n"
+            "Rejected final-answer candidate:\n"
+            f"{rejected_candidate.strip()}\n\n"
+            "Completed-work notes:\n"
+            f"{completed_work}\n\n"
+            "Rewrite the rejected candidate into the final deliverable only. "
+            "Keep required substantive content and formatting, including signatures when they belong in the deliverable. "
+            "Remove meta/process/future-tense language. "
+            "Do not add new claims, new verification, or new work."
+        )
+
+    def _attempt_finalizer_rescue(
+        self,
+        *,
+        model: BaseModel,
+        objective: str,
+        failure_label: str,
+        rejected_candidate: str,
+        step_records: list[StepProgressRecord],
+        loop_metrics: dict[str, Any],
+        on_event: EventCallback | None,
+        deadline: float = 0,
+    ) -> str | None:
+        candidate = rejected_candidate.strip()
+        if not candidate:
+            self._emit("[finalizer-rescue] skipped: no rejected final-answer candidate available", on_event)
+            return None
+        if self._cancel.is_set():
+            self._emit("[finalizer-rescue] skipped: solve already cancelled", on_event)
+            return None
+        if deadline and time.monotonic() > deadline:
+            self._emit("[finalizer-rescue] skipped: deadline already exceeded", on_event)
+            return None
+
+        previews = _collect_recent_completed_previews(step_records)
+        payload = self._build_finalizer_rescue_payload(
+            objective,
+            failure_label,
+            candidate,
+            previews,
+        )
+        self._emit(f"[finalizer-rescue] starting separate-context finalizer rescue ({failure_label})", on_event)
+
+        had_tool_defs = hasattr(model, "tool_defs")
+        original_tool_defs = model.tool_defs if had_tool_defs else None
+        try:
+            if had_tool_defs:
+                model.tool_defs = []
+            conversation = model.create_conversation(_FINALIZER_RESCUE_SYSTEM_PROMPT, payload)
+            turn = model.complete(conversation)
+            loop_metrics["model_turns"] += 1
+        except Exception as exc:
+            self._emit(f"[finalizer-rescue] failed; falling back to stall handling: {exc}", on_event)
+            return None
+        finally:
+            if had_tool_defs:
+                model.tool_defs = original_tool_defs
+
+        if turn.tool_calls:
+            self._emit("[finalizer-rescue] rejected: rescue returned tool calls", on_event)
+            return None
+
+        rescue_text = (turn.text or "").strip()
+        if not rescue_text:
+            self._emit("[finalizer-rescue] rejected: rescue returned empty text", on_event)
+            return None
+
+        if self._classify_final_answer_text(rescue_text, objective) == "reject_meta":
+            self._emit("[finalizer-rescue] rejected: rescue output still looked meta", on_event)
+            return None
+
+        self._emit("[finalizer-rescue] accepted concrete final answer", on_event)
+        return rescue_text
+
+    def _return_final_answer(
+        self,
+        *,
+        depth: int,
+        step: int,
+        objective: str,
+        final_text: str,
+        loop_metrics: dict[str, Any],
+        on_event: EventCallback | None,
+        on_step: StepCallback | None,
+        started_at: float,
+    ) -> str:
+        loop_metrics["phase_counts"]["finalize"] += 1
+        loop_metrics["termination_reason"] = "success"
+        elapsed = time.monotonic() - started_at
+        preview = final_text[:200] + "..." if len(final_text) > 200 else final_text
+        self._emit(
+            f"[d{depth}/s{step}] final answer ({len(final_text)} chars, {elapsed:.1f}s): {preview}",
+            on_event,
+        )
+        self.last_loop_metrics = loop_metrics
+        if on_step:
+            try:
+                on_step(
+                    {
+                        "depth": depth,
+                        "step": step,
+                        "objective": objective,
+                        "action": {"name": "final", "arguments": {"text": final_text}},
+                        "observation": final_text,
+                        "is_final": True,
+                        "phase": "finalize",
+                        "loop_metrics": dict(loop_metrics),
+                    }
+                )
+            except Exception:
+                pass
+        return final_text
+
     def _solve_recursive(
         self,
         objective: str,
@@ -849,6 +990,8 @@ class RLMEngine:
         pending_final_rewrite = False
         final_rejection_streak = 0
         rewrite_only_violations = 0
+        finalizer_rescue_used = False
+        last_rejected_final_candidate = ""
         active_step_budget = self.config.max_steps_per_call
         max_total_steps = self.config.max_steps_per_call + (
             self.config.budget_extension_block_steps * self.config.budget_extension_max_blocks
@@ -1023,6 +1166,7 @@ class RLMEngine:
                     loop_metrics["final_rejections"] += 1
                     final_rejection_streak += 1
                     pending_final_rewrite = True
+                    last_rejected_final_candidate = turn.text or ""
                     step_records.append(
                         _special_step_progress_record(
                             step=step,
@@ -1045,6 +1189,32 @@ class RLMEngine:
                     )
                     model.append_tool_results(conversation, [rejection_result])
                     if final_rejection_streak >= 2:
+                        if not finalizer_rescue_used:
+                            finalizer_rescue_used = True
+                            rescue_text = self._attempt_finalizer_rescue(
+                                model=model,
+                                objective=objective,
+                                failure_label="meta_rejection_stall",
+                                rejected_candidate=last_rejected_final_candidate,
+                                step_records=step_records,
+                                loop_metrics=loop_metrics,
+                                on_event=on_event,
+                                deadline=deadline,
+                            )
+                            if rescue_text is not None:
+                                pending_final_rewrite = False
+                                final_rejection_streak = 0
+                                rewrite_only_violations = 0
+                                return self._return_final_answer(
+                                    depth=depth,
+                                    step=step,
+                                    objective=objective,
+                                    final_text=rescue_text,
+                                    loop_metrics=loop_metrics,
+                                    on_event=on_event,
+                                    on_step=on_step,
+                                    started_at=t0,
+                                )
                         loop_metrics["finalization_stalls"] += 1
                         loop_metrics["termination_reason"] = "finalization_stall"
                         self.last_loop_metrics = loop_metrics
@@ -1069,31 +1239,16 @@ class RLMEngine:
                 pending_final_rewrite = False
                 final_rejection_streak = 0
                 rewrite_only_violations = 0
-                loop_metrics["phase_counts"]["finalize"] += 1
-                loop_metrics["termination_reason"] = "success"
-                preview = turn.text[:200] + "..." if len(turn.text) > 200 else turn.text
-                self._emit(
-                    f"[d{depth}/s{step}] final answer ({len(turn.text)} chars, {elapsed:.1f}s): {preview}",
-                    on_event,
+                return self._return_final_answer(
+                    depth=depth,
+                    step=step,
+                    objective=objective,
+                    final_text=turn.text,
+                    loop_metrics=loop_metrics,
+                    on_event=on_event,
+                    on_step=on_step,
+                    started_at=t0,
                 )
-                self.last_loop_metrics = loop_metrics
-                if on_step:
-                    try:
-                        on_step(
-                            {
-                                "depth": depth,
-                                "step": step,
-                                "objective": objective,
-                                "action": {"name": "final", "arguments": {"text": turn.text}},
-                                "observation": turn.text,
-                                "is_final": True,
-                                "phase": "finalize",
-                                "loop_metrics": dict(loop_metrics),
-                            }
-                        )
-                    except Exception:
-                        pass
-                return turn.text
 
             # No tool calls and no text = unexpected empty response
             if not turn.tool_calls:
@@ -1138,6 +1293,32 @@ class RLMEngine:
                     ],
                 )
                 if final_rejection_streak >= 1 and rewrite_only_violations >= 2:
+                    if not finalizer_rescue_used:
+                        finalizer_rescue_used = True
+                        rescue_text = self._attempt_finalizer_rescue(
+                            model=model,
+                            objective=objective,
+                            failure_label="rewrite_only_violation_stall",
+                            rejected_candidate=last_rejected_final_candidate,
+                            step_records=step_records,
+                            loop_metrics=loop_metrics,
+                            on_event=on_event,
+                            deadline=deadline,
+                        )
+                        if rescue_text is not None:
+                            pending_final_rewrite = False
+                            final_rejection_streak = 0
+                            rewrite_only_violations = 0
+                            return self._return_final_answer(
+                                depth=depth,
+                                step=step,
+                                objective=objective,
+                                final_text=rescue_text,
+                                loop_metrics=loop_metrics,
+                                on_event=on_event,
+                                on_step=on_step,
+                                started_at=t0,
+                            )
                     loop_metrics["finalization_stalls"] += 1
                     loop_metrics["termination_reason"] = "finalization_stall"
                     self.last_loop_metrics = loop_metrics

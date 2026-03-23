@@ -920,6 +920,7 @@ fn should_emit_recon_guardrail(recon_streak: u32, last_guardrail_streak: u32) ->
 const BUDGET_EXTENSION_WINDOW: usize = 12;
 const MIN_MEANINGFUL_RESULT_CHARS: usize = 24;
 const MIN_EXTENSION_PROGRESS_SIGNALS: usize = 2;
+const FINALIZER_RESCUE_SYSTEM_PROMPT: &str = "You are finishing already-completed work.\nReturn only the direct final deliverable as plain text.\nUse only the supplied objective, rejected candidate, and completed-work notes.\nPrefer minimally editing the rejected candidate when it already contains the deliverable.\nRemove process commentary, future-tense promises, and next-step language.\nDo not call tools, create or verify files, claim new verification, or invent new work.";
 
 #[derive(Debug, Clone)]
 struct StepProgressRecord {
@@ -1155,25 +1156,27 @@ fn evaluate_budget_extension(
     )
 }
 
-fn build_partial_completion_text(
-    objective: &str,
-    loop_metrics: &LoopMetrics,
-    records: &[StepProgressRecord],
-) -> String {
+fn collect_recent_completed_previews(records: &[StepProgressRecord], limit: usize) -> Vec<String> {
     let mut completed_previews = Vec::new();
     for record in records.iter().rev().take(BUDGET_EXTENSION_WINDOW) {
         for preview in &record.completed_previews {
             if !completed_previews.contains(preview) {
                 completed_previews.push(preview.clone());
             }
-            if completed_previews.len() >= 3 {
-                break;
+            if completed_previews.len() >= limit {
+                return completed_previews;
             }
         }
-        if completed_previews.len() >= 3 {
-            break;
-        }
     }
+    completed_previews
+}
+
+fn build_partial_completion_text(
+    objective: &str,
+    loop_metrics: &LoopMetrics,
+    records: &[StepProgressRecord],
+) -> String {
+    let completed_previews = collect_recent_completed_previews(records, 3);
 
     let completed_block = if completed_previews.is_empty() {
         "- The run gathered additional context but did not converge on a final artifact before the bounded limit.".to_string()
@@ -1224,6 +1227,28 @@ fn build_partial_completion_text(
             .map(|item| format!("- {item}"))
             .collect::<Vec<_>>()
             .join("\n")
+    )
+}
+
+fn build_finalizer_rescue_user_message(
+    objective: &str,
+    failure_label: &str,
+    rejected_candidate: &str,
+    previews: &[String],
+) -> String {
+    let completed_work = if previews.is_empty() {
+        "- (no completed-work notes recorded)".to_string()
+    } else {
+        previews
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not add new claims, new verification, or new work.",
+        rejected_candidate.trim()
     )
 }
 
@@ -1279,6 +1304,155 @@ impl SolveFrameOutcome {
             completion: None,
         }
     }
+}
+
+async fn finalize_success_outcome(
+    result_text: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    depth: u32,
+    step: u32,
+    conversation_path: &str,
+    elapsed_ms: u64,
+    loop_metrics: &mut LoopMetrics,
+    tools: &mut WorkspaceTools,
+    pending_curator_deltas: &mut Vec<CuratorStateDelta>,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
+    emitter: &dyn SolveEmitter,
+) -> SolveFrameOutcome {
+    let phase = LoopPhase::Finalize;
+    increment_phase(loop_metrics, &phase);
+    loop_metrics.termination_reason = "success".into();
+    emitter.emit_loop_health(
+        depth,
+        step,
+        Some(conversation_path.to_string()),
+        phase.clone(),
+        loop_metrics.clone(),
+        true,
+    );
+    emitter.emit_step(StepEvent {
+        depth,
+        step,
+        conversation_path: Some(conversation_path.to_string()),
+        tool_name: None,
+        tokens: TokenUsage {
+            input_tokens,
+            output_tokens,
+        },
+        elapsed_ms,
+        is_final: true,
+        loop_phase: Some(phase),
+        loop_metrics: Some(loop_metrics.clone()),
+    });
+    flush_pending_curator_checkpoint(
+        pending_curator_deltas,
+        "finalize",
+        config,
+        cancel,
+        emitter,
+    )
+    .await;
+    tools.cleanup();
+    SolveFrameOutcome::final_result(result_text, loop_metrics.clone())
+}
+
+async fn attempt_finalizer_rescue(
+    model: &dyn BaseModel,
+    objective: &str,
+    failure_label: &str,
+    rejected_candidate: Option<&str>,
+    step_records: &[StepProgressRecord],
+    loop_metrics: &mut LoopMetrics,
+    cancel: &CancellationToken,
+    config: &AgentConfig,
+    emitter: &dyn SolveEmitter,
+    trace_prefix: &str,
+) -> Option<ModelTurn> {
+    let candidate = rejected_candidate.unwrap_or("").trim();
+    if candidate.is_empty() {
+        emitter.emit_trace(&format!(
+            "{trace_prefix} finalizer rescue skipped: no rejected final-answer candidate available"
+        ));
+        return None;
+    }
+    if cancel.is_cancelled() {
+        emitter.emit_trace(&format!(
+            "{trace_prefix} finalizer rescue skipped: solve already cancelled"
+        ));
+        return None;
+    }
+
+    let previews = collect_recent_completed_previews(step_records, 3);
+    let rescue_messages = vec![
+        Message::System {
+            content: FINALIZER_RESCUE_SYSTEM_PROMPT.to_string(),
+        },
+        Message::User {
+            content: build_finalizer_rescue_user_message(
+                objective,
+                failure_label,
+                candidate,
+                &previews,
+            ),
+        },
+    ];
+    emitter.emit_trace(&format!(
+        "{trace_prefix} starting separate-context finalizer rescue ({failure_label})"
+    ));
+    let noop = |_event: DeltaEvent| {};
+    let turn = match chat_stream_with_rate_limit_retries(
+        model,
+        &rescue_messages,
+        &[],
+        &noop,
+        cancel,
+        config,
+        emitter,
+        0,
+        trace_prefix,
+    )
+    .await
+    {
+        Ok(turn) => {
+            loop_metrics.model_turns += 1;
+            turn
+        }
+        Err(err) => {
+            emitter.emit_trace(&format!(
+                "{trace_prefix} finalizer rescue failed; falling back to stall handling: {err}"
+            ));
+            return None;
+        }
+    };
+
+    if !turn.tool_calls.is_empty() {
+        emitter.emit_trace(&format!(
+            "{trace_prefix} finalizer rescue rejected: rescue returned tool calls"
+        ));
+        return None;
+    }
+    if turn.text.trim().is_empty() {
+        emitter.emit_trace(&format!(
+            "{trace_prefix} finalizer rescue rejected: rescue returned empty text"
+        ));
+        return None;
+    }
+    if matches!(
+        classify_final_answer_text(&turn.text, objective),
+        FinalAnswerDisposition::RejectMeta
+    ) {
+        emitter.emit_trace(&format!(
+            "{trace_prefix} finalizer rescue rejected: rescue output still looked meta"
+        ));
+        return None;
+    }
+
+    emitter.emit_trace(&format!(
+        "{trace_prefix} finalizer rescue accepted concrete final answer"
+    ));
+    Some(turn)
 }
 
 async fn finalize_partial_outcome(
@@ -1567,6 +1741,7 @@ async fn solve_frame(
     let mut pending_final_rewrite = false;
     let mut final_rejection_streak = 0u32;
     let mut rewrite_only_violations = 0u32;
+    let mut last_rejected_final_candidate: Option<String> = None;
     let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
     let max_total_steps = active_step_budget
         + if config.budget_extension_enabled {
@@ -1730,6 +1905,37 @@ async fn solve_frame(
                 content: rewrite_only_message.to_string(),
             });
             if final_rejection_streak >= 1 && rewrite_only_violations >= 2 {
+                if let Some(rescue_turn) = attempt_finalizer_rescue(
+                    model.as_ref(),
+                    objective,
+                    "rewrite_only_violation_stall",
+                    last_rejected_final_candidate.as_deref(),
+                    &step_records,
+                    &mut loop_metrics,
+                    &cancel,
+                    config,
+                    emitter,
+                    &step_prefix,
+                )
+                .await
+                {
+                    return finalize_success_outcome(
+                        rescue_turn.text,
+                        rescue_turn.input_tokens,
+                        rescue_turn.output_tokens,
+                        depth,
+                        step as u32,
+                        &conversation_path,
+                        step_start.elapsed().as_millis() as u64,
+                        &mut loop_metrics,
+                        &mut tools,
+                        &mut pending_curator_deltas,
+                        config,
+                        &cancel,
+                        emitter,
+                    )
+                    .await;
+                }
                 loop_metrics.finalization_stalls += 1;
                 loop_metrics.termination_reason = "finalization_stall".into();
                 return finalize_partial_outcome(
@@ -1766,6 +1972,7 @@ async fn solve_frame(
                 loop_metrics.final_rejections += 1;
                 final_rejection_streak += 1;
                 pending_final_rewrite = true;
+                last_rejected_final_candidate = Some(turn.text.clone());
                 increment_phase(&mut loop_metrics, &LoopPhase::Finalize);
                 step_records.push(special_step_progress_record(
                     LoopPhase::Finalize,
@@ -1783,6 +1990,37 @@ async fn solve_frame(
                     content: "Your previous response was process/meta commentary rather than a concrete final answer. Rewrite it from the completed work only: do not call tools, do not create or verify files, and return the direct final deliverable as plain text.".to_string(),
                 });
                 if final_rejection_streak >= 2 {
+                    if let Some(rescue_turn) = attempt_finalizer_rescue(
+                        model.as_ref(),
+                        objective,
+                        "meta_rejection_stall",
+                        last_rejected_final_candidate.as_deref(),
+                        &step_records,
+                        &mut loop_metrics,
+                        &cancel,
+                        config,
+                        emitter,
+                        &step_prefix,
+                    )
+                    .await
+                    {
+                        return finalize_success_outcome(
+                            rescue_turn.text,
+                            rescue_turn.input_tokens,
+                            rescue_turn.output_tokens,
+                            depth,
+                            step as u32,
+                            &conversation_path,
+                            step_start.elapsed().as_millis() as u64,
+                            &mut loop_metrics,
+                            &mut tools,
+                            &mut pending_curator_deltas,
+                            config,
+                            &cancel,
+                            emitter,
+                        )
+                        .await;
+                    }
                     loop_metrics.finalization_stalls += 1;
                     loop_metrics.termination_reason = "finalization_stall".into();
                     return finalize_partial_outcome(
@@ -1801,41 +2039,22 @@ async fn solve_frame(
                 }
                 continue;
             }
-            let phase = LoopPhase::Finalize;
-            increment_phase(&mut loop_metrics, &phase);
-            loop_metrics.termination_reason = "success".into();
-            emitter.emit_loop_health(
+            return finalize_success_outcome(
+                turn.text,
+                turn.input_tokens,
+                turn.output_tokens,
                 depth,
                 step as u32,
-                Some(conversation_path.clone()),
-                phase.clone(),
-                loop_metrics.clone(),
-                true,
-            );
-            emitter.emit_step(StepEvent {
-                depth,
-                step: step as u32,
-                conversation_path: Some(conversation_path.clone()),
-                tool_name: None,
-                tokens: TokenUsage {
-                    input_tokens: turn.input_tokens,
-                    output_tokens: turn.output_tokens,
-                },
-                elapsed_ms: step_start.elapsed().as_millis() as u64,
-                is_final: true,
-                loop_phase: Some(phase),
-                loop_metrics: Some(loop_metrics.clone()),
-            });
-            flush_pending_curator_checkpoint(
+                &conversation_path,
+                step_start.elapsed().as_millis() as u64,
+                &mut loop_metrics,
+                &mut tools,
                 &mut pending_curator_deltas,
-                "finalize",
                 config,
                 &cancel,
                 emitter,
             )
             .await;
-            tools.cleanup();
-            return SolveFrameOutcome::final_result(turn.text, loop_metrics);
         }
 
         loop_metrics.tool_calls += turn.tool_calls.len() as u32;
