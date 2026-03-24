@@ -71,7 +71,8 @@ interface ReplaySummary {
 }
 
 const CURATED_REPLAY_LIMIT = 14;
-const FAILURE_PATTERN = /\b(error|failed|failure|rate limit|timeout|degraded|cancelled)\b/i;
+const FAILURE_PATTERN =
+  /(^error[:\s])|(\bfailed(?:\s+to)?\b)|(\brate limit\b)|(\btimed out\b)|(\btimeout\b)|(\bdegraded\b)|(\bcancelled\b)/i;
 const CURATED_REPLAY_ROLES = new Set([
   "assistant",
   "assistant-cancelled",
@@ -265,10 +266,13 @@ export function createOverviewPane(): HTMLElement {
   function isFailureEntry(entry: ReplayEntry): boolean {
     const normalized = normalizeReplayRole(entry.role);
     if (normalized === "user") return false;
+    if (normalized !== "assistant" && normalized !== "assistant-cancelled") {
+      return normalized.includes("error");
+    }
     return (
       normalized === "assistant-cancelled" ||
       normalized.includes("error") ||
-      FAILURE_PATTERN.test(entry.content)
+      FAILURE_PATTERN.test(replayPreview(entry))
     );
   }
 
@@ -739,6 +743,10 @@ export function createOverviewPane(): HTMLElement {
     selectedReplaySeq = null;
     render();
 
+    if (!sessionId) {
+      return;
+    }
+
     try {
       const history = await getSessionHistory(sessionId);
       if (seq !== replaySeq) return;
@@ -1053,7 +1061,7 @@ export function createOverviewPane(): HTMLElement {
 
     const meta = document.createElement("div");
     meta.className = "overview-card-meta";
-    meta.textContent = `${formatTimestamp(revelation.occurred_at)} • ${revelation.provenance.source}${revelation.provenance.step_index ? ` • step ${revelation.provenance.step_index}` : ""}`;
+    meta.textContent = `${formatTimestamp(revelation.occurred_at)} • ${revelation.provenance.source}${revelation.provenance.step_index != null ? ` • step ${revelation.provenance.step_index}` : ""}`;
     item.appendChild(meta);
 
     const locators = parseRevelationLocators(revelation);
@@ -1073,12 +1081,12 @@ export function createOverviewPane(): HTMLElement {
     const index = new Map<number, OverviewRevelationView>();
     for (const revelation of overview?.recent_revelations ?? []) {
       const locators = parseRevelationLocators(revelation);
-      const replaySeq =
+      const matchedReplaySeq =
         locators
           .map((locator) => findReplaySeqForLocator(locator))
           .find((value): value is number => value != null) ?? null;
-      if (replaySeq != null && !index.has(replaySeq)) {
-        index.set(replaySeq, revelation);
+      if (matchedReplaySeq != null && !index.has(matchedReplaySeq)) {
+        index.set(matchedReplaySeq, revelation);
       }
     }
     return index;

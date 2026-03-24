@@ -91,6 +91,7 @@ export function createInvestigationPane(): HTMLElement {
   window.addEventListener(OPEN_WIKI_DRAWER_EVENT, ((e: CustomEvent<OpenWikiDrawerDetail>) => {
     const detail = e.detail;
     if (!detail) return;
+    const needsRedispatch = !graphPane;
 
     if (appState.get().investigationViewTab !== "graph") {
       appState.update((state) => ({
@@ -99,7 +100,7 @@ export function createInvestigationPane(): HTMLElement {
       }));
     }
 
-    if (!graphPane) {
+    if (needsRedispatch) {
       window.setTimeout(() => {
         window.dispatchEvent(
           new CustomEvent<OpenWikiDrawerDetail>(OPEN_WIKI_DRAWER_EVENT, { detail }),
