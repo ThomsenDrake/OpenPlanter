@@ -582,52 +582,160 @@ export function filterBySearch(query: string): string[] {
   return matchIds;
 }
 
-/** Filter graph to show only "new" nodes (not in baseline) + their 1-hop neighbors.
- * When active=false, clears the session filter. Returns count of new nodes found. */
-export function filterBySession(active: boolean, baselineNodeIds: Set<string>): number {
+export interface GraphSessionVisibilityDelta {
+  addedNodeIds: string[];
+  contextNodeIds: string[];
+}
+
+function cloneGraphSessionVisibilityDelta(delta: GraphSessionVisibilityDelta): GraphSessionVisibilityDelta {
+  return {
+    addedNodeIds: [...delta.addedNodeIds],
+    contextNodeIds: [...delta.contextNodeIds],
+  };
+}
+
+function resolveExistingNodeIds(nodeIds: Iterable<string>): Set<string> {
+  const existingNodeIds = new Set<string>();
+
+  if (!cy) {
+    return existingNodeIds;
+  }
+
+  for (const nodeId of nodeIds) {
+    if (!nodeId) {
+      continue;
+    }
+    const node = cy.getElementById(nodeId);
+    if (!node.empty()) {
+      existingNodeIds.add(nodeId);
+    }
+  }
+
+  return existingNodeIds;
+}
+
+function collectNeighborhoodVisibleIds(rootNodeIds: Iterable<string>, expansionHops: number): Set<string> {
+  if (!cy) {
+    return new Set<string>();
+  }
+
+  const visibleNodeIds = new Set<string>();
+  const frontier = resolveExistingNodeIds(rootNodeIds);
+  const hops = Math.max(0, Math.floor(expansionHops));
+
+  frontier.forEach((nodeId) => {
+    visibleNodeIds.add(nodeId);
+  });
+
+  for (let hop = 0; hop < hops; hop += 1) {
+    const nextFrontier = new Set<string>();
+
+    frontier.forEach((nodeId) => {
+      const node = cy?.getElementById(nodeId);
+      if (!node || node.empty()) {
+        return;
+      }
+
+      node.neighborhood().nodes().forEach((neighbor) => {
+        const neighborId = neighbor.id();
+        if (!visibleNodeIds.has(neighborId)) {
+          visibleNodeIds.add(neighborId);
+          nextFrontier.add(neighborId);
+        }
+      });
+    });
+
+    frontier.clear();
+    nextFrontier.forEach((nodeId) => frontier.add(nodeId));
+    if (frontier.size === 0) {
+      break;
+    }
+  }
+
+  return visibleNodeIds;
+}
+
+/**
+ * Preview the visibility delta that the current graph would apply for a
+ * baseline-derived session diff. The semantic delta stays "added nodes", while
+ * the context expansion remains a rendering concern.
+ */
+export function previewSessionVisibilityDelta(
+  baselineNodeIds: ReadonlySet<string>,
+  expansionHops = 1,
+): GraphSessionVisibilityDelta {
+  if (!cy) {
+    return { addedNodeIds: [], contextNodeIds: [] };
+  }
+
+  const addedNodeIds = new Set<string>();
+  cy.nodes().forEach((node) => {
+    if (!baselineNodeIds.has(node.id())) {
+      addedNodeIds.add(node.id());
+    }
+  });
+
+  return {
+    addedNodeIds: Array.from(addedNodeIds).sort(),
+    contextNodeIds: Array.from(collectNeighborhoodVisibleIds(addedNodeIds, expansionHops)).sort(),
+  };
+}
+
+function applySessionVisibilityDelta(delta: GraphSessionVisibilityDelta): number {
   if (!cy) return 0;
 
-  // Clear previous session state
-  cy.nodes().removeClass("new-node session-hidden");
+  const addedNodeIds = resolveExistingNodeIds(delta.addedNodeIds);
+  const visibleNodeIds = resolveExistingNodeIds(delta.contextNodeIds);
+
+  if (addedNodeIds.size === 0) {
+    cy.nodes().addClass("session-hidden");
+    syncEdgeVisibility();
+    return 0;
+  }
+
+  addedNodeIds.forEach((nodeId) => {
+    visibleNodeIds.add(nodeId);
+  });
+
+  cy.nodes().forEach((node) => {
+    if (!visibleNodeIds.has(node.id())) {
+      node.addClass("session-hidden");
+      return;
+    }
+
+    if (addedNodeIds.has(node.id())) {
+      node.addClass("new-node");
+      node.removeClass("session-context");
+      return;
+    }
+
+    node.addClass("session-context");
+  });
+
+  syncEdgeVisibility();
+  return addedNodeIds.size;
+}
+
+/** Apply a precomputed session visibility delta without changing current UX semantics. */
+export function filterBySessionDelta(active: boolean, delta: GraphSessionVisibilityDelta): number {
+  if (!cy) return 0;
+
+  cy.nodes().removeClass("new-node session-context session-hidden");
 
   if (!active) {
     syncEdgeVisibility();
     return 0;
   }
 
-  // Identify new nodes
-  const newIds: string[] = [];
-  cy.nodes().forEach((node) => {
-    if (!baselineNodeIds.has(node.id())) {
-      newIds.push(node.id());
-    }
-  });
+  return applySessionVisibilityDelta(cloneGraphSessionVisibilityDelta(delta));
+}
 
-  // If no new nodes, hide everything (all are "old")
-  if (newIds.length === 0) {
-    cy.nodes().addClass("session-hidden");
-    syncEdgeVisibility();
-    return 0;
-  }
+/** Filter graph to show only "new" nodes (not in baseline) + their 1-hop neighbors.
+ * When active=false, clears the session filter. Returns count of new nodes found. */
+export function filterBySession(active: boolean, baselineNodeIds: Set<string>): number {
+  if (!cy) return 0;
 
-  // Collect new + 1-hop neighbors
-  const visible = new Set<string>();
-  for (const id of newIds) {
-    const node = cy.getElementById(id);
-    node.addClass("new-node");
-    visible.add(id);
-    node.neighborhood().nodes().forEach((n) => { visible.add(n.id()); });
-  }
-
-  // Hide everything else
-  cy.nodes().forEach((node) => {
-    if (!visible.has(node.id())) {
-      node.addClass("session-hidden");
-    }
-  });
-
-  syncEdgeVisibility();
-  return newIds.length;
+  return filterBySessionDelta(active, previewSessionVisibilityDelta(baselineNodeIds, 1));
 }
 
 /** Get all current node IDs (for baseline capture). */
