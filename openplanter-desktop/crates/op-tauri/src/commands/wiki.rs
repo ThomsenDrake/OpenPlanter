@@ -1147,7 +1147,7 @@ fn value_u32(value: &Value, key: &str) -> Option<u32> {
     value
         .get(key)
         .and_then(Value::as_u64)
-        .map(|value| value as u32)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn read_jsonl_values(path: &Path) -> Result<Vec<(u64, Value)>, String> {
@@ -1345,6 +1345,7 @@ fn load_revelation_trace_refs(
         let seq = value
             .get("seq")
             .and_then(Value::as_u64)
+            .filter(|seq| *seq > 0)
             .unwrap_or(line_number);
         let refs = refs_by_seq.entry(seq).or_default();
         refs.replay_line.get_or_insert(line_number);
@@ -3182,6 +3183,48 @@ Links here.";
                 .evidence_refs
                 .contains(&"patch:artifacts/patches/patch-d0-s4-1.patch".to_string())
         );
+    }
+
+    #[test]
+    fn test_load_revelation_trace_refs_maps_zero_seq_to_line_number() {
+        let dir = tempdir().expect("tempdir");
+        let session_dir = dir.path();
+        fs::write(
+            session_dir.join("replay.jsonl"),
+            serde_json::json!({
+                "seq": 0,
+                "timestamp": "2026-03-17T10:00:00Z",
+                "role": "assistant",
+                "content": "This synthesized replay entry is long enough to be treated as a substantive revelation."
+            })
+            .to_string()
+                + "\n",
+        )
+        .expect("write replay");
+
+        let entries = vec![ReplayEntry {
+            seq: 1,
+            timestamp: "2026-03-17T10:00:00Z".to_string(),
+            role: "assistant".to_string(),
+            content:
+                "This synthesized replay entry is long enough to be treated as a substantive revelation."
+                    .to_string(),
+            tool_name: None,
+            is_rendered: Some(true),
+            step_number: None,
+            step_depth: None,
+            conversation_path: None,
+            step_tokens_in: None,
+            step_tokens_out: None,
+            step_elapsed: None,
+            step_model_preview: None,
+            step_tool_calls: None,
+        }];
+
+        let refs = load_revelation_trace_refs(session_dir, &entries).expect("trace refs");
+        assert!(refs.contains_key(&1));
+        assert!(!refs.contains_key(&0));
+        assert_eq!(refs.get(&1).and_then(|refs| refs.replay_line), Some(1));
     }
 
     #[test]

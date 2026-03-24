@@ -13,6 +13,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   codex-review-trigger:
     name: Codex Review Trigger
@@ -69,11 +73,19 @@ jobs:
                 comment.user?.login === 'github-actions[bot]' &&
                 comment.body?.includes(marker)
               ) {
-                await github.rest.issues.deleteComment({
-                  owner,
-                  repo,
-                  comment_id: comment.id,
-                });
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: comment.id,
+                  });
+                } catch (error) {
+                  if (error.status === 404) {
+                    core.notice(`Comment ${comment.id} was already removed by another run.`);
+                    continue;
+                  }
+                  throw error;
+                }
               }
             }
 
