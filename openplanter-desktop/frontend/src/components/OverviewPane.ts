@@ -1,13 +1,14 @@
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 
-import { getInvestigationOverview, readWikiFile } from "../api/invoke";
+import { getInvestigationOverview, getSessionHistory, readWikiFile } from "../api/invoke";
 import type {
   InvestigationOverviewView,
   OverviewActionView,
   OverviewGapView,
   OverviewQuestionView,
   OverviewRevelationView,
+  ReplayEntry,
   WikiNavSourceView,
 } from "../api/types";
 import { appState } from "../state/store";
@@ -30,6 +31,15 @@ const md = new MarkdownIt({
 });
 
 type DocumentStatus = "idle" | "loading" | "ready" | "error";
+type ReplayStatus = "idle" | "loading" | "ready" | "error";
+
+type RevelationRef = {
+  key: string;
+  kind: "source_ref" | "evidence_ref" | "turn" | "event" | "step";
+  raw: string;
+};
+
+const REPLAY_FOCUS_EVENT = "overview-replay-focus";
 
 export function createOverviewPane(): HTMLElement {
   const pane = document.createElement("div");
@@ -47,12 +57,14 @@ export function createOverviewPane(): HTMLElement {
   const main = document.createElement("div");
   main.className = "overview-main";
 
+  const replaySection = createSection("Curated Replay");
   const snapshotSection = createSection("Investigation Snapshot");
   const gapsSection = createSection("Outstanding Gaps");
   const actionsSection = createSection("Candidate Actions");
   const revelationsSection = createSection("Recent Revelations");
   const detailSection = createSection("Wiki Navigation");
   detailSection.body.classList.add("overview-document");
+
   const documentControls = document.createElement("div");
   documentControls.className = "overview-document-controls";
 
@@ -84,7 +96,9 @@ export function createOverviewPane(): HTMLElement {
 
   documentViewport.append(documentStatusEl, documentContentEl);
   detailSection.body.append(documentControls, documentTitleEl, documentViewport);
+
   main.append(
+    replaySection.section,
     snapshotSection.section,
     gapsSection.section,
     actionsSection.section,
@@ -97,11 +111,16 @@ export function createOverviewPane(): HTMLElement {
   let refreshTimer: number | null = null;
   let refreshSeq = 0;
   let docSeq = 0;
+  let replaySeq = 0;
   let documentStatus: DocumentStatus = "idle";
+  let replayStatus: ReplayStatus = "idle";
   let documentHtml = "";
   let documentTitle = "Wiki document";
   let documentError = "";
+  let replayError = "";
   let loadedDocumentPath: string | null = null;
+  let replayEntries: ReplayEntry[] = [];
+  let selectedReplaySeq: number | null = null;
 
   const initialState = appState.get();
   let lastOverviewData = initialState.overviewData;
@@ -172,6 +191,147 @@ export function createOverviewPane(): HTMLElement {
     return overview.wiki_nav.sources[0]?.file_path ?? null;
   }
 
+  function parseRevelationRefs(revelation: OverviewRevelationView): RevelationRef[] {
+    const refs = new Map<string, RevelationRef>();
+    for (const sourceRef of revelation.provenance.source_refs ?? []) {
+      refs.set(`source_ref:${sourceRef}`, {
+        key: `source_ref:${sourceRef}`,
+        kind: "source_ref",
+        raw: sourceRef,
+      });
+    }
+    for (const evidenceRef of revelation.provenance.evidence_refs ?? []) {
+      refs.set(`evidence_ref:${evidenceRef}`, {
+        key: `evidence_ref:${evidenceRef}`,
+        kind: "evidence_ref",
+        raw: evidenceRef,
+      });
+    }
+    if (revelation.provenance.turn_id) {
+      refs.set(`turn:${revelation.provenance.turn_id}`, {
+        key: `turn:${revelation.provenance.turn_id}`,
+        kind: "turn",
+        raw: revelation.provenance.turn_id,
+      });
+    }
+    if (revelation.provenance.event_id) {
+      refs.set(`event:${revelation.provenance.event_id}`, {
+        key: `event:${revelation.provenance.event_id}`,
+        kind: "event",
+        raw: revelation.provenance.event_id,
+      });
+    }
+
+    const suffix = revelation.revelation_id.split("|").slice(1);
+    for (const part of suffix) {
+      const [prefix, ...rest] = part.split(":");
+      const value = rest.join(":").trim();
+      if (!value) continue;
+      if (prefix === "source_ref") {
+        refs.set(`source_ref:${value}`, { key: `source_ref:${value}`, kind: "source_ref", raw: value });
+      } else if (prefix === "evidence_ref") {
+        refs.set(`evidence_ref:${value}`, {
+          key: `evidence_ref:${value}`,
+          kind: "evidence_ref",
+          raw: value,
+        });
+      } else if (prefix === "turn") {
+        refs.set(`turn:${value}`, { key: `turn:${value}`, kind: "turn", raw: value });
+      } else if (prefix === "event") {
+        refs.set(`event:${value}`, { key: `event:${value}`, kind: "event", raw: value });
+      } else if (prefix === "step") {
+        refs.set(`step:${value}`, { key: `step:${value}`, kind: "step", raw: value });
+      }
+    }
+
+    return Array.from(refs.values());
+  }
+
+  function isReplayHighlightable(entry: ReplayEntry): boolean {
+    return entry.role === "step-summary" || entry.role === "curator" || entry.role === "assistant";
+  }
+
+  function replayStateSummary(entries: ReplayEntry[]): {
+    continuity: string;
+    failure: string;
+    recovery: string;
+  } {
+    const continuity = appState.get().continuityMode || "auto";
+    const lastError = [...entries].reverse().find((entry) => entry.role === "error");
+    const errorWithinLastFive = [...entries].slice(-5).some((entry) => entry.role === "error");
+    const recentSummary = [...entries].reverse().find((entry) => entry.role === "step-summary" || entry.role === "assistant");
+
+    return {
+      continuity,
+      failure: lastError
+        ? `Recent failure: ${lastError.content.slice(0, 90)}${lastError.content.length > 90 ? "…" : ""}`
+        : "No failures recorded in replay.",
+      recovery: recentSummary && errorWithinLastFive
+        ? `Recovered via ${recentSummary.role === "step-summary" ? "step summary" : "assistant response"}.`
+        : errorWithinLastFive
+          ? "Failure still active; no recovery event observed yet."
+          : "Session appears stable.",
+    };
+  }
+
+  function matchReplayByRef(ref: RevelationRef): ReplayEntry | null {
+    if (ref.kind === "step") {
+      const stepIndex = Number.parseInt(ref.raw, 10);
+      if (Number.isFinite(stepIndex)) {
+        return [...replayEntries].reverse().find((entry) => entry.step_number === stepIndex) ?? null;
+      }
+    }
+
+    const rawLower = ref.raw.toLowerCase();
+    return [...replayEntries].reverse().find((entry) => {
+      const haystack = [entry.content, entry.tool_name, entry.conversation_path]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(rawLower);
+    }) ?? null;
+  }
+
+  function focusReplay(seq: number): void {
+    selectedReplaySeq = seq;
+    renderReplay(appState.get().overviewData);
+    window.dispatchEvent(new CustomEvent(REPLAY_FOCUS_EVENT, { detail: { seq } }));
+  }
+
+  function renderEvidenceLinks(refs: RevelationRef[], context: string): HTMLElement | null {
+    if (refs.length === 0) return null;
+
+    const wrap = document.createElement("div");
+    wrap.className = "overview-card-meta";
+    wrap.style.display = "flex";
+    wrap.style.flexWrap = "wrap";
+    wrap.style.gap = "6px";
+
+    for (const ref of refs) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "overview-pill";
+      button.style.cursor = "pointer";
+      button.textContent = `${ref.kind}: ${truncate(ref.raw, 28)}`;
+      button.title = ref.raw;
+      button.addEventListener("click", () => {
+        const match = matchReplayByRef(ref);
+        if (match) {
+          focusReplay(match.seq);
+        }
+      });
+      wrap.appendChild(button);
+    }
+
+    const label = document.createElement("div");
+    label.className = "overview-card-meta";
+    label.textContent = `${context} evidence links`;
+
+    const container = document.createElement("div");
+    container.append(label, wrap);
+    return container;
+  }
+
   async function loadDocument(
     path: string | null,
     overview: InvestigationOverviewView | null = appState.get().overviewData,
@@ -213,6 +373,43 @@ export function createOverviewPane(): HTMLElement {
       documentError = String(error);
       loadedDocumentPath = null;
       render();
+    }
+  }
+
+  async function refreshReplay(sessionId: string | null): Promise<void> {
+    replaySeq += 1;
+    const seq = replaySeq;
+
+    if (!sessionId) {
+      replayStatus = "idle";
+      replayEntries = [];
+      replayError = "";
+      selectedReplaySeq = null;
+      renderReplay(appState.get().overviewData);
+      return;
+    }
+
+    replayStatus = "loading";
+    replayError = "";
+    renderReplay(appState.get().overviewData);
+
+    try {
+      const history = await getSessionHistory(sessionId);
+      if (seq !== replaySeq) return;
+      replayStatus = "ready";
+      replayEntries = history;
+      replayError = "";
+      if (selectedReplaySeq && !history.some((entry) => entry.seq === selectedReplaySeq)) {
+        selectedReplaySeq = null;
+      }
+      renderReplay(appState.get().overviewData);
+    } catch (error) {
+      if (seq !== replaySeq) return;
+      replayStatus = "error";
+      replayError = String(error);
+      replayEntries = [];
+      selectedReplaySeq = null;
+      renderReplay(appState.get().overviewData);
     }
   }
 
@@ -276,6 +473,8 @@ export function createOverviewPane(): HTMLElement {
         overviewSelectedWikiPath: selectedPath,
       }));
 
+      void refreshReplay(overview.session_id ?? appState.get().sessionId);
+
       if (selectedPath !== loadedDocumentPath || documentStatus !== "ready") {
         void loadDocument(selectedPath, overview);
       }
@@ -286,6 +485,7 @@ export function createOverviewPane(): HTMLElement {
         overviewStatus: "error",
         overviewError: String(error),
       }));
+      void refreshReplay(appState.get().sessionId);
     }
   }
 
@@ -323,6 +523,90 @@ export function createOverviewPane(): HTMLElement {
       item.textContent = warning;
       alerts.appendChild(item);
     }
+  }
+
+  function renderReplay(overview: InvestigationOverviewView | null): void {
+    replaySection.body.innerHTML = "";
+
+    const summary = replayStateSummary(replayEntries);
+    const stats = document.createElement("div");
+    stats.className = "overview-stats";
+    stats.append(
+      sectionCard("Entries", String(replayEntries.length)),
+      sectionCard("Continuity", summary.continuity),
+      sectionCard("Failure State", summary.failure),
+      sectionCard("Recovery", summary.recovery),
+    );
+    replaySection.body.appendChild(stats);
+
+    if (replayStatus === "loading") {
+      const loading = document.createElement("div");
+      loading.className = "overview-empty";
+      loading.textContent = "Loading curated replay...";
+      replaySection.body.appendChild(loading);
+      return;
+    }
+
+    if (replayStatus === "error") {
+      const error = document.createElement("div");
+      error.className = "overview-empty";
+      error.textContent = `Replay unavailable: ${replayError}`;
+      replaySection.body.appendChild(error);
+      return;
+    }
+
+    const curated = replayEntries
+      .filter(isReplayHighlightable)
+      .slice(-14)
+      .reverse();
+
+    replaySection.body.appendChild(
+      createCardList(
+        curated,
+        (entry) => {
+          const card = document.createElement("div");
+          card.className = "overview-card";
+          if (selectedReplaySeq === entry.seq) {
+            card.style.outline = "1px solid var(--accent, #6ca0ff)";
+          }
+
+          const top = document.createElement("div");
+          top.className = "overview-card-top";
+
+          const title = document.createElement("div");
+          title.className = "overview-card-title";
+          title.textContent = `${entry.role.replace(/-/g, " ")} #${entry.seq}`;
+
+          const badge = document.createElement("button");
+          badge.className = "overview-pill";
+          badge.textContent = "Focus";
+          badge.type = "button";
+          badge.style.cursor = "pointer";
+          badge.addEventListener("click", () => focusReplay(entry.seq));
+
+          top.append(title, badge);
+          card.appendChild(top);
+
+          const bodyEl = document.createElement("div");
+          bodyEl.className = "overview-card-body";
+          bodyEl.textContent = truncate(entry.content, 260);
+          card.appendChild(bodyEl);
+
+          const meta = document.createElement("div");
+          meta.className = "overview-card-meta";
+          const fragments = [formatTimestamp(entry.timestamp)];
+          if (entry.step_number) fragments.push(`step ${entry.step_number}`);
+          if (entry.tool_name) fragments.push(entry.tool_name);
+          meta.textContent = fragments.join(" • ");
+          card.appendChild(meta);
+
+          return card;
+        },
+        overview
+          ? "No curated replay entries yet."
+          : "Open a session to view replay highlights.",
+      ),
+    );
   }
 
   function renderSnapshot(
@@ -397,6 +681,7 @@ export function createOverviewPane(): HTMLElement {
   function renderGap(gap: OverviewGapView): HTMLElement {
     const item = document.createElement("div");
     item.className = "overview-card";
+    item.id = `overview-gap-${gap.gap_id}`;
 
     const top = document.createElement("div");
     top.className = "overview-card-top";
@@ -417,12 +702,37 @@ export function createOverviewPane(): HTMLElement {
     meta.textContent = `${gap.scope} gap${gap.related_action_ids.length > 0 ? ` • ${gap.related_action_ids.length} linked action${gap.related_action_ids.length === 1 ? "" : "s"}` : ""}`;
     item.appendChild(meta);
 
+    if (gap.related_action_ids.length > 0) {
+      const linkWrap = document.createElement("div");
+      linkWrap.className = "overview-card-meta";
+      linkWrap.textContent = "Evidence links:";
+      const chips = document.createElement("div");
+      chips.style.display = "flex";
+      chips.style.flexWrap = "wrap";
+      chips.style.gap = "6px";
+      for (const actionId of gap.related_action_ids) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "overview-pill";
+        chip.style.cursor = "pointer";
+        chip.textContent = `action:${truncate(actionId, 20)}`;
+        chip.addEventListener("click", () => {
+          document
+            .getElementById(`overview-action-${actionId}`)
+            ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        });
+        chips.appendChild(chip);
+      }
+      item.append(linkWrap, chips);
+    }
+
     return item;
   }
 
   function renderAction(action: OverviewActionView): HTMLElement {
     const item = document.createElement("div");
     item.className = "overview-card";
+    item.id = `overview-action-${action.action_id}`;
 
     const top = document.createElement("div");
     top.className = "overview-card-top";
@@ -450,6 +760,25 @@ export function createOverviewPane(): HTMLElement {
       meta.className = "overview-card-meta";
       meta.textContent = `Depends on ${action.evidence_gap_refs.length} gap${action.evidence_gap_refs.length === 1 ? "" : "s"}`;
       item.appendChild(meta);
+
+      const chips = document.createElement("div");
+      chips.style.display = "flex";
+      chips.style.flexWrap = "wrap";
+      chips.style.gap = "6px";
+      for (const gapId of action.evidence_gap_refs) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "overview-pill";
+        chip.style.cursor = "pointer";
+        chip.textContent = `gap:${truncate(gapId, 20)}`;
+        chip.addEventListener("click", () => {
+          document
+            .getElementById(`overview-gap-${gapId}`)
+            ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        });
+        chips.appendChild(chip);
+      }
+      item.appendChild(chips);
     }
 
     return item;
@@ -473,6 +802,12 @@ export function createOverviewPane(): HTMLElement {
     meta.className = "overview-card-meta";
     meta.textContent = `${formatTimestamp(revelation.occurred_at)} • ${revelation.provenance.source}${revelation.provenance.step_index ? ` • step ${revelation.provenance.step_index}` : ""}`;
     item.appendChild(meta);
+
+    const refs = parseRevelationRefs(revelation);
+    const evidenceLinks = renderEvidenceLinks(refs, "Revelation");
+    if (evidenceLinks) {
+      item.appendChild(evidenceLinks);
+    }
 
     return item;
   }
@@ -561,10 +896,11 @@ export function createOverviewPane(): HTMLElement {
     header.innerHTML = "";
     const heading = document.createElement("div");
     heading.className = "overview-heading";
-    heading.textContent = "Current Investigation";
+    heading.textContent = "Curated Investigation Replay";
     header.appendChild(heading);
 
     renderAlerts();
+    renderReplay(overview);
     renderSnapshot(overview, overview?.focus_questions ?? []);
 
     gapsSection.body.innerHTML = "";
@@ -621,6 +957,10 @@ export function createOverviewPane(): HTMLElement {
     documentHtml = "";
     documentTitle = "Wiki document";
     documentError = "";
+    replayStatus = "idle";
+    replayEntries = [];
+    replayError = "";
+    selectedReplaySeq = null;
     render();
     scheduleRefresh(0);
   });
@@ -638,6 +978,11 @@ export function createOverviewPane(): HTMLElement {
   void refreshOverview();
 
   return pane;
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}…`;
 }
 
 function createSection(title: string): { section: HTMLElement; body: HTMLElement } {

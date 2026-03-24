@@ -141,6 +141,11 @@ export interface OverviewActionView {
 export interface OverviewRevelationProvenanceView {
   source: string;
   step_index?: number;
+  turn_id?: string;
+  event_id?: string;
+  replay_line?: number;
+  source_refs?: string[];
+  evidence_refs?: string[];
 }
 
 export interface OverviewRevelationView {
