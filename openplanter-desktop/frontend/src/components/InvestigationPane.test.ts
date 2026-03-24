@@ -25,6 +25,7 @@ vi.mock("./GraphPane", () => ({
 vi.mock("../graph/sessionBaseline", () => sessionBaselineMocks);
 
 import { appState } from "../state/store";
+import { OPEN_WIKI_DRAWER_EVENT } from "../wiki/drawerEvents";
 import { createInvestigationPane } from "./InvestigationPane";
 
 describe("createInvestigationPane", () => {
@@ -97,5 +98,25 @@ describe("createInvestigationPane", () => {
 
     expect(sessionBaselineMocks.resetGraphSessionState).not.toHaveBeenCalled();
     expect(sessionBaselineMocks.primeGraphSessionBaseline).not.toHaveBeenCalled();
+  });
+
+  it("re-dispatches wiki drawer events after lazy-mounting the graph pane", async () => {
+    const pane = createInvestigationPane();
+    document.body.appendChild(pane);
+    const timerSpy = vi.spyOn(window, "setTimeout");
+
+    window.dispatchEvent(new CustomEvent(OPEN_WIKI_DRAWER_EVENT, {
+      detail: {
+        wikiPath: "wiki/acme.md",
+        source: "chat",
+      },
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(appState.get().investigationViewTab).toBe("graph");
+    expect(pane.querySelector(".graph-pane")).not.toBeNull();
+    expect(timerSpy).toHaveBeenCalledTimes(1);
+    timerSpy.mockRestore();
   });
 });

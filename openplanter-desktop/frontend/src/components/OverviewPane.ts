@@ -242,7 +242,7 @@ export function createOverviewPane(): HTMLElement {
     const normalized = normalizeReplayRole(entry.role);
     if (normalized === "user") return "Objective";
     if (normalized === "step-summary") {
-      return entry.step_number ? `Step ${entry.step_number}` : "Step Summary";
+      return entry.step_number != null ? `Step ${entry.step_number}` : "Step Summary";
     }
     if (normalized === "curator") return "Curator Update";
     if (normalized === "assistant-cancelled") return "Cancelled Run";
@@ -513,35 +513,61 @@ export function createOverviewPane(): HTMLElement {
     return dedupeLocators(locators);
   }
 
-  function findReplaySeqForLocator(locator: EvidenceLocator): number | null {
-    if (locator.kind === "replay_seq" || locator.kind === "replay_line") {
+  function findReplayEntryByLineNumber(lineNumber: number): ReplayEntry | null {
+    if (!Number.isFinite(lineNumber) || lineNumber < 1) {
+      return null;
+    }
+    return replayEntries[lineNumber - 1] ?? null;
+  }
+
+  function findReplayEntryForLocator(locator: EvidenceLocator): ReplayEntry | null {
+    if (locator.kind === "replay_seq") {
       const parsed = Number.parseInt(locator.value, 10);
-      if (Number.isFinite(parsed) && replayEntries.some((entry) => entry.seq === parsed)) {
-        return parsed;
+      if (Number.isFinite(parsed)) {
+        return replayEntries.find((entry) => entry.seq === parsed) ?? null;
       }
+      return null;
+    }
+
+    if (locator.kind === "replay_line") {
+      const parsed = Number.parseInt(locator.value, 10);
+      return findReplayEntryByLineNumber(parsed);
     }
 
     if (locator.kind === "step") {
       const step = Number.parseInt(locator.value, 10);
       if (Number.isFinite(step)) {
-        const match = [...replayEntries]
+        return [...replayEntries]
           .reverse()
-          .find((entry) => entry.step_number === step && isCuratedReplayEntry(entry));
-        return match?.seq ?? null;
+          .find((entry) => entry.step_number === step && isCuratedReplayEntry(entry)) ?? null;
       }
+      return null;
     }
 
     const importMatch = locator.value.match(
       /(?:import:replay\.jsonl:|jsonl_record:replay\.jsonl:|replay_event:)(\d+)/,
     );
-    if (importMatch) {
-      const parsed = Number.parseInt(importMatch[1], 10);
-      if (Number.isFinite(parsed) && replayEntries.some((entry) => entry.seq === parsed)) {
-        return parsed;
-      }
+    if (!importMatch) {
+      return null;
     }
 
-    return null;
+    const parsed = Number.parseInt(importMatch[1], 10);
+    if (!Number.isFinite(parsed)) {
+      return null;
+    }
+
+    if (
+      locator.value.startsWith("import:replay.jsonl:") ||
+      locator.value.startsWith("jsonl_record:replay.jsonl:")
+    ) {
+      return findReplayEntryByLineNumber(parsed);
+    }
+
+    return replayEntries.find((entry) => entry.seq === parsed) ?? null;
+  }
+
+  function findReplaySeqForLocator(locator: EvidenceLocator): number | null {
+    return findReplayEntryForLocator(locator)?.seq ?? null;
   }
 
   function extractWikiPath(locatorValue: string): string | null {
@@ -573,6 +599,9 @@ export function createOverviewPane(): HTMLElement {
   }
 
   function focusReplay(seq: number): boolean {
+    if (!replayEntries.some((entry) => entry.seq === seq)) {
+      return false;
+    }
     selectedReplaySeq = seq;
     render();
     window.setTimeout(() => {
@@ -1239,10 +1268,19 @@ export function createOverviewPane(): HTMLElement {
     }
 
     const revelationByReplaySeq = buildReplayRevelationIndex(overview);
-    const curated = replayEntries
-      .filter((entry) => isCuratedReplayEntry(entry))
-      .slice(-CURATED_REPLAY_LIMIT)
-      .reverse();
+    const curatedCandidates = replayEntries.filter((entry) => isCuratedReplayEntry(entry));
+    const curatedWindow = curatedCandidates.slice(-CURATED_REPLAY_LIMIT);
+    if (
+      selectedReplaySeq != null &&
+      !curatedWindow.some((entry) => entry.seq === selectedReplaySeq)
+    ) {
+      const selectedEntry =
+        replayEntries.find((entry) => entry.seq === selectedReplaySeq) ?? null;
+      if (selectedEntry) {
+        curatedWindow.unshift(selectedEntry);
+      }
+    }
+    const curated = curatedWindow.reverse();
 
     replaySection.body.appendChild(
       createCardList(

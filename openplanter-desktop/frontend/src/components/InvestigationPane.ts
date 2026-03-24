@@ -91,6 +91,8 @@ export function createInvestigationPane(): HTMLElement {
   window.addEventListener(OPEN_WIKI_DRAWER_EVENT, ((e: CustomEvent<OpenWikiDrawerDetail>) => {
     const detail = e.detail;
     if (!detail) return;
+    // Capture this before switching tabs. The state update below synchronously mounts the
+    // graph pane, but listeners added during the current dispatch will not observe this event.
     const needsRedispatch = !graphPane;
 
     if (appState.get().investigationViewTab !== "graph") {

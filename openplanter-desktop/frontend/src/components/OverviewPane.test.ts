@@ -96,7 +96,9 @@ describe("createOverviewPane", () => {
       overviewError: null,
       overviewSelectedWikiPath: null,
     });
+    (HTMLElement.prototype as { scrollIntoView?: () => void }).scrollIntoView = () => {};
     __setHandler("read_wiki_file", ({ path }: { path: string }) => `# ${path}\n\nMock wiki document`);
+    __setHandler("get_session_history", () => []);
   });
 
   afterEach(() => {
@@ -315,5 +317,125 @@ describe("createOverviewPane", () => {
 
     expect(pane.querySelector(".overview-document-viewport")).toBe(viewport);
     expect(viewport.scrollTop).toBe(64);
+  });
+
+  it("renders step zero replay entries as Step 0", async () => {
+    __setHandler("get_investigation_overview", () => makeOverview());
+    __setHandler("get_session_history", () => [
+      {
+        seq: 7,
+        timestamp: "2026-03-17T12:04:00Z",
+        role: "step-summary",
+        content: "Initial summary",
+        step_number: 0,
+        step_model_preview: "Initial summary",
+      },
+    ]);
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Step 0");
+    });
+  });
+
+  it("uses replay line locators to focus the matching replay entry by file order", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "openplanter.revelation|replay_line:1",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Line-based evidence",
+            summary: "Should focus the first replay line even when seq differs.",
+            provenance: {
+              source: "agent_step",
+              step_index: 0,
+            },
+          },
+        ],
+      }),
+    );
+    __setHandler("get_session_history", () => [
+      {
+        seq: 42,
+        timestamp: "2026-03-17T12:04:00Z",
+        role: "assistant",
+        content: "First replay entry",
+      },
+      {
+        seq: 99,
+        timestamp: "2026-03-17T12:06:00Z",
+        role: "assistant",
+        content: "Second replay entry",
+      },
+    ]);
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Line-based evidence");
+      expect(pane.textContent).toContain("First replay entry");
+    });
+
+    const lineChip = Array.from(pane.querySelectorAll("button")).find(
+      (button) => button.textContent === "line 1",
+    ) as HTMLButtonElement | undefined;
+    expect(lineChip).toBeDefined();
+
+    lineChip!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const focused = pane.querySelector('[data-replay-seq="42"]') as HTMLElement | null;
+    expect(focused).not.toBeNull();
+    expect(focused?.style.outline).toContain("var(--accent)");
+  });
+
+  it("keeps a focused replay target visible even when it falls outside the default replay window", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "openplanter.revelation|replay_seq:1",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Older replay anchor",
+            summary: "This revelation anchors to the oldest replay entry.",
+            provenance: {
+              source: "agent_step",
+              step_index: 1,
+            },
+          },
+        ],
+      }),
+    );
+    __setHandler("get_session_history", () =>
+      Array.from({ length: 16 }, (_, index) => ({
+        seq: index + 1,
+        timestamp: `2026-03-17T12:${String(index).padStart(2, "0")}:00Z`,
+        role: "assistant",
+        content: `Replay entry ${index + 1}`,
+      })),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Replay entry 16");
+    });
+
+    const replayChip = Array.from(pane.querySelectorAll("button")).find(
+      (button) => button.textContent === "replay #1",
+    ) as HTMLButtonElement | undefined;
+    expect(replayChip).toBeDefined();
+
+    replayChip!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const focused = pane.querySelector('[data-replay-seq="1"]') as HTMLElement | null;
+    expect(focused).not.toBeNull();
+    expect(focused?.style.outline).toContain("var(--accent)");
   });
 });
