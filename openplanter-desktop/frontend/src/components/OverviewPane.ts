@@ -284,14 +284,11 @@ export function createOverviewPane(): HTMLElement {
   function isFailureEntry(entry: ReplayEntry): boolean {
     const normalized = normalizeReplayRole(entry.role);
     if (normalized === "user") return false;
-    if (normalized !== "assistant" && normalized !== "assistant-cancelled") {
-      return normalized.includes("error");
+    if (normalized === "assistant-cancelled") return true;
+    if (normalized === "assistant") {
+      return looksLikeFailurePreview(replayPreview(entry));
     }
-    return (
-      normalized === "assistant-cancelled" ||
-      normalized.includes("error") ||
-      looksLikeFailurePreview(replayPreview(entry))
-    );
+    return normalized.includes("error");
   }
 
   function isRecoveryEntry(entry: ReplayEntry): boolean {
@@ -582,9 +579,9 @@ export function createOverviewPane(): HTMLElement {
     if (trimmed.startsWith("import:wiki/")) return trimmed.slice("import:".length);
     if (trimmed.startsWith("wiki/")) return trimmed;
 
-    const wikiIndex = trimmed.indexOf("wiki/");
-    if (wikiIndex >= 0) {
-      return trimmed.slice(wikiIndex);
+    const wikiMatch = trimmed.match(/(?:^|[^A-Za-z0-9_])(wiki\/\S+)/);
+    if (wikiMatch) {
+      return wikiMatch[1];
     }
     return null;
   }

@@ -487,6 +487,35 @@ describe("createOverviewPane", () => {
     window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener);
   });
 
+  it("does not treat unrelated nowiki references as wiki navigation targets", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-nowiki",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Opaque source ref",
+            summary: "This source ref should remain informational only.",
+            provenance: {
+              source: "agent_step",
+              source_refs: ["nowiki/file.md"],
+            },
+          },
+        ],
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Opaque source ref");
+    });
+
+    expect(pane.querySelector('button[title="nowiki/file.md"]')).toBeNull();
+    expect(pane.querySelector('span[title="nowiki/file.md"]')).not.toBeNull();
+  });
+
   it("focuses the matching gap card from revelation evidence chips", async () => {
     __setHandler("get_investigation_overview", () =>
       makeOverview({
