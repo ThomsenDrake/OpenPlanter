@@ -22,7 +22,8 @@ export async function solve(objective: string, sessionId: string): Promise<void>
   return invoke("solve", { objective, sessionId });
 }
 
-export async function getSessionHistory(sessionId: string): Promise<ReplayEntry[]> {
+export async function getSessionHistory(sessionId: string | null): Promise<ReplayEntry[]> {
+  if (!sessionId) return [];
   return invoke("get_session_history", { sessionId });
 }
 

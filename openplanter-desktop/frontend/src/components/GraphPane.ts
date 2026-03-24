@@ -291,14 +291,17 @@ export function createGraphPane(): HTMLElement {
 
   // --- Drawer open/close ---
   function openWikiDrawer(detail: OpenWikiDrawerDetail): void {
-    hideDetail();
-    currentDrawerWikiPath = detail.wikiPath;
+    const wikiPath = detail.wikiPath.trim();
+    if (!wikiPath) return;
 
-    const sourceNode = findSourceNodeByPath(detail.wikiPath);
+    hideDetail();
+    currentDrawerWikiPath = wikiPath;
+
+    const sourceNode = findSourceNodeByPath(wikiPath);
     drawerTitle.textContent =
       detail.requestedTitle ||
       sourceNode?.label ||
-      fallbackTitleFromPath(detail.wikiPath);
+      fallbackTitleFromPath(wikiPath);
     drawerBody.innerHTML = '<span style="color:var(--text-muted)">Loading...</span>';
     drawerBackdrop.classList.add("visible");
     drawer.classList.add("visible");
@@ -309,7 +312,7 @@ export function createGraphPane(): HTMLElement {
     }
 
     const loadSeq = ++drawerLoadSeq;
-    readWikiFile(detail.wikiPath).then((content) => {
+    readWikiFile(wikiPath).then((content) => {
       if (loadSeq !== drawerLoadSeq) return;
       drawerBody.innerHTML = md.render(content);
       interceptDrawerLinks();

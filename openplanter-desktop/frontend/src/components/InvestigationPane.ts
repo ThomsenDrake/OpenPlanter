@@ -3,6 +3,7 @@ import {
   primeGraphSessionBaseline,
   resetGraphSessionState,
 } from "../graph/sessionBaseline";
+import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { createGraphPane } from "./GraphPane";
 import { createOverviewPane } from "./OverviewPane";
 
@@ -85,6 +86,26 @@ export function createInvestigationPane(): HTMLElement {
 
     resetGraphSessionState(e.detail?.isNew ?? false);
     void primeGraphSessionBaseline();
+  }) as EventListener);
+
+  window.addEventListener(OPEN_WIKI_DRAWER_EVENT, ((e: CustomEvent<OpenWikiDrawerDetail>) => {
+    const detail = e.detail;
+    if (!detail) return;
+
+    if (appState.get().investigationViewTab !== "graph") {
+      appState.update((state) => ({
+        ...state,
+        investigationViewTab: "graph",
+      }));
+    }
+
+    if (!graphPane) {
+      window.setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent<OpenWikiDrawerDetail>(OPEN_WIKI_DRAWER_EVENT, { detail }),
+        );
+      }, 0);
+    }
   }) as EventListener);
 
   tabs.append(overviewTab, graphTab);
