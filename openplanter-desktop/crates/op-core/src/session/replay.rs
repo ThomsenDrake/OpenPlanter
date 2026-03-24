@@ -98,16 +98,14 @@ impl ReplayLogger {
         }
         let content = fs::read_to_string(path).await?;
         let mut max_seq = 0_u64;
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
             match serde_json::from_str::<Value>(trimmed) {
                 Ok(value) => {
-                    if let Some(seq) = extract_seq(&value) {
-                        max_seq = max_seq.max(seq);
-                    }
+                    max_seq = max_seq.max(extracted_or_line_seq(&value, (line_no + 1) as u64));
                 }
                 Err(err) => {
                     eprintln!("[replay] skipping malformed line while scanning seq: {err}");
@@ -993,5 +991,33 @@ mod tests {
 
         let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
         assert_eq!(entries.last().unwrap().seq, 5);
+    }
+
+    #[tokio::test]
+    async fn test_append_continues_seq_after_zero_seq_legacy_call_line() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("replay.jsonl");
+        let content = serde_json::to_string(&serde_json::json!({
+            "type": "call",
+            "conversation_id": "root",
+            "seq": 0,
+            "depth": 0,
+            "step": 1,
+            "ts": "2026-03-23T10:00:00Z",
+            "response": {"output_text": "legacy"}
+        }))
+        .unwrap();
+        fs::write(&path, format!("{content}\n")).await.unwrap();
+
+        let mut logger = ReplayLogger::new(tmp.path());
+        logger
+            .append(basic_entry("assistant", "next"))
+            .await
+            .unwrap();
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].seq, 1);
+        assert_eq!(entries[1].seq, 2);
     }
 }
