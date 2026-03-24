@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-use crate::commands::session::append_session_event;
+use crate::commands::session::{
+    AppendSessionEventOptions, AppendedEventMeta, FailureInfo, append_session_event,
+};
 use op_core::engine::SolveEmitter;
 use op_core::events::{
     CompleteEvent, CompletionMeta, CuratorUpdateEvent, DeltaEvent, DeltaKind, ErrorEvent,
@@ -60,6 +62,72 @@ fn format_model_preview(buffer: &str, truncated: bool) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn classify_error(message: &str) -> FailureInfo {
+    let lowered = message.to_ascii_lowercase();
+    if lowered == "cancelled" || lowered.contains("cancelled") {
+        return FailureInfo::cancelled("Task cancelled.");
+    }
+    if lowered.contains("429")
+        || lowered.contains("rate limit")
+        || lowered.contains("too many requests")
+    {
+        return FailureInfo {
+            code: "rate_limit".to_string(),
+            category: "transient".to_string(),
+            phase: "model_completion".to_string(),
+            retryable: true,
+            message: message.to_string(),
+            details: serde_json::json!({}),
+            resumable: Some(true),
+            user_visible: Some(true),
+            provider: None,
+            provider_code: Some("429".to_string()),
+            http_status: Some(429),
+        };
+    }
+    if lowered.contains("timeout") || lowered.contains("timed out") {
+        return FailureInfo {
+            code: "timeout".to_string(),
+            category: "transient".to_string(),
+            phase: "model_completion".to_string(),
+            retryable: true,
+            message: message.to_string(),
+            details: serde_json::json!({}),
+            resumable: Some(true),
+            user_visible: Some(true),
+            provider: None,
+            provider_code: None,
+            http_status: None,
+        };
+    }
+    FailureInfo {
+        code: "unknown_error".to_string(),
+        category: "unknown".to_string(),
+        phase: "session_finalize".to_string(),
+        retryable: false,
+        message: message.to_string(),
+        details: serde_json::json!({}),
+        resumable: Some(true),
+        user_visible: Some(true),
+        provider: None,
+        provider_code: None,
+        http_status: None,
+    }
+}
+
+fn degraded_failure(result: &str, completion: Option<&CompletionMeta>) -> FailureInfo {
+    let reason = completion
+        .map(|completion| completion.reason.as_str())
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("partial_result");
+    let mut failure = FailureInfo::degraded(format!("Solve completed partially: {reason}"));
+    failure.details = serde_json::json!({
+        "reason": reason,
+        "result_preview": preview_text(result, 240),
+    });
+    failure
 }
 
 pub struct TauriEmitter {
@@ -132,10 +200,13 @@ impl SolveEmitter for TauriEmitter {
 
     fn emit_error(&self, message: &str) {
         eprintln!("[bridge] error: {message}");
+        let failure = classify_error(message);
         let _ = self.handle.emit(
             "agent:error",
             ErrorEvent {
                 message: message.to_string(),
+                failure_code: Some(failure.code),
+                failure_phase: Some(failure.phase),
             },
         );
     }
@@ -223,6 +294,9 @@ pub struct TerminalSnapshot {
     pub result: String,
     pub loop_metrics: Option<LoopMetrics>,
     pub completion: Option<CompletionMeta>,
+    pub result_event: Option<AppendedEventMeta>,
+    pub failure: Option<FailureInfo>,
+    pub degraded: bool,
     pub observations: Vec<String>,
 }
 
@@ -342,9 +416,18 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
         }
     }
 
-    fn append_event_value(&self, event_type: &str, payload: serde_json::Value) {
-        if let Err(err) = append_session_event(&self.session_dir, event_type, payload) {
-            eprintln!("[bridge] failed to append {event_type} event: {err}");
+    fn append_event_value(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+        options: AppendSessionEventOptions,
+    ) -> Option<AppendedEventMeta> {
+        match append_session_event(&self.session_dir, event_type, payload, options) {
+            Ok(meta) => Some(meta),
+            Err(err) => {
+                eprintln!("[bridge] failed to append {event_type} event: {err}");
+                None
+            }
         }
     }
 
@@ -439,12 +522,15 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
         result: &str,
         loop_metrics: Option<&LoopMetrics>,
         completion: Option<&CompletionMeta>,
+        failure: Option<&FailureInfo>,
     ) -> serde_json::Value {
         serde_json::json!({
             "status": terminal_status_label(status),
             "text": result,
             "loop_metrics": loop_metrics,
             "completion": completion,
+            "failure_code": failure.map(|failure| failure.code.clone()),
+            "failure_phase": failure.map(|failure| failure.phase.clone()),
         })
     }
 }
@@ -452,7 +538,14 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
 impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
     fn emit_trace(&self, message: &str) {
         self.push_observation(format!("[trace] {message}"));
-        self.append_event_value("trace", serde_json::json!({ "message": message }));
+        self.append_event_value(
+            "trace",
+            serde_json::json!({ "message": message }),
+            AppendSessionEventOptions {
+                actor_kind: Some("runtime".to_string()),
+                ..AppendSessionEventOptions::default()
+            },
+        );
         self.inner.emit_trace(message);
     }
 
@@ -589,7 +682,15 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                 .unwrap_or(serde_json::Value::Null),
             );
         }
-        self.append_event_value("step", payload);
+        self.append_event_value(
+            "step",
+            payload,
+            AppendSessionEventOptions {
+                status: Some("completed".to_string()),
+                actor_kind: Some("assistant".to_string()),
+                ..AppendSessionEventOptions::default()
+            },
+        );
 
         let mut patch_index = 0usize;
         for tc in &state.step_tool_calls {
@@ -617,6 +718,11 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                         "step": event.step,
                         "tool": "apply_patch",
                     }),
+                    AppendSessionEventOptions {
+                        status: Some("completed".to_string()),
+                        actor_kind: Some("runtime".to_string()),
+                        ..AppendSessionEventOptions::default()
+                    },
                 );
             }
             patch_index += 1;
@@ -640,6 +746,10 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         loop_metrics: Option<LoopMetrics>,
         completion: Option<CompletionMeta>,
     ) {
+        if self.terminal.lock().unwrap().is_some() {
+            self.inner.emit_complete(result, loop_metrics, completion);
+            return;
+        }
         *self.last_loop_metrics.lock().unwrap() = loop_metrics.clone();
         let status = if completion
             .as_ref()
@@ -649,6 +759,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         } else {
             TerminalStatus::Final
         };
+        let failure = matches!(status, TerminalStatus::Partial)
+            .then(|| degraded_failure(result, completion.as_ref()));
         self.push_observation(format!(
             "[result {}] {}",
             terminal_status_label(&status),
@@ -673,24 +785,42 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
 
         self.append_replay_entry(entry, "complete");
 
+        let result_event = self.append_event_value(
+            "result",
+            self.terminal_payload(
+                &status,
+                result,
+                loop_metrics.as_ref(),
+                completion.as_ref(),
+                failure.as_ref(),
+            ),
+            AppendSessionEventOptions {
+                status: Some(terminal_status_label(&status).to_string()),
+                failure: failure.clone(),
+                actor_kind: Some("assistant".to_string()),
+                ..AppendSessionEventOptions::default()
+            },
+        );
         let snapshot = TerminalSnapshot {
             status: status.clone(),
             result: result.to_string(),
             loop_metrics: loop_metrics.clone(),
             completion: completion.clone(),
+            result_event,
+            failure,
+            degraded: matches!(status, TerminalStatus::Partial),
             observations: self.current_observations(),
         };
-        if self.store_terminal_snapshot(snapshot) {
-            self.append_event_value(
-                "result",
-                self.terminal_payload(&status, result, loop_metrics.as_ref(), completion.as_ref()),
-            );
-        }
+        let _ = self.store_terminal_snapshot(snapshot);
 
         self.inner.emit_complete(result, loop_metrics, completion);
     }
 
     fn emit_error(&self, message: &str) {
+        if self.terminal.lock().unwrap().is_some() {
+            self.inner.emit_error(message);
+            return;
+        }
         self.push_observation(format!("[error] {message}"));
         let is_cancelled = message == "Cancelled";
         let status = if is_cancelled {
@@ -698,6 +828,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
         } else {
             TerminalStatus::Error
         };
+        let failure = classify_error(message);
         let result_text = if is_cancelled {
             "Task cancelled.".to_string()
         } else {
@@ -734,19 +865,33 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                 "cancelled",
             );
         }
+        let result_event = self.append_event_value(
+            "result",
+            self.terminal_payload(
+                &status,
+                &result_text,
+                metrics.as_ref(),
+                None,
+                Some(&failure),
+            ),
+            AppendSessionEventOptions {
+                status: Some(terminal_status_label(&status).to_string()),
+                failure: Some(failure.clone()),
+                actor_kind: Some("assistant".to_string()),
+                ..AppendSessionEventOptions::default()
+            },
+        );
         let snapshot = TerminalSnapshot {
             status: status.clone(),
             result: result_text.clone(),
             loop_metrics: metrics.clone(),
             completion: None,
+            result_event,
+            failure: Some(failure),
+            degraded: false,
             observations: self.current_observations(),
         };
-        if self.store_terminal_snapshot(snapshot) {
-            self.append_event_value(
-                "result",
-                self.terminal_payload(&status, &result_text, metrics.as_ref(), None),
-            );
-        }
+        let _ = self.store_terminal_snapshot(snapshot);
         self.inner.emit_error(message);
     }
 
@@ -1112,6 +1257,9 @@ mod tests {
         let snapshot = emitter.take_terminal_snapshot().expect("terminal snapshot");
         assert!(matches!(snapshot.status, TerminalStatus::Final));
         assert_eq!(snapshot.result, "final text");
+        assert!(snapshot.result_event.is_some());
+        assert!(snapshot.failure.is_none());
+        assert!(!snapshot.degraded);
         assert_eq!(
             snapshot.loop_metrics.as_ref().map(|metrics| metrics.steps),
             Some(2)
@@ -1119,7 +1267,8 @@ mod tests {
 
         let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
         assert!(events.contains("\"type\":\"result\""));
-        assert!(events.contains("\"status\":\"final\""));
+        assert!(events.contains("\"status\":\"completed\""));
+        assert!(events.contains("\"event_type\":\"turn.completed\""));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1149,6 +1298,13 @@ mod tests {
         assert_eq!(snapshot.result, "Task cancelled.");
         assert_eq!(
             snapshot
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            snapshot
                 .loop_metrics
                 .as_ref()
                 .map(|metrics| metrics.termination_reason.as_str()),
@@ -1171,5 +1327,78 @@ mod tests {
         let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
         assert!(events.contains("\"type\":\"result\""));
         assert!(events.contains("\"status\":\"cancelled\""));
+        assert!(events.contains("\"event_type\":\"turn.cancelled\""));
+        assert!(events.contains("\"failure_code\":\"cancelled\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_complete_partial_marks_degraded_failure() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+
+        emitter.emit_complete(
+            "partial text",
+            Some(LoopMetrics {
+                steps: 3,
+                tool_calls: 2,
+                termination_reason: "budget_cap".into(),
+                ..LoopMetrics::default()
+            }),
+            Some(CompletionMeta {
+                kind: "partial".into(),
+                reason: "budget_cap".into(),
+                steps_used: 3,
+                max_steps: 3,
+                extensions_granted: 0,
+                extension_block_steps: 0,
+                extension_max_blocks: 0,
+            }),
+        );
+
+        let snapshot = emitter.take_terminal_snapshot().expect("partial snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Partial));
+        assert!(snapshot.degraded);
+        assert_eq!(
+            snapshot
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("degraded")
+        );
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"status\":\"partial\""));
+        assert!(events.contains("\"failure_code\":\"degraded\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_error_classifies_rate_limit_failures() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+
+        emitter.emit_error("Provider returned HTTP 429: too many requests");
+
+        let snapshot = emitter.take_terminal_snapshot().expect("error snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Error));
+        assert_eq!(
+            snapshot
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("rate_limit")
+        );
+        assert_eq!(
+            snapshot
+                .failure
+                .as_ref()
+                .map(|failure| failure.phase.as_str()),
+            Some("model_completion")
+        );
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"event_type\":\"turn.failed\""));
+        assert!(events.contains("\"failure_code\":\"rate_limit\""));
     }
 }

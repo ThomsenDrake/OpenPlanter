@@ -139,6 +139,10 @@ pub struct LoopHealthEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorEvent {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_phase: Option<String>,
 }
 
 /// Checkpointed wiki curator completed an update.
@@ -378,12 +382,38 @@ pub struct ModelInfo {
 }
 
 /// Session information for the session list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
     pub created_at: String,
     pub turn_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_objective: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SessionInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct SessionInfoCompat {
+            id: Option<String>,
+            session_id: Option<String>,
+            created_at: String,
+            turn_count: u32,
+            last_objective: Option<String>,
+        }
+
+        let raw = SessionInfoCompat::deserialize(deserializer)?;
+        Ok(SessionInfo {
+            id: raw.id.or(raw.session_id).unwrap_or_default(),
+            created_at: raw.created_at,
+            turn_count: raw.turn_count,
+            last_objective: raw.last_objective,
+        })
+    }
 }
 
 /// Slash command result.
@@ -603,6 +633,34 @@ mod tests {
         assert_eq!(parsed["step"], 3);
         assert_eq!(parsed["tool_name"], "read_file");
         assert_eq!(parsed["tokens"]["input_tokens"], 1234);
+    }
+
+    #[test]
+    fn test_session_info_deserializes_legacy_session_id_alias() {
+        let parsed: SessionInfo = serde_json::from_str(
+            r#"{
+                "session_id": "legacy-session",
+                "created_at": "2026-01-01T12:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.id, "legacy-session");
+        assert_eq!(parsed.created_at, "2026-01-01T12:00:00Z");
+        assert_eq!(parsed.turn_count, 0);
+        assert!(parsed.last_objective.is_none());
+    }
+
+    #[test]
+    fn test_error_event_serializes_failure_fields_when_present() {
+        let event = ErrorEvent {
+            message: "failed".into(),
+            failure_code: Some("timeout".into()),
+            failure_phase: Some("model_completion".into()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"failure_code\":\"timeout\""));
+        assert!(json.contains("\"failure_phase\":\"model_completion\""));
     }
 
     #[test]

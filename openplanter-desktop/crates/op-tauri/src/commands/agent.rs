@@ -6,7 +6,10 @@ use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::bridge::{LoggingEmitter, TauriEmitter, TerminalStatus};
-use crate::commands::session::{append_session_event, sessions_dir};
+use crate::commands::session::{
+    AppendSessionEventOptions, FailureInfo, TurnRecordOutcome, append_session_event,
+    finalize_session_turn, sessions_dir,
+};
 use crate::state::AppState;
 use op_core::engine::context::{
     TurnSummary, load_or_migrate_investigation_state, persist_turn_outcome, turn_history_from_state,
@@ -46,6 +49,15 @@ const STOPWORDS: &[&str] = &[
     "not", "our", "the", "their", "them", "then", "there", "they", "was", "were", "what", "when",
     "where", "which", "with", "would",
 ];
+
+fn terminal_status_for_turn(status: &TerminalStatus) -> &'static str {
+    match status {
+        TerminalStatus::Final => "completed",
+        TerminalStatus::Partial => "partial",
+        TerminalStatus::Cancelled => "cancelled",
+        TerminalStatus::Error => "failed",
+    }
+}
 
 fn normalize_words(text: &str) -> Vec<String> {
     text.to_lowercase()
@@ -288,6 +300,14 @@ pub async fn solve(
     let session_dir = sessions_dir(&state).await.join(&session_id);
     let mut replay = ReplayLogger::new(&session_dir);
     let replay_seq_start = ReplayLogger::max_seq(&session_dir).await.unwrap_or(0) + 1;
+    let turn_context =
+        match crate::commands::session::update_session_metadata(&session_dir, &objective).await {
+            Ok(context) => Some(context),
+            Err(err) => {
+                eprintln!("[agent] failed to update metadata: {err}");
+                None
+            }
+        };
 
     // Log the user message
     let user_entry = ReplayEntry {
@@ -309,20 +329,6 @@ pub async fn solve(
     if let Err(e) = replay.append(user_entry).await {
         eprintln!("[agent] failed to log user message: {e}");
     }
-    if let Err(err) = append_session_event(
-        &session_dir,
-        "objective",
-        serde_json::json!({ "text": objective.clone() }),
-    ) {
-        eprintln!("[agent] failed to log objective event: {err}");
-    }
-
-    // Update metadata: increment turn_count, set last_objective
-    if let Err(e) =
-        crate::commands::session::update_session_metadata(&session_dir, &objective).await
-    {
-        eprintln!("[agent] failed to update metadata: {e}");
-    }
 
     let emitter = Arc::new(LoggingEmitter::new(
         TauriEmitter::new(app),
@@ -340,17 +346,18 @@ pub async fn solve(
         session_id
     ));
     emitter.emit_trace(&format!("[startup:info] {}", state.startup_trace()));
-    let (initial_context, initial_context_warning, retrieval_status_detail) = build_solve_initial_context(
-        &cfg,
-        &session_dir,
-        &session_id,
-        &objective,
-        &cfg.continuity_mode,
-        cfg.max_turn_summaries.max(1) as usize,
-        Some(&token),
-        |message| emitter.emit_trace(&message),
-    )
-    .await;
+    let (initial_context, initial_context_warning, retrieval_status_detail) =
+        build_solve_initial_context(
+            &cfg,
+            &session_dir,
+            &session_id,
+            &objective,
+            &cfg.continuity_mode,
+            cfg.max_turn_summaries.max(1) as usize,
+            Some(&token),
+            |message| emitter.emit_trace(&message),
+        )
+        .await;
     if let Some(warning) = initial_context_warning.as_deref() {
         emitter.emit_trace(warning);
     }
@@ -362,6 +369,7 @@ pub async fn solve(
         let emitter_for_inner = emitter.clone();
         let cfg_for_inner = cfg.clone();
         let objective_for_inner = objective.clone();
+        let turn_context_for_inner = turn_context.clone();
         let initial_context_for_inner = initial_context.clone();
         let chrome_mcp_for_inner = chrome_mcp.clone();
         let token_for_inner = token.clone();
@@ -387,7 +395,10 @@ pub async fn solve(
                     .unwrap_or("");
                 if matches!(
                     terminal.status,
-                    TerminalStatus::Final | TerminalStatus::Partial | TerminalStatus::Cancelled
+                    TerminalStatus::Final
+                        | TerminalStatus::Partial
+                        | TerminalStatus::Cancelled
+                        | TerminalStatus::Error
                 ) {
                     if let Err(err) = persist_turn_outcome(
                         &session_dir,
@@ -409,6 +420,57 @@ pub async fn solve(
                             "[solve] failed to persist turn summary; completion_kind={completion_kind}; continuing without continuity update: {err}"
                         ));
                     }
+                    if let Some(turn_context) = turn_context_for_inner.as_ref() {
+                        let replay_seq_end = ReplayLogger::max_seq(&session_dir)
+                            .await
+                            .unwrap_or(replay_seq_start.saturating_sub(1));
+                        let outcome = TurnRecordOutcome {
+                            status: terminal_status_for_turn(&terminal.status).to_string(),
+                            ended_at: terminal
+                                .result_event
+                                .as_ref()
+                                .map(|meta| meta.recorded_at.clone())
+                                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                            summary: terminal.result.clone(),
+                            failure: terminal.failure.clone(),
+                            degraded: terminal.degraded,
+                            step_count: terminal
+                                .loop_metrics
+                                .as_ref()
+                                .map(|metrics| metrics.steps)
+                                .unwrap_or(0),
+                            tool_call_count: terminal
+                                .loop_metrics
+                                .as_ref()
+                                .map(|metrics| metrics.tool_calls)
+                                .unwrap_or(0),
+                            replay_seq_start,
+                            replay_seq_end,
+                            event_end_seq: terminal
+                                .result_event
+                                .as_ref()
+                                .map(|meta| meta.seq)
+                                .unwrap_or(turn_context.event_start_seq),
+                            assistant_final_ref: terminal.result_event.as_ref().and_then(|meta| {
+                                match meta.canonical_type.as_str() {
+                                    "turn.completed" => Some(meta.event_id.clone()),
+                                    _ => None,
+                                }
+                            }),
+                            result_summary_ref: terminal
+                                .result_event
+                                .as_ref()
+                                .map(|meta| meta.event_id.clone()),
+                        };
+                        if let Err(err) =
+                            finalize_session_turn(&session_dir, turn_context, &objective, &outcome)
+                                .await
+                        {
+                            emitter.emit_trace(&format!(
+                                "[solve] failed to append turn record; completion_kind={completion_kind}; continuing without turns.jsonl update: {err}"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -423,7 +485,14 @@ pub async fn solve(
         if let Err(e) = result {
             let msg = format!("Internal error: {e}");
             eprintln!("[bridge] panic: {msg}");
-            let _ = error_handle.emit("agent:error", op_core::events::ErrorEvent { message: msg });
+            let _ = error_handle.emit(
+                "agent:error",
+                op_core::events::ErrorEvent {
+                    message: msg,
+                    failure_code: Some("unknown_error".to_string()),
+                    failure_phase: Some("session_finalize".to_string()),
+                },
+            );
         }
     });
 
@@ -433,8 +502,24 @@ pub async fn solve(
 /// Cancel a running solve.
 #[tauri::command]
 pub async fn cancel(state: State<'_, AppState>) -> Result<(), String> {
-    let token = state.cancel_token.lock().await;
-    token.cancel();
+    {
+        let token = state.cancel_token.lock().await;
+        token.cancel();
+    }
+    if let Some(session_id) = state.session_id.lock().await.clone() {
+        let session_dir = sessions_dir(&state).await.join(session_id);
+        let _ = append_session_event(
+            &session_dir,
+            "runtime.cancel_requested",
+            serde_json::json!({"requested": true}),
+            AppendSessionEventOptions {
+                status: Some("info".to_string()),
+                failure: Some(FailureInfo::cancelled("Cancellation requested.")),
+                actor_kind: Some("runtime".to_string()),
+                ..AppendSessionEventOptions::default()
+            },
+        );
+    }
     Ok(())
 }
 
