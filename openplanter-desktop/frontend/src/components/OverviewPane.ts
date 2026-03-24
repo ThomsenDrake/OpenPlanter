@@ -626,7 +626,7 @@ export function createOverviewPane(): HTMLElement {
       return focusOverviewCard(
         gapsSection.body,
         "gap-id",
-        locator.value.slice("gap:".length),
+        locator.value,
       );
     }
 

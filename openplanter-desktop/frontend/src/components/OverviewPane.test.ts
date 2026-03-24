@@ -486,4 +486,44 @@ describe("createOverviewPane", () => {
 
     window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener);
   });
+
+  it("focuses the matching gap card from revelation evidence chips", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-gap",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Gap-linked evidence",
+            summary: "This should focus the existing gap card.",
+            provenance: {
+              source: "agent_step",
+              evidence_refs: ["gap:claim:c1:missing_evidence"],
+            },
+          },
+        ],
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Gap-linked evidence");
+      expect(pane.textContent).toContain("Claim c1 needs more evidence");
+    });
+
+    const gapChip = pane.querySelector(
+      'button[title="gap:claim:c1:missing_evidence"]',
+    ) as HTMLButtonElement | null;
+    expect(gapChip).not.toBeNull();
+
+    gapChip!.click();
+
+    const gapCard = pane.querySelector(
+      '[data-gap-id="gap:claim:c1:missing_evidence"]',
+    ) as HTMLElement | null;
+    expect(gapCard).not.toBeNull();
+    expect(gapCard?.style.outline).toContain("var(--accent)");
+  });
 });
