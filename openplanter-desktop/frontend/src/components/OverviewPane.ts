@@ -887,6 +887,12 @@ export function createOverviewPane(): HTMLElement {
     }
   }
 
+  function invalidatePendingLoads(): void {
+    refreshSeq += 1;
+    docSeq += 1;
+    replaySeq += 1;
+  }
+
   function scheduleRefresh(delayMs: number): void {
     if (!pane.isConnected) {
       return;
@@ -1447,6 +1453,7 @@ export function createOverviewPane(): HTMLElement {
   });
 
   window.addEventListener("session-changed", () => {
+    invalidatePendingLoads();
     loadedDocumentPath = null;
     documentStatus = "idle";
     documentHtml = "";

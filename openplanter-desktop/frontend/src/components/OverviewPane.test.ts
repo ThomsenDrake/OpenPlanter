@@ -221,6 +221,56 @@ describe("createOverviewPane", () => {
     expect(pane.textContent).not.toContain("Stale overview should be ignored");
   });
 
+  it("invalidates stale replay responses when the session changes", async () => {
+    let sessionOneHistoryResolve: ((value: Array<{
+      seq: number;
+      timestamp: string;
+      role: string;
+      content: string;
+    }>) => void) | null = null;
+
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        session_id: "session-1",
+      }),
+    );
+    __setHandler("get_session_history", ({ sessionId }: { sessionId: string }) => {
+      if (sessionId === "session-1") {
+        return new Promise((resolve) => {
+          sessionOneHistoryResolve = resolve;
+        });
+      }
+      return [];
+    });
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(sessionOneHistoryResolve).not.toBeNull();
+    });
+
+    window.dispatchEvent(new CustomEvent("session-changed", { detail: { isNew: false } }));
+
+    sessionOneHistoryResolve!([
+      {
+        seq: 1,
+        timestamp: "2026-03-17T12:06:00Z",
+        role: "assistant",
+        content: "Stale replay from the previous session",
+      },
+    ]);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pane.textContent).not.toContain("Stale replay from the previous session");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
   it("keeps the selected wiki page stable across overview refreshes", async () => {
     let overviewCalls = 0;
     const readPaths: string[] = [];
