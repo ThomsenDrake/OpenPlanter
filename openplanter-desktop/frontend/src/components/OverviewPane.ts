@@ -573,7 +573,11 @@ export function createOverviewPane(): HTMLElement {
   function extractWikiPath(locatorValue: string): string | null {
     const trimmed = locatorValue.trim();
     if (!trimmed) return null;
-    if (trimmed.startsWith("wiki:")) return trimmed.slice("wiki:".length);
+    if (trimmed.startsWith("wiki:")) {
+      const wikiPath = trimmed.slice("wiki:".length).trim().replace(/^\/+/, "");
+      if (!wikiPath) return null;
+      return wikiPath.startsWith("wiki/") ? wikiPath : `wiki/${wikiPath}`;
+    }
     if (trimmed.startsWith("source:wiki/")) return trimmed.slice("source:".length);
     if (trimmed.startsWith("import:wiki/")) return trimmed.slice("import:".length);
     if (trimmed.startsWith("wiki/")) return trimmed;

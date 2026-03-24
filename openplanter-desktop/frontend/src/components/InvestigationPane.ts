@@ -30,6 +30,7 @@ export function createInvestigationPane(): HTMLElement {
 
   let graphPane: HTMLElement | null = null;
   let activeTab = "";
+  let pendingWikiRedispatch: number | null = null;
 
   function ensureGraphPane(): HTMLElement {
     if (!graphPane) {
@@ -91,8 +92,13 @@ export function createInvestigationPane(): HTMLElement {
   window.addEventListener(OPEN_WIKI_DRAWER_EVENT, ((e: CustomEvent<OpenWikiDrawerDetail>) => {
     const detail = e.detail;
     if (!detail) return;
+    if (pendingWikiRedispatch != null) {
+      window.clearTimeout(pendingWikiRedispatch);
+      pendingWikiRedispatch = null;
+    }
     // Capture this before switching tabs. The state update below synchronously mounts the
-    // graph pane, but listeners added during the current dispatch will not observe this event.
+    // graph pane via the store subscription, but listeners added during the current dispatch
+    // will not observe this event.
     const needsRedispatch = !graphPane;
 
     if (appState.get().investigationViewTab !== "graph") {
@@ -103,7 +109,8 @@ export function createInvestigationPane(): HTMLElement {
     }
 
     if (needsRedispatch) {
-      window.setTimeout(() => {
+      pendingWikiRedispatch = window.setTimeout(() => {
+        pendingWikiRedispatch = null;
         window.dispatchEvent(
           new CustomEvent<OpenWikiDrawerDetail>(OPEN_WIKI_DRAWER_EVENT, { detail }),
         );

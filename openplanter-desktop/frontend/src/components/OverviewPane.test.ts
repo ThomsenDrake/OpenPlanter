@@ -9,6 +9,10 @@ vi.mock("@tauri-apps/api/core", async () => {
 
 import type { InvestigationOverviewView } from "../api/types";
 import { appState } from "../state/store";
+import {
+  OPEN_WIKI_DRAWER_EVENT,
+  type OpenWikiDrawerDetail,
+} from "../wiki/drawerEvents";
 import { createOverviewPane } from "./OverviewPane";
 
 function makeOverview(
@@ -437,5 +441,49 @@ describe("createOverviewPane", () => {
     const focused = pane.querySelector('[data-replay-seq="1"]') as HTMLElement | null;
     expect(focused).not.toBeNull();
     expect(focused?.style.outline).toContain("var(--accent)");
+  });
+
+  it("normalizes wiki locators that use the wiki: prefix", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-1",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Wiki locator",
+            summary: "This locator should open the namespaced wiki path.",
+            provenance: {
+              source: "agent_step",
+              source_refs: ["wiki:acme.md"],
+            },
+          },
+        ],
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Wiki locator");
+    });
+
+    let openedDetail: OpenWikiDrawerDetail | null = null;
+    const listener = ((event: CustomEvent<OpenWikiDrawerDetail>) => {
+      openedDetail = event.detail;
+    }) as EventListener;
+    window.addEventListener(OPEN_WIKI_DRAWER_EVENT, listener);
+
+    const wikiChip = Array.from(pane.querySelectorAll("button")).find(
+      (button) => button.textContent === "acme.md",
+    ) as HTMLButtonElement | undefined;
+    expect(wikiChip).toBeDefined();
+
+    wikiChip!.click();
+
+    expect(openedDetail?.wikiPath).toBe("wiki/acme.md");
+    expect(appState.get().overviewSelectedWikiPath).toBe("wiki/acme.md");
+
+    window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener);
   });
 });
