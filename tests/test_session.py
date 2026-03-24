@@ -9,7 +9,7 @@ from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
 from agent.model import Conversation, ModelTurn, ScriptedModel
-from agent.runtime import SessionRuntime, _has_reasoning_content
+from agent.runtime import SessionRuntime, SessionStore, _has_reasoning_content
 from agent.tools import WorkspaceTools
 
 
@@ -388,6 +388,87 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(len(result_events), 1)
             self.assertEqual(result_events[-1]["payload"]["status"], "cancelled")
             self.assertEqual(result_events[-1]["payload"]["text"], "Task cancelled.")
+
+    def test_runtime_writes_v2_session_metadata_and_turn_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=2,
+                session_root_dir=".openplanter",
+            )
+            engine = RLMEngine(
+                model=ScriptedModel(scripted_turns=[ModelTurn(text="ok", stop_reason="end_turn")]),
+                tools=WorkspaceTools(root=root),
+                config=cfg,
+            )
+            runtime = SessionRuntime.bootstrap(
+                engine=engine,
+                config=cfg,
+                session_id="session-v2-meta",
+                resume=False,
+            )
+
+            result = runtime.solve("write metadata")
+            self.assertEqual(result, "ok")
+
+            session_dir = root / ".openplanter" / "sessions" / "session-v2-meta"
+            metadata = json.loads((session_dir / "metadata.json").read_text(encoding="utf-8"))
+            resolved_root = str(root.resolve())
+            self.assertEqual(metadata["schema_version"], 2)
+            self.assertEqual(metadata["session_format"], "openplanter.session.v2")
+            self.assertEqual(metadata["session_id"], "session-v2-meta")
+            self.assertEqual(metadata["id"], "session-v2-meta")
+            self.assertEqual(metadata["workspace"], resolved_root)
+            self.assertEqual(metadata["workspace_path"], resolved_root)
+            self.assertIn("source_compat", metadata)
+            self.assertIn("capabilities", metadata)
+            self.assertIn("durability", metadata)
+            self.assertEqual(metadata["last_turn_id"], "turn-000001")
+            self.assertEqual(metadata["last_objective"], "write metadata")
+
+            turns_path = session_dir / "turns.jsonl"
+            self.assertTrue(turns_path.exists())
+            turn_records = [
+                json.loads(line)
+                for line in turns_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(turn_records), 1)
+            turn_record = turn_records[0]
+            self.assertEqual(turn_record["schema_version"], 2)
+            self.assertEqual(turn_record["record"], "openplanter.trace.turn.v2")
+            self.assertEqual(turn_record["session_id"], "session-v2-meta")
+            self.assertEqual(turn_record["turn_id"], "turn-000001")
+            self.assertTrue(
+                str(turn_record["inputs"]["user_message_ref"]).startswith("evt:event:session-v2-meta:")
+            )
+            self.assertTrue(
+                str(turn_record["outputs"]["assistant_final_ref"]).startswith("evt:event:session-v2-meta:")
+            )
+            self.assertEqual(
+                turn_record["outputs"]["assistant_final_ref"],
+                turn_record["outputs"]["result_summary_ref"],
+            )
+            self.assertEqual(turn_record["outcome"]["status"], "completed")
+
+    def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(session_id="evt-v2", resume=False)
+
+            store.append_event(sid, "trace.note", {"message": "hello"})
+
+            events_path = root / ".openplanter" / "sessions" / sid / "events.jsonl"
+            record = json.loads(events_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(record["schema_version"], 2)
+            self.assertEqual(record["envelope"], "openplanter.trace.event.v2")
+            self.assertEqual(record["type"], "trace.note")
+            self.assertEqual(record["event_type"], "trace.note")
+            self.assertEqual(record["channel"], "event")
+            self.assertEqual(record["payload"]["message"], "hello")
 
 
 if __name__ == "__main__":

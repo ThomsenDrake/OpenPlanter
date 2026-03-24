@@ -521,6 +521,126 @@ class SessionComplexTests(unittest.TestCase):
             # Should gracefully handle non-list by treating as empty
             self.assertEqual(len(runtime.context.observations), 0)
 
+    def test_list_sessions_with_mixed_legacy_desktop_and_v2_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+
+            legacy_dir = root / ".openplanter" / "sessions" / "legacy-a"
+            desktop_dir = root / ".openplanter" / "sessions" / "desktop-b"
+            v2_dir = root / ".openplanter" / "sessions" / "v2-c"
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            desktop_dir.mkdir(parents=True, exist_ok=True)
+            v2_dir.mkdir(parents=True, exist_ok=True)
+
+            (legacy_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "legacy-a",
+                        "workspace": str(root),
+                        "created_at": "2026-03-20T10:00:00Z",
+                        "updated_at": "2026-03-20T10:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (desktop_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "desktop-b",
+                        "created_at": "2026-03-21T10:00:00Z",
+                        "turn_count": 2,
+                        "last_objective": "desktop objective",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (v2_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "session_format": "openplanter.session.v2",
+                        "session_id": "v2-c",
+                        "id": "v2-c",
+                        "created_at": "2026-03-22T10:00:00Z",
+                        "updated_at": "2026-03-22T10:00:00Z",
+                        "workspace_path": str(root),
+                        "turn_count": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            sessions = {item["session_id"]: item for item in store.list_sessions()}
+            self.assertEqual(set(sessions), {"legacy-a", "desktop-b", "v2-c"})
+            self.assertEqual(sessions["legacy-a"]["created_at"], "2026-03-20T10:00:00Z")
+            self.assertEqual(sessions["desktop-b"]["created_at"], "2026-03-21T10:00:00Z")
+            self.assertEqual(sessions["v2-c"]["created_at"], "2026-03-22T10:00:00Z")
+
+    def test_open_session_upgrades_mixed_metadata_additively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+
+            legacy_id = "legacy-only"
+            legacy_dir = root / ".openplanter" / "sessions" / legacy_id
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            (legacy_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": legacy_id,
+                        "workspace": str(root),
+                        "created_at": "2026-03-20T00:00:00+00:00",
+                        "updated_at": "2026-03-20T00:00:01+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (legacy_dir / "replay.jsonl").write_text(
+                json.dumps({"type": "header", "conversation_id": "root"}) + "\n",
+                encoding="utf-8",
+            )
+
+            desktop_id = "desktop-only"
+            desktop_dir = root / ".openplanter" / "sessions" / desktop_id
+            desktop_dir.mkdir(parents=True, exist_ok=True)
+            (desktop_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": desktop_id,
+                        "created_at": "2026-03-21T00:00:00+00:00",
+                        "turn_count": 3,
+                        "last_objective": "desktop objective",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (desktop_dir / "events.jsonl").write_text(
+                json.dumps({"type": "trace", "payload": {"message": "old"}}) + "\n",
+                encoding="utf-8",
+            )
+
+            store.open_session(session_id=legacy_id, resume=True)
+            store.open_session(session_id=desktop_id, resume=True)
+
+            legacy_meta = json.loads((legacy_dir / "metadata.json").read_text(encoding="utf-8"))
+            desktop_meta = json.loads((desktop_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(legacy_meta["schema_version"], 2)
+            self.assertEqual(legacy_meta["session_format"], "openplanter.session.v2")
+            self.assertEqual(legacy_meta["session_id"], legacy_id)
+            self.assertEqual(legacy_meta["workspace"], str(root))
+            self.assertTrue(legacy_meta["source_compat"]["legacy_python_metadata"])
+            self.assertTrue(legacy_meta["source_compat"]["legacy_replay_stream_present"])
+
+            self.assertEqual(desktop_meta["schema_version"], 2)
+            self.assertEqual(desktop_meta["session_format"], "openplanter.session.v2")
+            self.assertEqual(desktop_meta["session_id"], desktop_id)
+            self.assertEqual(desktop_meta["id"], desktop_id)
+            self.assertEqual(desktop_meta["turn_count"], 3)
+            self.assertEqual(desktop_meta["last_objective"], "desktop objective")
+            self.assertTrue(desktop_meta["source_compat"]["desktop_metadata"])
+            self.assertTrue(desktop_meta["source_compat"]["legacy_event_stream_present"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,10 @@ class ReplayLoggerUnitTests(unittest.TestCase):
             r = records[0]
             self.assertEqual(r["type"], "header")
             self.assertEqual(r["conversation_id"], "root")
+            self.assertEqual(r["schema_version"], 2)
+            self.assertEqual(r["envelope"], "openplanter.trace.event.v2")
+            self.assertEqual(r["event_type"], "session.started")
+            self.assertEqual(r["channel"], "replay")
             self.assertEqual(r["provider"], "openai")
             self.assertEqual(r["model"], "gpt-5")
             self.assertEqual(r["system_prompt"], "You are helpful.")
@@ -75,6 +79,9 @@ class ReplayLoggerUnitTests(unittest.TestCase):
             r = records[0]
             self.assertEqual(r["type"], "call")
             self.assertEqual(r["seq"], 0)
+            self.assertEqual(r["schema_version"], 2)
+            self.assertEqual(r["envelope"], "openplanter.trace.event.v2")
+            self.assertEqual(r["event_type"], "assistant.message")
             self.assertIn("messages_snapshot", r)
             self.assertNotIn("messages_delta", r)
             self.assertEqual(r["messages_snapshot"], messages)
@@ -311,6 +318,97 @@ class ReplayLoggerUnitTests(unittest.TestCase):
             self.assertEqual(calls[1]["seq"], 1)
             self.assertIn("messages_snapshot", calls[1])
             self.assertNotIn("messages_delta", calls[1])
+
+    def test_logger_appends_v2_records_after_legacy_replay_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "replay.jsonl"
+            p.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "header", "conversation_id": "root"}),
+                        json.dumps(
+                            {
+                                "type": "call",
+                                "conversation_id": "root",
+                                "seq": 4,
+                                "messages_snapshot": [{"role": "user", "content": "legacy"}],
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            logger = ReplayLogger(path=p)
+            logger.log_call(
+                depth=0,
+                step=3,
+                messages=[
+                    {"role": "user", "content": "legacy"},
+                    {"role": "assistant", "content": "new"},
+                ],
+                response={"ok": True},
+            )
+
+            records = self._read_records(p)
+            self.assertEqual(records[-1]["type"], "call")
+            self.assertEqual(records[-1]["seq"], 5)
+            self.assertEqual(records[-1]["schema_version"], 2)
+            self.assertEqual(records[-1]["event_type"], "assistant.message")
+
+    def test_hydrates_state_from_v2_only_records_without_legacy_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "replay.jsonl"
+            p.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "schema_version": 2,
+                                "envelope": "openplanter.trace.event.v2",
+                                "event_id": "evt-header",
+                                "conversation_id": "root",
+                                "event_type": "session.started",
+                                "compat": {"legacy_kind": "header"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "schema_version": 2,
+                                "envelope": "openplanter.trace.event.v2",
+                                "event_id": "evt-000009",
+                                "conversation_id": "root",
+                                "seq": 9,
+                                "payload": {
+                                    "messages_snapshot": [{"role": "user", "content": "old"}],
+                                },
+                                "event_type": "assistant.message",
+                                "compat": {"legacy_kind": "call"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            logger = ReplayLogger(path=p)
+            self.assertFalse(logger.needs_header)
+            logger.log_call(
+                depth=0,
+                step=2,
+                messages=[
+                    {"role": "user", "content": "old"},
+                    {"role": "assistant", "content": "new"},
+                ],
+                response={"r": "ok"},
+            )
+
+            records = self._read_records(p)
+            calls = [record for record in records if record.get("type") == "call"]
+            self.assertEqual(calls[-1]["seq"], 10)
+            self.assertEqual(calls[-1]["messages_delta"], [{"role": "assistant", "content": "new"}])
 
     def test_parallel_child_loggers_keep_seq_unique_and_contiguous(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 _OWNER_SLUG_MAX_CHARS = 24
+TRACE_SCHEMA_VERSION = 2
+TRACE_ENVELOPE = "openplanter.trace.event.v2"
 
 
 def _normalize_owner_slug(owner: str) -> str:
@@ -24,6 +26,11 @@ def _normalize_owner_slug(owner: str) -> str:
 
 def _owner_hash(owner: str) -> str:
     return hashlib.sha1(owner.encode("utf-8")).hexdigest()[:8]
+
+
+def _trace_event_id(*parts: object) -> str:
+    digest = hashlib.sha1(":".join(str(part) for part in parts).encode("utf-8")).hexdigest()[:12]
+    return f"evt-{digest}"
 
 
 @dataclass
@@ -48,6 +55,8 @@ class ReplayLogger:
     path: Path
     conversation_id: str = "root"
     force_snapshot_first_call: bool = False
+    session_id: str | None = None
+    turn_id: str | None = None
     _seq: int = field(default=0, init=False)
     _last_msg_count: int = field(default=0, init=False)
     _has_call: bool = field(default=False, init=False)
@@ -85,6 +94,8 @@ class ReplayLogger:
             path=self.path,
             conversation_id=child_id,
             force_snapshot_first_call=self.force_snapshot_first_call,
+            session_id=self.session_id,
+            turn_id=self.turn_id,
         )
 
     def write_header(
@@ -98,6 +109,17 @@ class ReplayLogger:
         reasoning_effort: str | None = None,
         temperature: float | None = None,
     ) -> None:
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        line = self._next_line_number_locked()
+        payload: dict[str, Any] = {
+            "base_url": base_url,
+            "system_prompt": system_prompt,
+            "tool_defs": tool_defs,
+        }
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            payload["temperature"] = temperature
         record: dict[str, Any] = {
             "type": "header",
             "conversation_id": self.conversation_id,
@@ -106,6 +128,43 @@ class ReplayLogger:
             "base_url": base_url,
             "system_prompt": system_prompt,
             "tool_defs": tool_defs,
+            "schema_version": TRACE_SCHEMA_VERSION,
+            "envelope": TRACE_ENVELOPE,
+            "event_id": _trace_event_id(self._resolved_session_id(), self.conversation_id, "header"),
+            "session_id": self._resolved_session_id(),
+            "turn_id": self.turn_id,
+            "recorded_at": recorded_at,
+            "event_type": "session.started",
+            "channel": "replay",
+            "status": "info",
+            "actor": {
+                "kind": "runtime",
+                "id": self.conversation_id,
+                "display": "OpenPlanter",
+                "runtime_family": "python",
+                "provider": provider,
+                "model": model,
+            },
+            "payload": payload,
+            "failure": None,
+            "provenance": {
+                "record_locator": {"file": self.path.name, "line": line},
+                "parent_event_id": None,
+                "caused_by": [],
+                "source_refs": [],
+                "evidence_refs": [],
+                "ontology_refs": [],
+                "generated_from": {
+                    "provider": provider,
+                    "model": model,
+                    "conversation_id": self.conversation_id,
+                },
+            },
+            "compat": {
+                "legacy_role": None,
+                "legacy_kind": "header",
+                "source_schema": "legacy-python-replay-v1",
+            },
         }
         if reasoning_effort is not None:
             record["reasoning_effort"] = reasoning_effort
@@ -128,13 +187,30 @@ class ReplayLogger:
     ) -> None:
         with self._file_state.lock:
             seq = self._ensure_next_seq_locked()
+            ts = datetime.now(timezone.utc).isoformat()
+            line = self._next_line_number_locked()
             record: dict[str, Any] = {
                 "type": "call",
                 "conversation_id": self.conversation_id,
                 "seq": seq,
                 "depth": depth,
                 "step": step,
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": ts,
+                "schema_version": TRACE_SCHEMA_VERSION,
+                "envelope": TRACE_ENVELOPE,
+                "event_id": _trace_event_id(self._resolved_session_id(), self.conversation_id, seq),
+                "session_id": self._resolved_session_id(),
+                "turn_id": self.turn_id,
+                "recorded_at": ts,
+                "event_type": "assistant.message",
+                "channel": "replay",
+                "status": "completed",
+                "actor": {
+                    "kind": "assistant",
+                    "id": self.conversation_id,
+                    "display": "OpenPlanter",
+                    "runtime_family": "python",
+                },
             }
             if not self._has_call:
                 record["messages_snapshot"] = messages
@@ -144,6 +220,41 @@ class ReplayLogger:
             record["input_tokens"] = input_tokens
             record["output_tokens"] = output_tokens
             record["elapsed_sec"] = round(elapsed_sec, 3)
+            record["payload"] = {
+                "conversation_id": self.conversation_id,
+                "depth": depth,
+                "step": step,
+                "messages_snapshot": record.get("messages_snapshot"),
+                "messages_delta": record.get("messages_delta"),
+                "response": response,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "elapsed_sec": round(elapsed_sec, 3),
+            }
+            record["failure"] = None
+            record["provenance"] = {
+                "record_locator": {"file": self.path.name, "line": line},
+                "parent_event_id": None,
+                "caused_by": [],
+                "source_refs": [
+                    {
+                        "kind": "jsonl_record",
+                        "file": self.path.name,
+                        "line": line,
+                        "event_id": record["event_id"],
+                    }
+                ],
+                "evidence_refs": [],
+                "ontology_refs": [],
+                "generated_from": {
+                    "conversation_id": self.conversation_id,
+                },
+            }
+            record["compat"] = {
+                "legacy_role": None,
+                "legacy_kind": "call",
+                "source_schema": "legacy-python-replay-v1",
+            }
 
             self._append_locked(record)
             self._file_state.next_seq = seq + 1
@@ -199,22 +310,66 @@ class ReplayLogger:
                     continue
                 if record.get("conversation_id") != self.conversation_id:
                     continue
-                if record.get("type") == "header":
+                record_type = self._record_kind(record)
+                if record_type == "header":
                     has_header = True
                     continue
-                if record.get("type") != "call":
+                if record_type != "call":
                     continue
                 has_call = True
                 snapshot = record.get("messages_snapshot")
+                if not isinstance(snapshot, list):
+                    payload = record.get("payload")
+                    if isinstance(payload, dict):
+                        snapshot = payload.get("messages_snapshot")
                 if isinstance(snapshot, list):
                     msg_count = len(snapshot)
                     continue
                 delta = record.get("messages_delta")
+                if not isinstance(delta, list):
+                    payload = record.get("payload")
+                    if isinstance(payload, dict):
+                        delta = payload.get("messages_delta")
                 if isinstance(delta, list):
                     msg_count += len(delta)
         self._has_call = has_call
         self._has_header = has_header
         self._last_msg_count = msg_count
+
+    def _resolved_session_id(self) -> str | None:
+        if self.session_id is not None:
+            return self.session_id
+        parent_name = self.path.parent.name.strip()
+        return parent_name or None
+
+    def _next_line_number_locked(self) -> int:
+        if not self.path.exists():
+            return 1
+        line_count = 0
+        for raw_line in self.path.read_text(encoding="utf-8").splitlines():
+            if raw_line.strip():
+                line_count += 1
+        return line_count + 1
+
+    @staticmethod
+    def _record_kind(record: dict[str, Any]) -> str | None:
+        record_type = record.get("type")
+        if record_type in {"header", "call"}:
+            return record_type
+        compat = record.get("compat")
+        if isinstance(compat, dict):
+            legacy_kind = compat.get("legacy_kind")
+            if legacy_kind in {"header", "call"}:
+                return legacy_kind
+        if record.get("envelope") != TRACE_ENVELOPE:
+            return None
+        if record.get("event_type") == "session.started":
+            return "header"
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            if isinstance(payload.get("messages_snapshot"), list) or isinstance(payload.get("messages_delta"), list):
+                return "call"
+        return None
 
     def _append_locked(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

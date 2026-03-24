@@ -70,6 +70,165 @@ def _result_status(result: str, loop_metrics: dict[str, Any]) -> str:
     return "final"
 
 
+SESSION_SCHEMA_VERSION = 2
+SESSION_FORMAT = "openplanter.session.v2"
+TRACE_SCHEMA_VERSION = 2
+TRACE_ENVELOPE = "openplanter.trace.event.v2"
+TURN_RECORD_FORMAT = "openplanter.trace.turn.v2"
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _turn_id(turn_index: int) -> str:
+    return f"turn-{turn_index:06d}"
+
+
+def _metadata_session_id(metadata: dict[str, Any], fallback: str) -> str:
+    session_id = metadata.get("session_id")
+    if isinstance(session_id, str) and session_id.strip():
+        return session_id.strip()
+    legacy_id = metadata.get("id")
+    if isinstance(legacy_id, str) and legacy_id.strip():
+        return legacy_id.strip()
+    return fallback
+
+
+def _metadata_workspace_path(metadata: dict[str, Any], fallback: str) -> str:
+    workspace_path = metadata.get("workspace_path")
+    if isinstance(workspace_path, str) and workspace_path.strip():
+        return workspace_path
+    workspace = metadata.get("workspace")
+    if isinstance(workspace, str) and workspace.strip():
+        return workspace
+    return fallback
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _turn_outcome_status(status: str) -> str:
+    return {
+        "final": "completed",
+        "error": "failed",
+        "partial": "partial",
+        "cancelled": "cancelled",
+    }.get(status, "completed")
+
+
+def _failure_for_result(
+    status: str,
+    loop_metrics: dict[str, Any],
+    result: str,
+) -> dict[str, Any] | None:
+    reason = str(loop_metrics.get("termination_reason", "") or "")
+    details = {"termination_reason": reason}
+    if status == "cancelled":
+        return {
+            "code": "cancelled",
+            "category": "user_action",
+            "phase": "model_completion",
+            "retryable": False,
+            "resumable": True,
+            "user_visible": True,
+            "message": "Task cancelled.",
+            "details": details,
+        }
+    if status == "error":
+        if reason == "time_limit":
+            code = "timeout"
+            category = "runtime"
+            message = "Turn exceeded the configured time limit."
+        elif reason == "model_error":
+            code = "provider_error"
+            category = "external"
+            message = "Model completion failed."
+        else:
+            code = "unknown_error"
+            category = "unknown"
+            message = f"Turn failed ({reason or 'unknown'})."
+        return {
+            "code": code,
+            "category": category,
+            "phase": "model_completion",
+            "retryable": False,
+            "resumable": True,
+            "user_visible": True,
+            "message": message,
+            "details": details,
+        }
+    if status == "partial":
+        return {
+            "code": "degraded",
+            "category": "runtime",
+            "phase": "model_completion",
+            "retryable": False,
+            "resumable": True,
+            "user_visible": True,
+            "message": result if result.startswith("Partial completion") else f"Turn ended partially ({reason or 'unknown'}).",
+            "details": details,
+        }
+    return None
+
+
+def _event_type_for_legacy(event_type: str, payload: dict[str, Any]) -> str:
+    if "." in event_type:
+        return event_type
+    if event_type == "session_started":
+        return "session.resumed" if payload.get("resume") else "session.started"
+    if event_type == "objective":
+        return "turn.objective"
+    if event_type == "step":
+        return "step.summary"
+    if event_type == "trace":
+        return "trace.note"
+    if event_type == "artifact":
+        return "artifact.created"
+    if event_type == "result":
+        status = str(payload.get("status") or "")
+        if status == "cancelled":
+            return "turn.cancelled"
+        if status == "error":
+            return "turn.failed"
+        if status == "partial":
+            return "result.summary"
+        return "assistant.final"
+    return f"legacy.{event_type}"
+
+
+def _event_status(event_type: str, payload: dict[str, Any]) -> str:
+    if event_type in {"session.started", "session.resumed"}:
+        return "info"
+    if event_type == "turn.objective":
+        return "started"
+    if event_type.startswith("trace."):
+        return "info"
+    if event_type == "turn.failed":
+        return "failed"
+    if event_type == "turn.cancelled":
+        return "cancelled"
+    if event_type == "result.summary" and str(payload.get("status") or "") == "partial":
+        return "partial"
+    return "completed"
+
+
 @dataclass
 class SessionStore:
     workspace: Path
@@ -96,6 +255,9 @@ class SessionStore:
 
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
+
+    def _turns_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "turns.jsonl"
 
     def _artifacts_dir(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "artifacts"
@@ -126,9 +288,10 @@ class SessionStore:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     meta = {}
+            session_id = _metadata_session_id(meta, path.name)
             out.append(
                 {
-                    "session_id": path.name,
+                    "session_id": session_id,
                     "path": str(path),
                     "created_at": meta.get("created_at"),
                     "updated_at": meta.get("updated_at"),
@@ -164,13 +327,10 @@ class SessionStore:
 
         meta_path = self._metadata_path(sid)
         if not meta_path.exists():
-            meta = {
-                "session_id": sid,
-                "workspace": str(self.workspace),
-                "created_at": _utc_now(),
-                "updated_at": _utc_now(),
-            }
+            meta = self._canonicalize_metadata({}, sid, continuity_mode="resume" if resume else "new")
             meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        else:
+            self._touch_metadata(sid, continuity_mode="resume" if resume else None)
 
         state = self.load_state(sid)
         return sid, state, created_new
@@ -283,15 +443,77 @@ class SessionStore:
         save_investigation_state(investigation_path, typed_state)
         self._touch_metadata(session_id)
 
-    def append_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    def append_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
         event_path = self._events_path(session_id)
+        seq = self._next_seq(event_path)
+        line = self._next_line_number(event_path)
+        recorded_at = _utc_now()
+        event_type_v2 = _event_type_for_legacy(event_type, payload)
+        status = _event_status(event_type_v2, payload)
+        resolved_turn_id = turn_id
+        payload_turn_id = payload.get("turn_id")
+        if resolved_turn_id is None and isinstance(payload_turn_id, str) and payload_turn_id:
+            resolved_turn_id = payload_turn_id
+        failure = None
+        if event_type == "result":
+            loop_metrics = payload.get("loop_metrics")
+            failure = _failure_for_result(
+                str(payload.get("status") or ""),
+                loop_metrics if isinstance(loop_metrics, dict) else {},
+                str(payload.get("text") or ""),
+            )
         event = {
-            "ts": _utc_now(),
+            "schema_version": TRACE_SCHEMA_VERSION,
+            "envelope": TRACE_ENVELOPE,
+            "event_id": f"evt:event:{session_id}:{seq:06d}",
+            "session_id": session_id,
+            "turn_id": resolved_turn_id,
+            "seq": seq,
+            "recorded_at": recorded_at,
+            "event_type": event_type_v2,
+            "channel": "event",
+            "status": status,
+            "actor": {
+                "kind": "runtime",
+                "id": "python-runtime",
+                "display": "OpenPlanter Python Runtime",
+                "runtime_family": "python",
+            },
+            "failure": failure,
+            "provenance": {
+                "record_locator": {"file": event_path.name, "line": line},
+                "parent_event_id": None,
+                "caused_by": [],
+                "source_refs": [],
+                "evidence_refs": [],
+                "ontology_refs": [],
+                "generated_from": {},
+            },
+            "compat": {
+                "legacy_role": None,
+                "legacy_kind": event_type,
+                "source_schema": "legacy-python-events-v1",
+            },
+            "ts": recorded_at,
             "type": event_type,
             "payload": payload,
         }
         with event_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=True) + "\n")
+        self._touch_metadata(session_id)
+        return event
+
+    def append_turn_record(self, session_id: str, record: dict[str, Any]) -> None:
+        turn_path = self._turns_path(session_id)
+        with turn_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=True) + "\n")
         self._touch_metadata(session_id)
 
     def write_artifact(
@@ -306,19 +528,156 @@ class SessionStore:
         self._touch_metadata(session_id)
         return artifact_rel.as_posix()
 
-    def _touch_metadata(self, session_id: str) -> None:
+    def _touch_metadata(self, session_id: str, continuity_mode: str | None = None) -> None:
         meta_path = self._metadata_path(session_id)
-        base: dict[str, Any] = {}
-        if meta_path.exists():
+        base = _read_json_object(meta_path)
+        canonical = self._canonicalize_metadata(base, session_id, continuity_mode=continuity_mode)
+        meta_path.write_text(json.dumps(canonical, indent=2), encoding="utf-8")
+
+    def _next_line_number(self, path: Path) -> int:
+        if not path.exists():
+            return 1
+        line_count = 0
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            if raw_line.strip():
+                line_count += 1
+        return line_count + 1
+
+    def _next_seq(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        next_seq = 0
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
             try:
-                base = json.loads(meta_path.read_text(encoding="utf-8"))
+                record = json.loads(line)
             except json.JSONDecodeError:
-                base = {}
-        base["session_id"] = session_id
-        base["workspace"] = str(self.workspace)
-        base.setdefault("created_at", _utc_now())
-        base["updated_at"] = _utc_now()
-        meta_path.write_text(json.dumps(base, indent=2), encoding="utf-8")
+                continue
+            seq = record.get("seq")
+            if isinstance(seq, int) and seq >= next_seq:
+                next_seq = seq + 1
+        return next_seq
+
+    def _canonicalize_metadata(
+        self,
+        base: dict[str, Any],
+        session_id: str,
+        *,
+        continuity_mode: str | None = None,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        session_dir = self._session_dir(session_id)
+        state_data = _read_json_object(self._state_path(session_id))
+        turn_history = state_data.get("turn_history") if isinstance(state_data.get("turn_history"), list) else []
+        state_turn_count = len(turn_history)
+        last_history = turn_history[-1] if turn_history and isinstance(turn_history[-1], dict) else {}
+
+        turns_path = self._turns_path(session_id)
+        turn_record_count = 0
+        last_turn_record: dict[str, Any] = {}
+        if turns_path.exists():
+            for raw_line in turns_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                turn_record_count += 1
+                last_turn_record = record
+
+        turn_count = max(_coerce_int(base.get("turn_count"), 0), state_turn_count, turn_record_count)
+        status = base.get("status")
+        if not isinstance(status, str) or not status:
+            status = "active"
+        outcome = last_turn_record.get("outcome")
+        if isinstance(outcome, dict):
+            outcome_status = outcome.get("status")
+            if isinstance(outcome_status, str) and outcome_status:
+                status = outcome_status
+
+        source_compat = base.get("source_compat")
+        if isinstance(source_compat, dict):
+            compat = {
+                "legacy_python_metadata": bool(source_compat.get("legacy_python_metadata")),
+                "desktop_metadata": bool(source_compat.get("desktop_metadata")),
+                "legacy_event_stream_present": bool(source_compat.get("legacy_event_stream_present")) or self._events_path(session_id).exists(),
+                "legacy_replay_stream_present": bool(source_compat.get("legacy_replay_stream_present")) or (session_dir / "replay.jsonl").exists(),
+            }
+        else:
+            compat = {
+                "legacy_python_metadata": any(key in base for key in ("workspace", "session_id")),
+                "desktop_metadata": "id" in base and "session_id" not in base,
+                "legacy_event_stream_present": self._events_path(session_id).exists(),
+                "legacy_replay_stream_present": (session_dir / "replay.jsonl").exists(),
+            }
+
+        capabilities = dict(base.get("capabilities")) if isinstance(base.get("capabilities"), dict) else {}
+        capabilities.setdefault("supports_events_v2", True)
+        capabilities.setdefault("supports_replay_v2", True)
+        capabilities.setdefault("supports_turns_v2", True)
+        capabilities.setdefault("supports_provenance_links", True)
+        capabilities.setdefault("supports_failure_taxonomy_v2", True)
+
+        durability = dict(base.get("durability")) if isinstance(base.get("durability"), dict) else {}
+        durability["events_jsonl_present"] = self._events_path(session_id).exists()
+        durability["replay_jsonl_present"] = (session_dir / "replay.jsonl").exists()
+        durability["turns_jsonl_present"] = turns_path.exists()
+        durability.setdefault("partial_records_possible", True)
+
+        last_turn_id = base.get("last_turn_id")
+        if not isinstance(last_turn_id, str) or not last_turn_id:
+            candidate = last_turn_record.get("turn_id")
+            if isinstance(candidate, str) and candidate:
+                last_turn_id = candidate
+            elif turn_count > 0:
+                last_turn_id = _turn_id(turn_count)
+            else:
+                last_turn_id = None
+
+        last_objective = base.get("last_objective")
+        if not isinstance(last_objective, str) or not last_objective:
+            candidate = last_turn_record.get("objective")
+            if isinstance(candidate, str) and candidate:
+                last_objective = candidate
+            else:
+                candidate = last_history.get("objective")
+                last_objective = candidate if isinstance(candidate, str) and candidate else None
+
+        canonical = dict(base)
+        canonical["schema_version"] = SESSION_SCHEMA_VERSION
+        canonical["session_format"] = SESSION_FORMAT
+        canonical["session_id"] = _metadata_session_id(base, session_id)
+        canonical["id"] = str(base.get("id") or canonical["session_id"])
+        canonical["workspace"] = str(base.get("workspace") or self.workspace)
+        canonical["workspace_path"] = _metadata_workspace_path(base, canonical["workspace"])
+        canonical.setdefault("workspace_id", None)
+        canonical["created_at"] = str(base.get("created_at") or now)
+        canonical["updated_at"] = now
+        canonical.setdefault("session_origin", "python")
+        canonical.setdefault("session_kind", "investigation")
+        canonical["status"] = status
+        canonical["turn_count"] = turn_count
+        canonical["last_turn_id"] = last_turn_id
+        canonical["last_objective"] = last_objective
+        if continuity_mode is not None:
+            canonical["continuity_mode"] = continuity_mode
+        else:
+            existing_mode = base.get("continuity_mode")
+            if isinstance(existing_mode, str) and existing_mode:
+                canonical["continuity_mode"] = existing_mode
+            else:
+                canonical["continuity_mode"] = "resume" if turn_count else "new"
+        canonical["source_compat"] = compat
+        canonical["capabilities"] = capabilities
+        canonical["durability"] = durability
+        canonical.setdefault("migration", None)
+        return canonical
 
 
 def _seed_wiki(workspace: Path, session_root_dir: str) -> None:
@@ -469,12 +828,19 @@ class SessionRuntime:
         objective = objective.strip()
         if not objective:
             return "No objective provided."
+        turn_number = (self.turn_history[-1].turn_number + 1) if self.turn_history else 1
+        turn_id = _turn_id(turn_number)
+        turn_started_at = _utc_now()
+        event_seq_start = self.store._next_seq(self.store._events_path(self.session_id))
+        artifact_refs: list[str] = []
+        objective_event: dict[str, Any] | None = None
 
         try:
-            self.store.append_event(
+            objective_event = self.store.append_event(
                 self.session_id,
                 "objective",
                 {"text": objective},
+                turn_id=turn_id,
             )
         except OSError:
             pass
@@ -486,6 +852,7 @@ class SessionRuntime:
                     self.session_id,
                     "trace",
                     {"message": msg},
+                    turn_id=turn_id,
                 )
             except OSError:
                 pass
@@ -495,7 +862,7 @@ class SessionRuntime:
         def _combined_on_step(step_event: dict[str, Any]) -> None:
             nonlocal patch_counter
             try:
-                self.store.append_event(self.session_id, "step", step_event)
+                self.store.append_event(self.session_id, "step", step_event, turn_id=turn_id)
             except OSError:
                 pass
             action = step_event.get("action")
@@ -514,10 +881,12 @@ class SessionRuntime:
                             name=name,
                             content=patch_text,
                         )
+                        artifact_refs.append(artifact_rel)
                         self.store.append_event(
                             self.session_id,
                             "artifact",
                             {"kind": "patch", "path": artifact_rel},
+                            turn_id=turn_id,
                         )
                     except OSError:
                         pass
@@ -529,7 +898,12 @@ class SessionRuntime:
                     pass
 
         replay_path = self.store._session_dir(self.session_id) / "replay.jsonl"
-        replay_logger = ReplayLogger(path=replay_path, force_snapshot_first_call=True)
+        replay_logger = ReplayLogger(
+            path=replay_path,
+            force_snapshot_first_call=True,
+            session_id=self.session_id,
+            turn_id=turn_id,
+        )
         replay_seq_start = replay_logger.current_seq
 
         typed_state = self.store.load_typed_state(self.session_id)
@@ -608,7 +982,6 @@ class SessionRuntime:
         # Generate turn summary
         if self.turn_history is None:
             self.turn_history = []
-        turn_number = (self.turn_history[-1].turn_number + 1) if self.turn_history else 1
         result_preview = result[:200] + "..." if len(result) > 200 else result
         replay_seq_end = replay_logger.current_seq
         steps_used = max(0, replay_seq_end - replay_seq_start)
@@ -624,14 +997,84 @@ class SessionRuntime:
         if len(self.turn_history) > self.max_turn_summaries:
             self.turn_history = self.turn_history[-self.max_turn_summaries:]
         status = _result_status(result, latest_loop_metrics)
+        result_event: dict[str, Any] | None = None
         try:
-            self.store.append_event(
+            result_event = self.store.append_event(
                 self.session_id,
                 "result",
                 {
                     "text": result,
                     "status": status,
                     "loop_metrics": latest_loop_metrics,
+                },
+                turn_id=turn_id,
+            )
+        except OSError:
+            pass
+        event_seq_end = max(event_seq_start, self.store._next_seq(self.store._events_path(self.session_id)) - 1)
+        result_event_id = result_event.get("event_id") if isinstance(result_event, dict) else None
+        objective_event_id = objective_event.get("event_id") if isinstance(objective_event, dict) else None
+        failure = _failure_for_result(status, latest_loop_metrics, result)
+        try:
+            self.store.append_turn_record(
+                self.session_id,
+                {
+                    "schema_version": SESSION_SCHEMA_VERSION,
+                    "record": TURN_RECORD_FORMAT,
+                    "session_id": self.session_id,
+                    "turn_id": turn_id,
+                    "turn_index": turn_number,
+                    "started_at": turn_started_at,
+                    "ended_at": _utc_now(),
+                    "objective": objective,
+                    "continuity": {
+                        "mode": "resume" if turn_number > 1 else "new",
+                        "resumed_from_turn_id": _turn_id(turn_number - 1) if turn_number > 1 else None,
+                        "resumed_from_partial": False,
+                        "checkpoint_ref": None,
+                    },
+                    "inputs": {
+                        "user_message_ref": objective_event_id,
+                        "attachments": [],
+                        "context_refs": [],
+                    },
+                    "outputs": {
+                        "assistant_final_ref": result_event_id,
+                        "result_summary_ref": result_event_id,
+                        "artifact_refs": artifact_refs,
+                    },
+                    "execution": {
+                        "step_count": int(latest_loop_metrics.get("steps", 0)),
+                        "tool_call_count": int(latest_loop_metrics.get("tool_calls", 0)),
+                        "degraded": status == "partial",
+                        "resumed": turn_number > 1,
+                    },
+                    "outcome": {
+                        "status": _turn_outcome_status(status),
+                        "failure_code": failure["code"] if failure is not None else None,
+                        "failure": failure,
+                        "summary": result_preview,
+                    },
+                    "provenance": {
+                        "event_span": {
+                            "start_seq": event_seq_start,
+                            "end_seq": event_seq_end,
+                        },
+                        "replay_span": {
+                            "start_seq": replay_seq_start,
+                            "end_seq": replay_seq_end - 1 if replay_seq_end > replay_seq_start else replay_seq_start,
+                        },
+                        "evidence_refs": [
+                            {
+                                "kind": "artifact",
+                                "id": path,
+                                "label": path,
+                                "locator": {"path": path},
+                            }
+                            for path in artifact_refs
+                        ],
+                        "ontology_refs": [],
+                    },
                 },
             )
         except OSError:
