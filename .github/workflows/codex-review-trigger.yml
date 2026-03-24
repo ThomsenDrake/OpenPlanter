@@ -50,43 +50,41 @@ jobs:
               per_page: 100,
             });
 
-            const existing = comments.find((comment) =>
+            const markerComments = comments.filter((comment) =>
               comment.user?.login === 'github-actions[bot]' &&
-              comment.body?.includes(marker) &&
+              comment.body?.includes(marker)
+            );
+            const existing = markerComments.find((comment) =>
               comment.body?.includes(shaLine)
             );
+            const staleComments = markerComments.filter((comment) =>
+              !comment.body?.includes(shaLine)
+            );
 
-            if (existing) {
+            if (!existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pull_number,
+                body,
+              });
+              core.notice(`Posted Codex review trigger for ${headSha}.`);
+            } else {
               core.notice(`Codex review trigger already exists for ${headSha}.`);
-              return;
             }
 
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: pull_number,
-              body,
-            });
-
-            for (const comment of comments) {
-              if (
-                comment.user?.login === 'github-actions[bot]' &&
-                comment.body?.includes(marker)
-              ) {
-                try {
-                  await github.rest.issues.deleteComment({
-                    owner,
-                    repo,
-                    comment_id: comment.id,
-                  });
-                } catch (error) {
-                  if (error.status === 404) {
-                    core.notice(`Comment ${comment.id} was already removed by another run.`);
-                    continue;
-                  }
-                  throw error;
+            for (const comment of staleComments) {
+              try {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+              } catch (error) {
+                if (error.status === 404) {
+                  core.notice(`Comment ${comment.id} was already removed by another run.`);
+                  continue;
                 }
+                throw error;
               }
             }
-
-            core.notice(`Posted Codex review trigger for ${headSha}.`);
