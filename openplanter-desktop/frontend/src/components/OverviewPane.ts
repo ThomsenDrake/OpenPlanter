@@ -71,8 +71,6 @@ interface ReplaySummary {
 }
 
 const CURATED_REPLAY_LIMIT = 14;
-const FAILURE_PATTERN =
-  /(^error[:\s])|(\bfailed(?:\s+to)?\b)|(\brate limit\b)|(\btimed out\b)|(\btimeout\b)|(\bdegraded\b)|(\bcancelled\b)/i;
 const CURATED_REPLAY_ROLES = new Set([
   "assistant",
   "assistant-cancelled",
@@ -263,6 +261,26 @@ export function createOverviewPane(): HTMLElement {
     return truncate(text, 280);
   }
 
+  function looksLikeFailurePreview(text: string): boolean {
+    const normalized = text.trim().toLowerCase();
+    if (!normalized) return false;
+    if (normalized.includes("rate limit")) return true;
+    return [
+      "error:",
+      "request failed",
+      "run failed",
+      "solve failed",
+      "operation failed",
+      "failed to",
+      "timed out",
+      "timeout",
+      "degraded",
+      "task cancelled",
+      "cancelled",
+      "cancellation requested",
+    ].some((prefix) => normalized.startsWith(prefix));
+  }
+
   function isFailureEntry(entry: ReplayEntry): boolean {
     const normalized = normalizeReplayRole(entry.role);
     if (normalized === "user") return false;
@@ -272,7 +290,7 @@ export function createOverviewPane(): HTMLElement {
     return (
       normalized === "assistant-cancelled" ||
       normalized.includes("error") ||
-      FAILURE_PATTERN.test(replayPreview(entry))
+      looksLikeFailurePreview(replayPreview(entry))
     );
   }
 
