@@ -1,0 +1,164 @@
+name: Codex Review Gate
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+  pull_request_review:
+    types:
+      - submitted
+      - edited
+      - dismissed
+  issue_comment:
+    types:
+      - created
+      - edited
+      - deleted
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+env:
+  CODEX_REVIEW_LOGINS: ${{ vars.CODEX_REVIEW_LOGINS }}
+
+jobs:
+  codex-review-gate:
+    name: Codex Review Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify Codex has reviewed this pull request
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const expectedLogins = (process.env.CODEX_REVIEW_LOGINS || 'chatgpt-codex-connector[bot]')
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean);
+            const acceptedStates = new Set([
+              'APPROVED',
+              'CHANGES_REQUESTED',
+              'COMMENTED',
+            ]);
+            const boundaryEvents = new Set([
+              'committed',
+              'ready_for_review',
+            ]);
+            const ignoredCommentSnippets = [
+              'create a Codex account and connect to github',
+            ];
+
+            async function loadPullRequest() {
+              if (context.payload.pull_request) {
+                return context.payload.pull_request;
+              }
+
+              const issue = context.payload.issue;
+              if (!issue?.pull_request) {
+                return null;
+              }
+
+              const response = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: issue.number,
+              });
+              return response.data;
+            }
+
+            function isQualifyingCodexComment(body) {
+              if (!body) {
+                return false;
+              }
+
+              const normalizedBody = body.toLowerCase();
+              return !ignoredCommentSnippets.some((snippet) =>
+                normalizedBody.includes(snippet.toLowerCase())
+              );
+            }
+
+            const pr = await loadPullRequest();
+            if (!pr) {
+              core.notice('No pull request context was provided for this event.');
+              return;
+            }
+
+            if (pr.draft) {
+              core.notice('Draft pull request detected; Codex review is only required after the PR is ready for review.');
+              return;
+            }
+
+            const timeline = await github.paginate(
+              github.request,
+              'GET /repos/{owner}/{repo}/issues/{issue_number}/timeline',
+              {
+                owner,
+                repo,
+                issue_number: pr.number,
+                per_page: 100,
+                headers: {
+                  accept: 'application/vnd.github+json',
+                },
+              }
+            );
+
+            let boundaryIndex = -1;
+            for (const [index, item] of timeline.entries()) {
+              if (boundaryEvents.has(item.event)) {
+                boundaryIndex = index;
+              }
+            }
+
+            const matches = timeline
+              .map((item, index) => ({ ...item, index }))
+              .filter((item) => item.index > boundaryIndex)
+              .filter((item) => {
+                const login = item.user?.login || item.actor?.login || '';
+                if (!expectedLogins.includes(login)) {
+                  return false;
+                }
+
+                if (item.event === 'reviewed') {
+                  return acceptedStates.has(String(item.state || '').toUpperCase());
+                }
+
+                if (item.event === 'commented') {
+                  return isQualifyingCodexComment(item.body || '');
+                }
+
+                return false;
+              })
+              .sort((left, right) =>
+                new Date(right.submitted_at || right.created_at || right.updated_at || 0) -
+                new Date(left.submitted_at || left.created_at || left.updated_at || 0)
+              );
+
+            if (matches.length === 0) {
+              const boundaryDescription = boundaryIndex >= 0
+                ? `after the latest ${timeline[boundaryIndex].event.replaceAll('_', ' ')} event`
+                : 'for this pull request';
+              core.setFailed(
+                `Missing Codex review. Expected one of [${expectedLogins.join(', ')}] to comment or review ${boundaryDescription} before merge.`
+              );
+              return;
+            }
+
+            const latest = matches[0];
+            const latestLogin = latest.user?.login || latest.actor?.login || 'unknown';
+            const latestUrl = latest.html_url || latest.url || 'no-url';
+            core.notice(
+              `Found Codex activity from ${latestLogin} (${latest.event}) at ${latest.submitted_at || latest.created_at || latest.updated_at}. ${latestUrl}`
+            );
