@@ -1,0 +1,80 @@
+name: Codex Review Trigger
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  codex-review-trigger:
+    name: Codex Review Trigger
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft }}
+
+    steps:
+      - name: Request Codex cloud review
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const marker = '<!-- codex-review-trigger -->';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const shaLine = `Head SHA: \`${headSha}\``;
+            const body = [
+              marker,
+              '@codex review',
+              '',
+              'Please review this pull request for correctness, regressions, and missing tests.',
+              '',
+              shaLine,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pull_number,
+              per_page: 100,
+            });
+
+            const existing = comments.find((comment) =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.includes(marker) &&
+              comment.body?.includes(shaLine)
+            );
+
+            if (existing) {
+              core.notice(`Codex review trigger already exists for ${headSha}.`);
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pull_number,
+              body,
+            });
+
+            for (const comment of comments) {
+              if (
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker)
+              ) {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
+            core.notice(`Posted Codex review trigger for ${headSha}.`);
