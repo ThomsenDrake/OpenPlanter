@@ -1,0 +1,84 @@
+name: Devin Review Gate
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - review_requested
+      - review_request_removed
+      - converted_to_draft
+  pull_request_review:
+    types:
+      - submitted
+      - edited
+      - dismissed
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DEVIN_REVIEW_LOGINS: ${{ vars.DEVIN_REVIEW_LOGINS }}
+
+jobs:
+  devin-review-gate:
+    name: Devin Review Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify Devin has reviewed this pull request
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed('No pull request payload was provided.');
+              return;
+            }
+
+            if (pr.draft) {
+              core.notice('Draft pull request detected; Devin review is only required after the PR is ready for review.');
+              return;
+            }
+
+            const expectedLogins = (process.env.DEVIN_REVIEW_LOGINS || 'devin-ai-integration[bot]')
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean);
+            const acceptedStates = new Set([
+              'APPROVED',
+              'CHANGES_REQUESTED',
+              'COMMENTED',
+            ]);
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const matches = reviews
+              .filter((review) =>
+                expectedLogins.includes(review.user?.login || '') &&
+                acceptedStates.has(review.state)
+              )
+              .sort((left, right) =>
+                new Date(right.submitted_at || right.updated_at || 0) -
+                new Date(left.submitted_at || left.updated_at || 0)
+              );
+
+            if (matches.length === 0) {
+              core.setFailed(
+                `Missing Devin review. Expected one of [${expectedLogins.join(', ')}] to submit a PR review before merge.`
+              );
+              return;
+            }
+
+            const latest = matches[0];
+            core.notice(
+              `Found Devin review from ${latest.user.login} with state ${latest.state} at ${latest.submitted_at || latest.updated_at}.`
+            );

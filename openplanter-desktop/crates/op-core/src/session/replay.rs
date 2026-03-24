@@ -98,16 +98,14 @@ impl ReplayLogger {
         }
         let content = fs::read_to_string(path).await?;
         let mut max_seq = 0_u64;
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
             match serde_json::from_str::<Value>(trimmed) {
                 Ok(value) => {
-                    if let Some(seq) = extract_seq(&value) {
-                        max_seq = max_seq.max(seq);
-                    }
+                    max_seq = max_seq.max(extracted_or_line_seq(&value, (line_no + 1) as u64));
                 }
                 Err(err) => {
                     eprintln!("[replay] skipping malformed line while scanning seq: {err}");
@@ -229,7 +227,7 @@ fn adapt_legacy_header(value: &Value, line_seq: u64) -> Option<ReplayEntry> {
         .unwrap_or_else(|| "Session started".to_string());
 
     Some(ReplayEntry {
-        seq: extract_seq(value).unwrap_or(line_seq),
+        seq: extracted_or_line_seq(value, line_seq),
         timestamp: recorded_at(value),
         role: "system".into(),
         content,
@@ -259,7 +257,7 @@ fn adapt_legacy_call(value: &Value, line_seq: u64) -> Option<ReplayEntry> {
         .or_else(|| payload_string_field(value, "conversation_id"));
 
     Some(ReplayEntry {
-        seq: extract_seq(value).unwrap_or(line_seq),
+        seq: extracted_or_line_seq(value, line_seq),
         timestamp: recorded_at(value),
         role: "step-summary".into(),
         content: preview.clone().unwrap_or_default(),
@@ -315,7 +313,7 @@ fn adapt_enveloped_entry(value: &Value, line_seq: u64) -> Option<ReplayEntry> {
     };
 
     Some(ReplayEntry {
-        seq: extract_seq(value).unwrap_or(line_seq),
+        seq: extracted_or_line_seq(value, line_seq),
         timestamp: recorded_at(value),
         role,
         content,
@@ -383,6 +381,12 @@ fn canonical_role_for_event(event_type: &str, status: Option<&str>) -> Option<St
 
 fn extract_seq(value: &Value) -> Option<u64> {
     value.get("seq").and_then(Value::as_u64)
+}
+
+fn extracted_or_line_seq(value: &Value, line_seq: u64) -> u64 {
+    extract_seq(value)
+        .filter(|seq| *seq > 0)
+        .unwrap_or(line_seq)
 }
 
 fn recorded_at(value: &Value) -> String {
@@ -845,6 +849,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_all_maps_zero_seq_legacy_call_to_line_number() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("replay.jsonl");
+        let call = serde_json::json!({
+            "type": "call",
+            "conversation_id": "root/d1s2",
+            "seq": 0,
+            "depth": 1,
+            "step": 2,
+            "ts": "2026-03-23T10:00:00Z",
+            "response": {
+                "output_text": "Compared the filings and found a contradiction."
+            }
+        });
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&call).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].seq, 1);
+    }
+
+    #[tokio::test]
     async fn test_read_all_adapts_canonical_cancelled_replay_lines() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("replay.jsonl");
@@ -887,6 +918,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_all_maps_zero_seq_enveloped_replay_line_to_line_number() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("replay.jsonl");
+        let line = serde_json::json!({
+            "schema_version": 2,
+            "envelope": "openplanter.trace.event.v2",
+            "event_id": "evt-1",
+            "session_id": "sid",
+            "turn_id": "turn-000001",
+            "seq": 0,
+            "recorded_at": "2026-03-23T10:00:00Z",
+            "event_type": "step.summary",
+            "channel": "replay",
+            "status": "completed",
+            "payload": {
+                "text": "Reviewed three documents and identified two contradictions.",
+                "step_index": 2
+            },
+            "failure": null,
+            "provenance": {},
+            "compat": {
+                "legacy_role": "step-summary",
+                "legacy_kind": null,
+                "source_schema": "desktop-replay-v1"
+            }
+        });
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].seq, 1);
+        assert_eq!(entries[0].role, "step-summary");
+    }
+
+    #[tokio::test]
     async fn test_append_continues_seq_after_legacy_call_lines() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("replay.jsonl");
@@ -920,5 +991,33 @@ mod tests {
 
         let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
         assert_eq!(entries.last().unwrap().seq, 5);
+    }
+
+    #[tokio::test]
+    async fn test_append_continues_seq_after_zero_seq_legacy_call_line() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("replay.jsonl");
+        let content = serde_json::to_string(&serde_json::json!({
+            "type": "call",
+            "conversation_id": "root",
+            "seq": 0,
+            "depth": 0,
+            "step": 1,
+            "ts": "2026-03-23T10:00:00Z",
+            "response": {"output_text": "legacy"}
+        }))
+        .unwrap();
+        fs::write(&path, format!("{content}\n")).await.unwrap();
+
+        let mut logger = ReplayLogger::new(tmp.path());
+        logger
+            .append(basic_entry("assistant", "next"))
+            .await
+            .unwrap();
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].seq, 1);
+        assert_eq!(entries[1].seq, 2);
     }
 }
