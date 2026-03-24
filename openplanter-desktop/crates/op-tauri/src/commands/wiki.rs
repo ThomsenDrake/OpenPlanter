@@ -781,26 +781,21 @@ fn build_wiki_nav(graph_data: &GraphData) -> WikiNavTreeView {
                 .get(source.id.as_str())
                 .cloned()
                 .unwrap_or_default();
-            sections.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+            sections
+                .sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
 
             let sections = sections
                 .into_iter()
-                .map(|section| {
-                    WikiNavSectionView {
-                        section_id: section.id.clone(),
-                        title: section.label.clone(),
-                        facts: collect_section_facts(
-                            section,
-                            &sections_by_parent,
-                            &facts_by_parent,
-                        )
-                            .into_iter()
-                            .map(|fact| WikiNavFactView {
-                                fact_id: fact.id.clone(),
-                                label: fact.label.clone(),
-                            })
-                            .collect(),
-                    }
+                .map(|section| WikiNavSectionView {
+                    section_id: section.id.clone(),
+                    title: section.label.clone(),
+                    facts: collect_section_facts(section, &sections_by_parent, &facts_by_parent)
+                        .into_iter()
+                        .map(|fact| WikiNavFactView {
+                            fact_id: fact.id.clone(),
+                            label: fact.label.clone(),
+                        })
+                        .collect(),
                 })
                 .collect();
 
@@ -847,14 +842,16 @@ fn collect_section_facts<'a>(
 }
 
 fn get_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
-    value.get(key)
+    value
+        .get(key)
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
 fn get_nested_array<'a>(value: &'a Value, parent: &str, child: &str) -> &'a [Value] {
-    value.get(parent)
+    value
+        .get(parent)
         .and_then(Value::as_object)
         .and_then(|obj| obj.get(child))
         .and_then(Value::as_array)
@@ -897,7 +894,10 @@ fn parse_focus_questions(packet: &Value) -> Vec<OverviewQuestionView> {
 fn gap_label(gap: &Value) -> String {
     let gap_id = gap.get("gap_id").and_then(Value::as_str).unwrap_or("gap");
     let kind = gap.get("kind").and_then(Value::as_str).unwrap_or("gap");
-    let scope = gap.get("scope").and_then(Value::as_str).unwrap_or("investigation");
+    let scope = gap
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("investigation");
     let question_id = gap.get("question_id").and_then(Value::as_str);
     let claim_id = gap.get("claim_id").and_then(Value::as_str);
 
@@ -941,7 +941,8 @@ fn parse_candidate_actions_and_gaps(
             .get("evidence_gap_refs")
             .and_then(Value::as_array)
             .map(|items| {
-                items.iter()
+                items
+                    .iter()
                     .filter_map(|item| {
                         let gap_id = item.get("gap_id").and_then(Value::as_str)?;
                         let entry = gaps_by_id.entry(gap_id.to_string()).or_insert_with(|| {
@@ -1091,7 +1092,479 @@ fn replay_text(entry: &ReplayEntry) -> Option<(&'static str, String)> {
     }
 }
 
-fn build_recent_revelations(entries: &[ReplayEntry]) -> Vec<OverviewRevelationView> {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RevelationTraceRefs {
+    replay_line: Option<u64>,
+    turn_id: Option<String>,
+    event_id: Option<String>,
+    source_refs: Vec<String>,
+    evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevelationEventKind {
+    StepSummary,
+    Assistant,
+    Curator,
+}
+
+#[derive(Debug, Clone)]
+struct RevelationEventCandidate {
+    kind: RevelationEventKind,
+    turn_id: Option<String>,
+    step_index: Option<u32>,
+    event_id: String,
+    seq: u64,
+    normalized_text: String,
+    source_refs: Vec<String>,
+    evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RevelationCandidate {
+    replay_seq: u64,
+    timestamp: String,
+    step_index: u32,
+    source_rank: u8,
+    source: &'static str,
+    normalized: String,
+    text: String,
+}
+
+fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn nested_string_value<'a>(value: &'a Value, parent: &str, key: &str) -> Option<&'a str> {
+    value
+        .get(parent)
+        .and_then(Value::as_object)
+        .and_then(|obj| obj.get(key))
+        .and_then(Value::as_str)
+}
+
+fn value_u32(value: &Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as u32)
+}
+
+fn read_jsonl_values(path: &Path) -> Result<Vec<(u64, Value)>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    Ok(content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(trimmed)
+                .ok()
+                .map(|value| ((index + 1) as u64, value))
+        })
+        .collect())
+}
+
+fn extend_unique_refs(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        if !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
+}
+
+fn locator_path(value: &Value) -> Option<&str> {
+    value
+        .get("locator")
+        .and_then(Value::as_object)
+        .and_then(|locator| locator.get("path"))
+        .and_then(Value::as_str)
+}
+
+fn format_source_ref(value: &Value) -> Option<String> {
+    let kind = string_value(value, "kind")?;
+    match kind {
+        "event" | "replay_event" => string_value(value, "event_id")
+            .or_else(|| string_value(value, "id"))
+            .map(|id| format!("{kind}:{id}"))
+            .or_else(|| {
+                value
+                    .get("seq")
+                    .and_then(Value::as_u64)
+                    .map(|seq| format!("{kind}:{seq}"))
+            }),
+        "event_span" => {
+            let start = value.get("start_seq").and_then(Value::as_u64)?;
+            let end = value.get("end_seq").and_then(Value::as_u64)?;
+            Some(format!("event_span:{start}-{end}"))
+        }
+        "jsonl_record" => {
+            let file = string_value(value, "file")
+                .or_else(|| nested_string_value(value, "locator", "file"))?;
+            let line = value.get("line").and_then(Value::as_u64).or_else(|| {
+                nested_string_value(value, "locator", "line").and_then(|line| line.parse().ok())
+            });
+            Some(match line {
+                Some(line) => format!("jsonl_record:{file}:{line}"),
+                None => format!("jsonl_record:{file}"),
+            })
+        }
+        "tool_call" => string_value(value, "id")
+            .or_else(|| string_value(value, "name"))
+            .map(|id| format!("tool_call:{id}")),
+        "state_snapshot" => string_value(value, "id")
+            .or_else(|| locator_path(value))
+            .map(|id| format!("state_snapshot:{id}")),
+        _ => None,
+    }
+}
+
+fn format_evidence_ref(value: &Value) -> Option<String> {
+    let kind = string_value(value, "kind")?;
+    if let Some(path) = locator_path(value) {
+        if path.ends_with(".md") && path.contains("wiki/") {
+            return Some(format!("wiki:{path}"));
+        }
+        return Some(format!("{kind}:{path}"));
+    }
+    string_value(value, "id")
+        .or_else(|| string_value(value, "label"))
+        .map(|id| format!("{kind}:{id}"))
+}
+
+fn format_payload_artifact_ref(payload: &Value) -> Option<String> {
+    let path = string_value(payload, "path")?;
+    let kind = string_value(payload, "kind").unwrap_or("artifact");
+    if path.ends_with(".md") && path.contains("wiki/") {
+        Some(format!("wiki:{path}"))
+    } else {
+        Some(format!("{kind}:{path}"))
+    }
+}
+
+fn extract_step_index(payload: Option<&Value>, fallback: &Value) -> Option<u32> {
+    payload
+        .and_then(|payload| value_u32(payload, "step_index"))
+        .or_else(|| payload.and_then(|payload| value_u32(payload, "step_number")))
+        .or_else(|| payload.and_then(|payload| value_u32(payload, "step")))
+        .or_else(|| value_u32(fallback, "step"))
+}
+
+fn revelation_event_kind_for_role(role: &str) -> Option<RevelationEventKind> {
+    match role {
+        "step-summary" => Some(RevelationEventKind::StepSummary),
+        "assistant" => Some(RevelationEventKind::Assistant),
+        "curator" => Some(RevelationEventKind::Curator),
+        _ => None,
+    }
+}
+
+fn revelation_event_kind_for_type(event_type: &str) -> Option<RevelationEventKind> {
+    match event_type {
+        "step.summary" => Some(RevelationEventKind::StepSummary),
+        "assistant.message" | "assistant.final" | "result.summary" | "turn.completed"
+        | "turn.failed" | "turn.cancelled" => Some(RevelationEventKind::Assistant),
+        "curator.note" => Some(RevelationEventKind::Curator),
+        _ => None,
+    }
+}
+
+fn event_payload_text(event_type: &str, payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    let text = match event_type {
+        "step.summary" => string_value(payload, "step_model_preview")
+            .or_else(|| string_value(payload, "text"))
+            .or_else(|| string_value(payload, "summary"))
+            .or_else(|| string_value(payload, "message")),
+        _ => string_value(payload, "text")
+            .or_else(|| string_value(payload, "summary"))
+            .or_else(|| string_value(payload, "message"))
+            .or_else(|| string_value(payload, "step_model_preview")),
+    }?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn match_revelation_event<'a>(
+    kind: RevelationEventKind,
+    normalized_text: &str,
+    step_index: Option<u32>,
+    turn_id: Option<&str>,
+    candidates: &'a [RevelationEventCandidate],
+) -> Option<&'a RevelationEventCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.kind == kind)
+        .filter(|candidate| candidate.normalized_text == normalized_text)
+        .filter(|candidate| {
+            if matches!(kind, RevelationEventKind::StepSummary) {
+                candidate.step_index == step_index
+            } else {
+                true
+            }
+        })
+        .max_by(|left, right| {
+            let left_turn_match = left.turn_id.as_deref() == turn_id;
+            let right_turn_match = right.turn_id.as_deref() == turn_id;
+            left_turn_match
+                .cmp(&right_turn_match)
+                .then_with(|| left.seq.cmp(&right.seq))
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        })
+}
+
+fn artifact_refs_for_step(
+    refs_by_step: &HashMap<(Option<String>, u32), Vec<String>>,
+    turn_id: Option<&str>,
+    step_index: u32,
+) -> Vec<String> {
+    if let Some(turn_id) = turn_id {
+        if let Some(refs) = refs_by_step.get(&(Some(turn_id.to_string()), step_index)) {
+            return refs.clone();
+        }
+    }
+    if let Some(refs) = refs_by_step.get(&(None, step_index)) {
+        return refs.clone();
+    }
+    Vec::new()
+}
+
+fn load_revelation_trace_refs(
+    session_dir: &Path,
+    entries: &[ReplayEntry],
+) -> Result<HashMap<u64, RevelationTraceRefs>, String> {
+    let mut refs_by_seq: HashMap<u64, RevelationTraceRefs> = HashMap::new();
+
+    for (line_number, value) in read_jsonl_values(&session_dir.join("replay.jsonl"))? {
+        let seq = value
+            .get("seq")
+            .and_then(Value::as_u64)
+            .unwrap_or(line_number);
+        let refs = refs_by_seq.entry(seq).or_default();
+        refs.replay_line.get_or_insert(line_number);
+        if refs.turn_id.is_none() {
+            refs.turn_id = string_value(&value, "turn_id").map(ToOwned::to_owned);
+        }
+        if refs.event_id.is_none() {
+            refs.event_id = string_value(&value, "event_id").map(ToOwned::to_owned);
+        }
+        extend_unique_refs(
+            &mut refs.source_refs,
+            get_nested_array(&value, "provenance", "source_refs")
+                .iter()
+                .filter_map(format_source_ref),
+        );
+        extend_unique_refs(
+            &mut refs.evidence_refs,
+            get_nested_array(&value, "provenance", "evidence_refs")
+                .iter()
+                .filter_map(format_evidence_ref),
+        );
+    }
+
+    let mut event_candidates = Vec::new();
+    let mut artifact_refs_by_step: HashMap<(Option<String>, u32), Vec<String>> = HashMap::new();
+
+    for (line_number, value) in read_jsonl_values(&session_dir.join("events.jsonl"))? {
+        let Some(event_type) = string_value(&value, "event_type") else {
+            continue;
+        };
+        let payload = value.get("payload");
+        let turn_id = string_value(&value, "turn_id").map(ToOwned::to_owned);
+        let step_index = extract_step_index(payload, &value);
+        let event_id = string_value(&value, "event_id")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("import:events.jsonl:{line_number}"));
+
+        if event_type == "artifact.created" {
+            let Some(step_index) = step_index else {
+                continue;
+            };
+            let Some(payload) = payload else {
+                continue;
+            };
+            let refs = artifact_refs_by_step
+                .entry((turn_id.clone(), step_index))
+                .or_default();
+            extend_unique_refs(refs, format_payload_artifact_ref(payload).into_iter());
+            continue;
+        }
+
+        let Some(kind) = revelation_event_kind_for_type(event_type) else {
+            continue;
+        };
+        let Some(text) = event_payload_text(event_type, payload) else {
+            continue;
+        };
+        let normalized_text = normalized_revelation_text(&text);
+        if normalized_text.is_empty() {
+            continue;
+        }
+
+        let mut source_refs = vec![
+            format!("event:{event_id}"),
+            format!("jsonl_record:events.jsonl:{line_number}"),
+        ];
+        extend_unique_refs(
+            &mut source_refs,
+            get_nested_array(&value, "provenance", "source_refs")
+                .iter()
+                .filter_map(format_source_ref),
+        );
+        let mut evidence_refs = Vec::new();
+        extend_unique_refs(
+            &mut evidence_refs,
+            get_nested_array(&value, "provenance", "evidence_refs")
+                .iter()
+                .filter_map(format_evidence_ref),
+        );
+
+        event_candidates.push(RevelationEventCandidate {
+            kind,
+            turn_id,
+            step_index,
+            event_id,
+            seq: value
+                .get("seq")
+                .and_then(Value::as_u64)
+                .unwrap_or(line_number),
+            normalized_text,
+            source_refs,
+            evidence_refs,
+        });
+    }
+
+    for entry in entries {
+        let Some(kind) = revelation_event_kind_for_role(entry.role.as_str()) else {
+            continue;
+        };
+        let Some((_, text)) = replay_text(entry) else {
+            continue;
+        };
+        if !is_substantive_revelation(entry.role.as_str(), &text) {
+            continue;
+        }
+        let normalized = normalized_revelation_text(&text);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        let existing_turn_id = refs_by_seq
+            .get(&entry.seq)
+            .and_then(|refs| refs.turn_id.clone());
+        let matched = match_revelation_event(
+            kind,
+            &normalized,
+            entry.step_number,
+            existing_turn_id.as_deref(),
+            &event_candidates,
+        );
+        let artifact_refs = if matches!(kind, RevelationEventKind::StepSummary) {
+            entry
+                .step_number
+                .filter(|step_index| *step_index > 0)
+                .map(|step_index| {
+                    let turn_id = matched
+                        .and_then(|candidate| candidate.turn_id.as_deref())
+                        .or(existing_turn_id.as_deref());
+                    artifact_refs_for_step(&artifact_refs_by_step, turn_id, step_index)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let refs = refs_by_seq.entry(entry.seq).or_default();
+        if let Some(candidate) = matched {
+            if refs.event_id.is_none() {
+                refs.event_id = Some(candidate.event_id.clone());
+            }
+            if refs.turn_id.is_none() {
+                refs.turn_id = candidate.turn_id.clone();
+            }
+            extend_unique_refs(&mut refs.source_refs, candidate.source_refs.clone());
+            extend_unique_refs(&mut refs.evidence_refs, candidate.evidence_refs.clone());
+        }
+        extend_unique_refs(&mut refs.evidence_refs, artifact_refs);
+    }
+
+    Ok(refs_by_seq)
+}
+
+fn sanitize_revelation_ref(value: &str) -> String {
+    value.replace('|', "%7C").replace('\n', " ")
+}
+
+fn build_revelation_id(
+    candidate: &RevelationCandidate,
+    trace_refs: Option<&RevelationTraceRefs>,
+) -> String {
+    let anchor = trace_refs
+        .and_then(|refs| {
+            refs.event_id
+                .as_ref()
+                .map(|event_id| format!("event:{event_id}"))
+        })
+        .or_else(|| {
+            if candidate.replay_seq > 0 {
+                Some(format!("import:replay.jsonl:{}", candidate.replay_seq))
+            } else {
+                trace_refs.and_then(|refs| {
+                    refs.replay_line
+                        .map(|line| format!("import:replay.jsonl:{line}"))
+                })
+            }
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "legacy:{}:{}:{:08x}",
+                candidate.source,
+                candidate.step_index,
+                stable_text_hash(&candidate.normalized)
+            )
+        });
+
+    let mut parts = vec![format!("anchor:{}", sanitize_revelation_ref(&anchor))];
+    if candidate.replay_seq > 0 {
+        parts.push(format!("replay_seq:{}", candidate.replay_seq));
+    }
+    if let Some(line) = trace_refs.and_then(|refs| refs.replay_line) {
+        parts.push(format!("replay_line:{line}"));
+    }
+    if let Some(turn_id) = trace_refs.and_then(|refs| refs.turn_id.as_deref()) {
+        parts.push(format!("turn:{}", sanitize_revelation_ref(turn_id)));
+    }
+    if candidate.step_index > 0 {
+        parts.push(format!("step:{}", candidate.step_index));
+    }
+    if let Some(trace_refs) = trace_refs {
+        for source_ref in &trace_refs.source_refs {
+            parts.push(format!(
+                "source_ref:{}",
+                sanitize_revelation_ref(source_ref)
+            ));
+        }
+        for evidence_ref in &trace_refs.evidence_refs {
+            parts.push(format!(
+                "evidence_ref:{}",
+                sanitize_revelation_ref(evidence_ref)
+            ));
+        }
+    }
+
+    format!("openplanter.revelation|{}", parts.join("|"))
+}
+
+fn build_recent_revelations_with_refs(
+    entries: &[ReplayEntry],
+    trace_refs: Option<&HashMap<u64, RevelationTraceRefs>>,
+) -> Vec<OverviewRevelationView> {
     let mut candidates = entries
         .iter()
         .filter_map(|entry| {
@@ -1103,43 +1576,46 @@ fn build_recent_revelations(entries: &[ReplayEntry]) -> Vec<OverviewRevelationVi
             if normalized.is_empty() {
                 return None;
             }
-            Some((
-                entry.timestamp.clone(),
-                entry.step_number.unwrap_or(0),
-                source_rank(entry.role.as_str()),
+            Some(RevelationCandidate {
+                replay_seq: entry.seq,
+                timestamp: entry.timestamp.clone(),
+                step_index: entry.step_number.unwrap_or(0),
+                source_rank: source_rank(entry.role.as_str()),
                 source,
                 normalized,
                 text,
-            ))
+            })
         })
         .collect::<Vec<_>>();
 
     candidates.sort_by(|left, right| {
         right
-            .0
-            .cmp(&left.0)
-            .then_with(|| right.1.cmp(&left.1))
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| right.4.cmp(&left.4))
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| right.step_index.cmp(&left.step_index))
+            .then_with(|| right.source_rank.cmp(&left.source_rank))
+            .then_with(|| right.replay_seq.cmp(&left.replay_seq))
+            .then_with(|| right.normalized.cmp(&left.normalized))
     });
 
     let mut seen = HashSet::new();
     let mut revelations = Vec::new();
-    for (timestamp, step_index, _rank, source, normalized, text) in candidates {
-        if !seen.insert(normalized.clone()) {
+    for candidate in candidates {
+        if !seen.insert(candidate.normalized.clone()) {
             continue;
         }
+        let candidate_trace_refs = trace_refs.and_then(|refs| refs.get(&candidate.replay_seq));
         revelations.push(OverviewRevelationView {
-            revelation_id: format!("{source}:{step_index}:{:08x}", stable_text_hash(&normalized)),
-            occurred_at: timestamp,
-            title: revelation_title(&text),
-            summary: revelation_summary(&text),
+            revelation_id: build_revelation_id(&candidate, candidate_trace_refs),
+            occurred_at: candidate.timestamp.clone(),
+            title: revelation_title(&candidate.text),
+            summary: revelation_summary(&candidate.text),
             provenance: OverviewRevelationProvenanceView {
-                source: source.to_string(),
-                step_index: if step_index == 0 {
+                source: candidate.source.to_string(),
+                step_index: if candidate.step_index == 0 {
                     None
                 } else {
-                    Some(step_index)
+                    Some(candidate.step_index)
                 },
             },
         });
@@ -1151,11 +1627,17 @@ fn build_recent_revelations(entries: &[ReplayEntry]) -> Vec<OverviewRevelationVi
     revelations
 }
 
+#[cfg(test)]
+fn build_recent_revelations(entries: &[ReplayEntry]) -> Vec<OverviewRevelationView> {
+    build_recent_revelations_with_refs(entries, None)
+}
+
 fn build_investigation_overview_view(
     session_id: Option<String>,
     graph_data: &GraphData,
     packet: Option<&Value>,
     replay_entries: Option<&[ReplayEntry]>,
+    replay_trace_refs: Option<&HashMap<u64, RevelationTraceRefs>>,
     warnings: Vec<String>,
 ) -> InvestigationOverviewView {
     let focus_questions = packet.map(parse_focus_questions).unwrap_or_default();
@@ -1183,7 +1665,7 @@ fn build_investigation_overview_view(
         outstanding_gaps,
         candidate_actions,
         recent_revelations: replay_entries
-            .map(build_recent_revelations)
+            .map(|entries| build_recent_revelations_with_refs(entries, replay_trace_refs))
             .unwrap_or_default(),
         wiki_nav: build_wiki_nav(graph_data),
         warnings,
@@ -1209,6 +1691,7 @@ pub async fn get_investigation_overview(
     let mut warnings = Vec::new();
     let mut packet = None;
     let mut replay_entries = None;
+    let mut replay_trace_refs = None;
 
     if let Some(session_id_value) = session_id.as_ref() {
         let session_dir = cfg
@@ -1231,7 +1714,15 @@ pub async fn get_investigation_overview(
         }
 
         match op_core::session::replay::ReplayLogger::read_all(&session_dir).await {
-            Ok(entries) => replay_entries = Some(entries),
+            Ok(entries) => {
+                match load_revelation_trace_refs(&session_dir, &entries) {
+                    Ok(trace_refs) => replay_trace_refs = Some(trace_refs),
+                    Err(err) => warnings.push(format!(
+                        "Failed to enrich revelation provenance for overview: {err}"
+                    )),
+                }
+                replay_entries = Some(entries);
+            }
             Err(err) => warnings.push(format!("Failed to read replay history for overview: {err}")),
         }
     }
@@ -1241,6 +1732,7 @@ pub async fn get_investigation_overview(
         &graph_data,
         packet.as_ref(),
         replay_entries.as_deref(),
+        replay_trace_refs.as_ref(),
         warnings,
     ))
 }
@@ -2453,6 +2945,243 @@ Links here.";
         assert_eq!(revelations.len(), 2);
         assert_eq!(revelations[0].provenance.source, "curator_update");
         assert_eq!(revelations[1].provenance.source, "agent_step");
+        assert!(
+            revelations[0]
+                .revelation_id
+                .contains("anchor:import:replay.jsonl:3")
+        );
+        assert!(revelations[1].revelation_id.contains("step:4"));
+    }
+
+    #[test]
+    fn test_build_recent_revelations_uses_replay_seq_to_break_ties() {
+        let entries = vec![
+            ReplayEntry {
+                seq: 8,
+                timestamp: "2026-03-17T10:00:00Z".to_string(),
+                role: "assistant".to_string(),
+                content: "The first investigation summary is long enough to be treated as a revelation in the overview cards.".to_string(),
+                tool_name: None,
+                is_rendered: Some(true),
+                step_number: None,
+                step_depth: None,
+                conversation_path: None,
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: None,
+                step_tool_calls: None,
+            },
+            ReplayEntry {
+                seq: 9,
+                timestamp: "2026-03-17T10:00:00Z".to_string(),
+                role: "assistant".to_string(),
+                content: "The second investigation summary is long enough to outrank the earlier replay entry when ties happen.".to_string(),
+                tool_name: None,
+                is_rendered: Some(true),
+                step_number: None,
+                step_depth: None,
+                conversation_path: None,
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: None,
+                step_tool_calls: None,
+            },
+        ];
+
+        let revelations = build_recent_revelations(&entries);
+        assert_eq!(revelations.len(), 2);
+        assert!(
+            revelations[0]
+                .revelation_id
+                .contains("anchor:import:replay.jsonl:9")
+        );
+        assert!(
+            revelations[1]
+                .revelation_id
+                .contains("anchor:import:replay.jsonl:8")
+        );
+    }
+
+    #[test]
+    fn test_build_recent_revelations_keeps_winning_duplicate_provenance() {
+        let text = "Acme Corp appears to share an address with PAC Fund Alpha in multiple records and the corroboration now looks durable.";
+        let entries = vec![
+            ReplayEntry {
+                seq: 11,
+                timestamp: "2026-03-17T10:00:00Z".to_string(),
+                role: "step-summary".to_string(),
+                content: String::new(),
+                tool_name: None,
+                is_rendered: None,
+                step_number: Some(4),
+                step_depth: Some(0),
+                conversation_path: Some("0".to_string()),
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: Some(text.to_string()),
+                step_tool_calls: None,
+            },
+            ReplayEntry {
+                seq: 12,
+                timestamp: "2026-03-17T10:00:00Z".to_string(),
+                role: "step-summary".to_string(),
+                content: String::new(),
+                tool_name: None,
+                is_rendered: None,
+                step_number: Some(4),
+                step_depth: Some(0),
+                conversation_path: Some("0".to_string()),
+                step_tokens_in: None,
+                step_tokens_out: None,
+                step_elapsed: None,
+                step_model_preview: Some(format!("  {text}  ")),
+                step_tool_calls: None,
+            },
+        ];
+        let refs = HashMap::from([
+            (
+                11,
+                RevelationTraceRefs {
+                    replay_line: Some(1),
+                    turn_id: Some("turn-000003".to_string()),
+                    event_id: Some("evt-00000011".to_string()),
+                    source_refs: vec!["event:evt-00000011".to_string()],
+                    evidence_refs: vec!["patch:artifacts/patches/patch-old.patch".to_string()],
+                },
+            ),
+            (
+                12,
+                RevelationTraceRefs {
+                    replay_line: Some(2),
+                    turn_id: Some("turn-000003".to_string()),
+                    event_id: Some("evt-00000012".to_string()),
+                    source_refs: vec!["event:evt-00000012".to_string()],
+                    evidence_refs: vec!["patch:artifacts/patches/patch-new.patch".to_string()],
+                },
+            ),
+        ]);
+
+        let revelations = build_recent_revelations_with_refs(&entries, Some(&refs));
+        assert_eq!(revelations.len(), 1);
+        assert!(
+            revelations[0]
+                .revelation_id
+                .contains("anchor:event:evt-00000012")
+        );
+        assert!(
+            revelations[0]
+                .revelation_id
+                .contains("evidence_ref:patch:artifacts/patches/patch-new.patch")
+        );
+        assert!(!revelations[0].revelation_id.contains("patch-old.patch"));
+    }
+
+    #[test]
+    fn test_load_revelation_trace_refs_merges_event_and_artifact_refs() {
+        let dir = tempdir().expect("tempdir");
+        let session_dir = dir.path();
+        let replay_entry = ReplayEntry {
+            seq: 7,
+            timestamp: "2026-03-17T10:00:00Z".to_string(),
+            role: "step-summary".to_string(),
+            content: String::new(),
+            tool_name: None,
+            is_rendered: None,
+            step_number: Some(4),
+            step_depth: Some(0),
+            conversation_path: Some("0".to_string()),
+            step_tokens_in: None,
+            step_tokens_out: None,
+            step_elapsed: None,
+            step_model_preview: Some(
+                "Acme records now show a durable overlap between the PAC mailing address and the corporate filing address."
+                    .to_string(),
+            ),
+            step_tool_calls: None,
+        };
+        fs::write(
+            session_dir.join("replay.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&replay_entry).expect("serialize replay entry")
+            ),
+        )
+        .expect("write replay");
+        fs::write(
+            session_dir.join("events.jsonl"),
+            [
+                serde_json::json!({
+                    "event_id": "evt-00000020",
+                    "turn_id": "turn-000004",
+                    "seq": 20,
+                    "event_type": "step.summary",
+                    "payload": {
+                        "step": 4,
+                        "step_model_preview": "Acme records now show a durable overlap between the PAC mailing address and the corporate filing address."
+                    },
+                    "provenance": {
+                        "source_refs": [
+                            {
+                                "kind": "event_span",
+                                "start_seq": 18,
+                                "end_seq": 19
+                            }
+                        ],
+                        "evidence_refs": []
+                    }
+                }),
+                serde_json::json!({
+                    "event_id": "evt-00000021",
+                    "turn_id": "turn-000004",
+                    "seq": 21,
+                    "event_type": "artifact.created",
+                    "payload": {
+                        "kind": "patch",
+                        "path": "artifacts/patches/patch-d0-s4-1.patch",
+                        "step": 4
+                    },
+                    "provenance": {
+                        "source_refs": [],
+                        "evidence_refs": []
+                    }
+                }),
+            ]
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("serialize event"))
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .expect("write events");
+
+        let refs = load_revelation_trace_refs(session_dir, &[replay_entry]).expect("trace refs");
+        let step_refs = refs.get(&7).expect("step refs should exist");
+        assert_eq!(step_refs.replay_line, Some(1));
+        assert_eq!(step_refs.turn_id.as_deref(), Some("turn-000004"));
+        assert_eq!(step_refs.event_id.as_deref(), Some("evt-00000020"));
+        assert!(
+            step_refs
+                .source_refs
+                .contains(&"event:evt-00000020".to_string())
+        );
+        assert!(
+            step_refs
+                .source_refs
+                .contains(&"jsonl_record:events.jsonl:1".to_string())
+        );
+        assert!(
+            step_refs
+                .source_refs
+                .contains(&"event_span:18-19".to_string())
+        );
+        assert!(
+            step_refs
+                .evidence_refs
+                .contains(&"patch:artifacts/patches/patch-d0-s4-1.patch".to_string())
+        );
     }
 
     #[test]
@@ -2482,6 +3211,7 @@ Links here.";
             Some("session-1".to_string()),
             &graph_data,
             Some(&packet),
+            None,
             None,
             vec!["Replay missing".to_string()],
         );
