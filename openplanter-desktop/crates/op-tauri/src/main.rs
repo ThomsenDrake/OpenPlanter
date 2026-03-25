@@ -39,6 +39,8 @@ fn main() {
             commands::session::open_session,
             commands::session::delete_session,
             commands::session::get_session_history,
+            commands::handoff::export_session_handoff,
+            commands::handoff::import_session_handoff,
             commands::wiki::get_graph_data,
             commands::wiki::get_investigation_overview,
             commands::wiki::read_wiki_file,

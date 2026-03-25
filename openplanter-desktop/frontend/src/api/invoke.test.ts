@@ -9,8 +9,10 @@ vi.mock("@tauri-apps/api/core", async () => {
 import {
   solve,
   cancel,
+  exportSessionHandoff,
   getConfig,
   updateConfig,
+  importSessionHandoff,
   listModels,
   saveSettings,
   saveCredential,
@@ -353,5 +355,67 @@ describe("invoke wrappers", () => {
     });
     const history = await getSessionHistory("session-1");
     expect(history).toEqual([]);
+  });
+
+  it("exportSessionHandoff calls invoke with session and optional turn", async () => {
+    __setHandler("export_session_handoff", ({ sessionId, turnId }: any) => {
+      expect(sessionId).toBe("session-1");
+      expect(turnId).toBe("turn-000007");
+      return {
+        path: "/tmp/handoff.json",
+        handoff: {
+          schema_version: 1,
+          package_format: "openplanter.session_handoff.v1",
+          handoff_id: "handoff-1",
+          exported_at: "2026-03-24T12:00:00Z",
+          objective: "Investigate donor overlap",
+          open_questions: [],
+          candidate_actions: [],
+          evidence_index: {},
+          replay_span: { start_seq: 4, end_seq: 9 },
+          source: { session_id: "session-1", turn_id: "turn-000007" },
+          provenance: { source_refs: [], evidence_refs: [], ontology_refs: [] },
+          compat: {},
+        },
+      };
+    });
+    const result = await exportSessionHandoff("session-1", "turn-000007");
+    expect(result.path).toBe("/tmp/handoff.json");
+    expect(result.handoff.handoff_id).toBe("handoff-1");
+  });
+
+  it("importSessionHandoff calls invoke with request payload", async () => {
+    __setHandler("import_session_handoff", ({ request }: any) => {
+      expect(request.package_path).toBe("/tmp/handoff.json");
+      expect(request.target_session_id).toBe("session-2");
+      expect(request.activate_session).toBe(false);
+      return {
+        path: "/workspace/.openplanter/sessions/session-2/artifacts/handoffs/handoff-1.json",
+        session_id: "session-2",
+        created_session: false,
+        activated_session: false,
+        handoff: {
+          schema_version: 1,
+          package_format: "openplanter.session_handoff.v1",
+          handoff_id: "handoff-1",
+          exported_at: "2026-03-24T12:00:00Z",
+          objective: "Investigate donor overlap",
+          open_questions: [],
+          candidate_actions: [],
+          evidence_index: {},
+          replay_span: { start_seq: 4, end_seq: 9 },
+          source: { session_id: "session-1" },
+          provenance: { source_refs: [], evidence_refs: [], ontology_refs: [] },
+          compat: {},
+        },
+      };
+    });
+    const result = await importSessionHandoff({
+      package_path: "/tmp/handoff.json",
+      target_session_id: "session-2",
+      activate_session: false,
+    });
+    expect(result.session_id).toBe("session-2");
+    expect(result.handoff.package_format).toBe("openplanter.session_handoff.v1");
   });
 });

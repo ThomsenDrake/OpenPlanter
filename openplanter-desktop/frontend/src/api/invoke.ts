@@ -4,7 +4,10 @@ import type {
   ConfigView,
   CredentialService,
   CredentialStatusMap,
+  ExportSessionHandoffResult,
   GraphData,
+  ImportSessionHandoffRequest,
+  ImportSessionHandoffResult,
   InitStatusView,
   InvestigationOverviewView,
   MigrationInitRequest,
@@ -25,6 +28,19 @@ export async function solve(objective: string, sessionId: string): Promise<void>
 export async function getSessionHistory(sessionId: string | null): Promise<ReplayEntry[]> {
   if (!sessionId) return [];
   return invoke("get_session_history", { sessionId });
+}
+
+export async function exportSessionHandoff(
+  sessionId: string,
+  turnId?: string | null
+): Promise<ExportSessionHandoffResult> {
+  return invoke("export_session_handoff", { sessionId, turnId: turnId ?? null });
+}
+
+export async function importSessionHandoff(
+  request: ImportSessionHandoffRequest
+): Promise<ImportSessionHandoffResult> {
+  return invoke("import_session_handoff", { request });
 }
 
 export async function cancel(): Promise<void> {
