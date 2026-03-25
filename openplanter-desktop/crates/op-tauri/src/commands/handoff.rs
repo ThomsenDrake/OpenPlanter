@@ -191,22 +191,54 @@ pub async fn import_session_handoff(
     let handoff = read_handoff_package(Path::new(&request.package_path))
         .map_err(|err| format!("Failed to read session handoff: {err}"))?;
 
-    let is_running = *state.agent_running.lock().await;
     let active_session_id = state.session_id.lock().await.clone();
-    if is_running && request.activate_session {
-        return Err("Cannot activate an imported handoff while an agent task is running.".into());
-    }
-    if is_running
-        && request
-            .target_session_id
-            .as_deref()
-            .zip(active_session_id.as_deref())
-            .is_some_and(|(target, active)| target == active)
-    {
-        return Err(
-            "Cannot import a handoff into the active session while an agent task is running."
-                .into(),
-        );
+    let targets_active_session = request
+        .target_session_id
+        .as_deref()
+        .zip(active_session_id.as_deref())
+        .is_some_and(|(target, active)| target == active);
+
+    if request.activate_session || targets_active_session {
+        // Hold the run gate while importing so a solve cannot start against the same
+        // session between validation and activation/import writes.
+        let running = state.agent_running.lock().await;
+        if *running {
+            if request.activate_session {
+                return Err(
+                    "Cannot activate an imported handoff while an agent task is running.".into(),
+                );
+            }
+            return Err(
+                "Cannot import a handoff into the active session while an agent task is running."
+                    .into(),
+            );
+        }
+
+        let sessions_root = sessions_dir(&state).await;
+        let (session_id, session_dir, created_session) =
+            resolve_import_target(&sessions_root, request.target_session_id.as_deref())?;
+        let stored_path = import_handoff_into_session(
+            &session_dir,
+            &handoff,
+            Path::new(&request.package_path),
+            true,
+        )
+        .await
+        .map_err(|err| format!("Failed to import session handoff: {err}"))?;
+
+        if request.activate_session {
+            let mut session_lock = state.session_id.lock().await;
+            *session_lock = Some(session_id.clone());
+        }
+
+        drop(running);
+        return Ok(ImportSessionHandoffResult {
+            path: stored_path.display().to_string(),
+            session_id,
+            created_session,
+            activated_session: request.activate_session,
+            handoff,
+        });
     }
 
     let sessions_root = sessions_dir(&state).await;
@@ -220,17 +252,6 @@ pub async fn import_session_handoff(
     )
     .await
     .map_err(|err| format!("Failed to import session handoff: {err}"))?;
-
-    if request.activate_session {
-        let running = state.agent_running.lock().await;
-        if *running {
-            return Err(
-                "Cannot activate an imported handoff while an agent task is running.".into(),
-            );
-        }
-        let mut session_lock = state.session_id.lock().await;
-        *session_lock = Some(session_id.clone());
-    }
 
     Ok(ImportSessionHandoffResult {
         path: stored_path.display().to_string(),
