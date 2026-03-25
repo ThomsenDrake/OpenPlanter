@@ -15,6 +15,16 @@ const TRACE_ENVELOPE: &str = "openplanter.trace.event.v2";
 const TURN_RECORD_FORMAT: &str = "openplanter.trace.turn.v2";
 const MAX_OBJECTIVE_CHARS: usize = 100;
 
+pub(crate) fn is_safe_session_id(session_id: &str) -> bool {
+    let mut components = Path::new(session_id).components();
+    !session_id.trim().is_empty()
+        && !session_id.chars().any(|ch| matches!(ch, '/' | '\\' | '\0'))
+        && matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureInfo {
     pub code: String,

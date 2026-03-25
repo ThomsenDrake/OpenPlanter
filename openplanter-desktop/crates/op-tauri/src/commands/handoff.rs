@@ -1,6 +1,7 @@
 use super::session::{
     AppendSessionEventOptions, SESSION_FORMAT, TRACE_SCHEMA_VERSION, append_session_event,
-    create_session, session_capabilities_value, session_durability_value, sessions_dir,
+    create_session, is_safe_session_id, session_capabilities_value, session_durability_value,
+    sessions_dir,
 };
 use crate::state::AppState;
 use op_core::engine::context::{load_or_migrate_investigation_state, turn_history_from_state};
@@ -130,6 +131,7 @@ pub async fn export_session_handoff(
     turn_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ExportSessionHandoffResult, String> {
+    validate_session_id(session_id.as_str(), "Session handoff export")?;
     let session_dir = sessions_dir(&state).await.join(&session_id);
     if !session_dir.is_dir() {
         return Err(format!("Session '{session_id}' not found"));
@@ -375,6 +377,7 @@ fn resolve_import_target(
     target_session_id: Option<&str>,
 ) -> Result<(String, PathBuf, bool), String> {
     if let Some(session_id) = target_session_id {
+        validate_session_id(session_id, "Session handoff import target")?;
         let session_dir = sessions_root.join(session_id);
         if !session_dir.is_dir() {
             return Err(format!("Target session '{session_id}' not found"));
@@ -912,6 +915,14 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("{}...", &text[..slice_idx])
 }
 
+fn validate_session_id(session_id: &str, context: &str) -> Result<(), String> {
+    if is_safe_session_id(session_id) {
+        Ok(())
+    } else {
+        Err(format!("{context} contains an unsafe session_id"))
+    }
+}
+
 fn is_safe_handoff_id(handoff_id: &str) -> bool {
     !handoff_id.is_empty()
         && handoff_id
@@ -1175,6 +1186,24 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("unsafe handoff_id"));
+    }
+
+    #[test]
+    fn validate_session_id_rejects_path_traversal() {
+        let err = validate_session_id("../../../evil", "Session handoff export").unwrap_err();
+
+        assert!(err.contains("unsafe session_id"));
+    }
+
+    #[test]
+    fn resolve_import_target_rejects_unsafe_target_session_id() {
+        let tmp = tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+
+        let err = resolve_import_target(&sessions_dir, Some("../../../evil")).unwrap_err();
+
+        assert!(err.contains("unsafe session_id"));
     }
 
     #[tokio::test]
