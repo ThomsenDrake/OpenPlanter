@@ -1,5 +1,6 @@
 use super::session::{
-    AppendSessionEventOptions, append_session_event, create_session, sessions_dir,
+    AppendSessionEventOptions, SESSION_FORMAT, TRACE_SCHEMA_VERSION, append_session_event,
+    create_session, session_capabilities_value, session_durability_value, sessions_dir,
 };
 use crate::state::AppState;
 use op_core::engine::context::{load_or_migrate_investigation_state, turn_history_from_state};
@@ -15,8 +16,6 @@ use tauri::State;
 
 const HANDOFF_FORMAT: &str = "openplanter.session_handoff.v1";
 const HANDOFF_SCHEMA_VERSION: u32 = 1;
-const SESSION_TRACE_SCHEMA_VERSION: u32 = 2;
-const SESSION_FORMAT: &str = "openplanter.session.v2";
 const MAX_OPEN_QUESTIONS: usize = 8;
 const MAX_EVIDENCE_PER_ITEM: usize = 6;
 
@@ -223,6 +222,12 @@ pub async fn import_session_handoff(
     .map_err(|err| format!("Failed to import session handoff: {err}"))?;
 
     if request.activate_session {
+        let running = state.agent_running.lock().await;
+        if *running {
+            return Err(
+                "Cannot activate an imported handoff while an agent task is running.".into(),
+            );
+        }
         let mut session_lock = state.session_id.lock().await;
         *session_lock = Some(session_id.clone());
     }
@@ -316,7 +321,6 @@ async fn import_handoff_into_session(
     let stored_path = handoff_output_path(session_dir, &handoff.handoff_id);
     persist_handoff_package(&stored_path, handoff)
         .map_err(|err| format!("Failed to store imported handoff: {err}"))?;
-    refresh_metadata_for_import(session_dir, handoff)?;
     let _ = append_session_event(
         session_dir,
         "session.handoff.imported",
@@ -340,6 +344,7 @@ async fn import_handoff_into_session(
             .await
             .map_err(|err| format!("Failed to append import replay note: {err}"))?;
     }
+    refresh_metadata_for_import(session_dir, handoff)?;
 
     Ok(stored_path)
 }
@@ -385,6 +390,9 @@ fn validate_handoff_package(handoff: &SessionHandoffPackage) -> Result<(), Strin
     if handoff.handoff_id.trim().is_empty() {
         return Err("Handoff package is missing handoff_id".to_string());
     }
+    if !is_safe_handoff_id(&handoff.handoff_id) {
+        return Err("Handoff package contains an unsafe handoff_id".to_string());
+    }
     if handoff
         .replay_span
         .as_ref()
@@ -419,7 +427,7 @@ fn refresh_metadata_for_import(
     metadata.insert("updated_at".to_string(), Value::String(now));
     metadata.insert(
         "schema_version".to_string(),
-        Value::Number(SESSION_TRACE_SCHEMA_VERSION.into()),
+        Value::Number(TRACE_SCHEMA_VERSION.into()),
     );
     metadata
         .entry("session_format".to_string())
@@ -442,6 +450,11 @@ fn refresh_metadata_for_import(
         Value::String("imported".to_string()),
     );
     metadata.insert("status".to_string(), Value::String("active".to_string()));
+    metadata.insert("capabilities".to_string(), session_capabilities_value());
+    metadata.insert(
+        "durability".to_string(),
+        session_durability_value(session_dir),
+    );
 
     let payload =
         serde_json::to_string_pretty(&Value::Object(metadata)).map_err(|err| err.to_string())?;
@@ -878,6 +891,13 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("{}...", &text[..slice_idx])
 }
 
+fn is_safe_handoff_id(handoff_id: &str) -> bool {
+    !handoff_id.is_empty()
+        && handoff_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
 fn new_handoff_id(now: chrono::DateTime<chrono::Utc>, suffix: &str) -> String {
     let random = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1112,6 +1132,30 @@ mod tests {
         assert!(err.contains("Invalid replay span"));
     }
 
+    #[test]
+    fn validate_handoff_package_rejects_unsafe_handoff_id() {
+        let err = validate_handoff_package(&SessionHandoffPackage {
+            schema_version: HANDOFF_SCHEMA_VERSION,
+            package_format: HANDOFF_FORMAT.to_string(),
+            handoff_id: "../../../evil".to_string(),
+            exported_at: "2026-03-24T10:00:00Z".to_string(),
+            objective: "Investigate".to_string(),
+            open_questions: Vec::new(),
+            candidate_actions: Vec::new(),
+            evidence_index: Map::new(),
+            replay_span: Some(HandoffSeqSpan {
+                start_seq: 1,
+                end_seq: 4,
+            }),
+            source: SessionHandoffSource::default(),
+            provenance: SessionHandoffProvenance::default(),
+            compat: SessionHandoffCompat::default(),
+        })
+        .unwrap_err();
+
+        assert!(err.contains("unsafe handoff_id"));
+    }
+
     #[tokio::test]
     async fn import_handoff_into_session_updates_metadata_and_replay() {
         let tmp = tempdir().unwrap();
@@ -1156,6 +1200,11 @@ mod tests {
         assert_eq!(metadata["continuity_mode"], "imported");
         assert_eq!(metadata["status"], "active");
         assert_eq!(metadata["last_objective"], "Resume imported investigation");
+        assert_eq!(metadata["schema_version"], TRACE_SCHEMA_VERSION);
+        assert_eq!(metadata["session_format"], SESSION_FORMAT);
+        assert_eq!(metadata["capabilities"]["supports_turns_v2"], true);
+        assert_eq!(metadata["durability"]["events_jsonl_present"], true);
+        assert_eq!(metadata["durability"]["replay_jsonl_present"], true);
 
         let events = fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
         assert!(events.contains("\"event_type\":\"session.handoff.imported\""));

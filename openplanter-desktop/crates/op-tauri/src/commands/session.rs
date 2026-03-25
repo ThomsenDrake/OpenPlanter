@@ -9,8 +9,8 @@ use tauri::State;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
 
-const TRACE_SCHEMA_VERSION: u32 = 2;
-const SESSION_FORMAT: &str = "openplanter.session.v2";
+pub(crate) const TRACE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const SESSION_FORMAT: &str = "openplanter.session.v2";
 const TRACE_ENVELOPE: &str = "openplanter.trace.event.v2";
 const TURN_RECORD_FORMAT: &str = "openplanter.trace.turn.v2";
 const MAX_OBJECTIVE_CHARS: usize = 100;
@@ -937,6 +937,21 @@ fn durability_flags(session_dir: &Path) -> SessionDurability {
         turns_jsonl_present: session_dir.join("turns.jsonl").exists(),
         partial_records_possible: true,
     }
+}
+
+pub(crate) fn session_capabilities_value() -> Value {
+    serde_json::to_value(SessionCapabilities {
+        supports_events_v2: true,
+        supports_replay_v2: true,
+        supports_turns_v2: true,
+        supports_provenance_links: true,
+        supports_failure_taxonomy_v2: true,
+    })
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+pub(crate) fn session_durability_value(session_dir: &Path) -> Value {
+    serde_json::to_value(durability_flags(session_dir)).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 fn session_status_for_outcome(status: &str) -> &'static str {
