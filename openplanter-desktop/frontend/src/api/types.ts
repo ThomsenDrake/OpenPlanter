@@ -379,6 +379,70 @@ export interface MigrationInitResultView {
   warnings: string[];
 }
 
+export interface HandoffSeqSpan {
+  start_seq: number;
+  end_seq: number;
+}
+
+export interface SessionHandoffSource {
+  session_id: string;
+  turn_id?: string;
+  turn_index?: number;
+  turn_line?: number;
+  status?: string;
+  started_at?: string;
+  ended_at?: string;
+  event_span?: HandoffSeqSpan;
+  continuity_mode?: string;
+  session_status?: string;
+}
+
+export interface SessionHandoffProvenance {
+  source_refs: Record<string, unknown>[];
+  evidence_refs: Record<string, unknown>[];
+  ontology_refs: Record<string, unknown>[];
+}
+
+export interface SessionHandoffCompat {
+  trace_schema_version?: number;
+  session_format?: string;
+  session_origin?: string;
+}
+
+export interface SessionHandoffPackage {
+  schema_version: number;
+  package_format: string;
+  handoff_id: string;
+  exported_at: string;
+  objective: string;
+  open_questions: unknown[];
+  candidate_actions: unknown[];
+  evidence_index: Record<string, unknown>;
+  replay_span?: HandoffSeqSpan | null;
+  source: SessionHandoffSource;
+  provenance: SessionHandoffProvenance;
+  compat: SessionHandoffCompat;
+}
+
+export interface ExportSessionHandoffResult {
+  path: string;
+  handoff: SessionHandoffPackage;
+}
+
+export interface ImportSessionHandoffRequest {
+  package_path: string;
+  target_session_id?: string | null;
+  activate_session?: boolean;
+}
+
+export interface ImportSessionHandoffResult {
+  path: string;
+  session_id: string;
+  created_session: boolean;
+  activated_session: boolean;
+  handoff: SessionHandoffPackage;
+}
+
 export interface StepToolCallEntry {
   name: string;
   key_arg: string;
