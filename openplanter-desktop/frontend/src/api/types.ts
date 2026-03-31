@@ -47,6 +47,7 @@ export type DeltaKind = "text" | "thinking" | "tool_call_start" | "tool_call_arg
 export interface DeltaEvent {
   kind: DeltaKind;
   text: string;
+  conversation_path?: string;
 }
 
 export interface CompletionMeta {
@@ -201,6 +202,8 @@ export interface ConfigView {
   embeddings_provider: string;
   embeddings_status: string;
   embeddings_status_detail: string;
+  embeddings_mode: string;
+  embeddings_packet_version: string;
   continuity_mode: string;
   mistral_document_ai_use_shared_key: boolean;
   chrome_mcp_enabled: boolean;
@@ -480,7 +483,7 @@ export type AgentEvent =
       loop_phase?: LoopPhase;
       loop_metrics?: LoopMetrics;
     }
-  | { type: "delta"; kind: DeltaKind; text: string }
+  | { type: "delta"; kind: DeltaKind; text: string; conversation_path?: string }
   | { type: "complete"; result: string; loop_metrics?: LoopMetrics; completion?: CompletionMeta }
   | { type: "error"; message: string }
   | { type: "wiki_updated"; nodes: GraphNode[]; edges: GraphEdge[] }

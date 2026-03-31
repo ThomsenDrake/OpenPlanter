@@ -72,6 +72,8 @@ pub struct TokenUsage {
 pub struct DeltaEvent {
     pub kind: DeltaKind,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_path: Option<String>,
 }
 
 /// The kind of streaming delta.
@@ -330,6 +332,8 @@ pub struct ConfigView {
     pub embeddings_provider: String,
     pub embeddings_status: String,
     pub embeddings_status_detail: String,
+    pub embeddings_mode: String,
+    pub embeddings_packet_version: String,
     pub continuity_mode: String,
     pub mistral_document_ai_use_shared_key: bool,
     pub chrome_mcp_enabled: bool,
@@ -552,9 +556,11 @@ mod tests {
         let delta = DeltaEvent {
             kind: DeltaKind::ToolCallStart,
             text: "read_file".into(),
+            conversation_path: Some("0.1".into()),
         };
         let json = serde_json::to_string(&delta).unwrap();
         assert!(json.contains("\"kind\":\"tool_call_start\""));
+        assert!(json.contains("\"conversation_path\":\"0.1\""));
     }
 
     #[test]

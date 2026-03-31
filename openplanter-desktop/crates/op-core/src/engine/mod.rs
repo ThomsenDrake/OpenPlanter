@@ -173,6 +173,7 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
     emitter.emit_delta(DeltaEvent {
         kind: DeltaKind::Thinking,
         text: format!("Analyzing: {objective}"),
+        conversation_path: Some("0".into()),
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -193,6 +194,7 @@ pub async fn demo_solve(objective: &str, emitter: &dyn SolveEmitter, cancel: Can
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
             text,
+            conversation_path: Some("0".into()),
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -1346,14 +1348,8 @@ async fn finalize_success_outcome(
         loop_phase: Some(phase),
         loop_metrics: Some(loop_metrics.clone()),
     });
-    flush_pending_curator_checkpoint(
-        pending_curator_deltas,
-        "finalize",
-        config,
-        cancel,
-        emitter,
-    )
-    .await;
+    flush_pending_curator_checkpoint(pending_curator_deltas, "finalize", config, cancel, emitter)
+        .await;
     tools.cleanup();
     SolveFrameOutcome::final_result(result_text, loop_metrics.clone())
 }
@@ -1779,11 +1775,13 @@ async fn solve_frame(
             force_subtask,
             config.acceptance_criteria,
         );
-        let stream_root = depth == 0;
+        let delta_conversation_path = conversation_path.clone();
         let on_delta = |delta: DeltaEvent| {
-            if stream_root {
-                emitter.emit_delta(delta);
+            let mut delta = delta;
+            if delta.conversation_path.is_none() {
+                delta.conversation_path = Some(delta_conversation_path.clone());
             }
+            emitter.emit_delta(delta);
         };
         let turn = match chat_stream_with_rate_limit_retries(
             model.as_ref(),

@@ -426,13 +426,42 @@ describe("createChatPane", () => {
     document.body.appendChild(pane);
 
     window.dispatchEvent(
-      new CustomEvent("agent-delta", { detail: { kind: "text", text: "Root preview" } })
+      new CustomEvent("agent-delta", {
+        detail: { kind: "text", text: "Root preview", conversation_path: "0" },
+      })
     );
     window.dispatchEvent(
-      new CustomEvent("agent-delta", { detail: { kind: "tool_call_start", text: "read_file" } })
+      new CustomEvent("agent-delta", {
+        detail: { kind: "tool_call_start", text: "read_file", conversation_path: "0" },
+      })
     );
     window.dispatchEvent(
-      new CustomEvent("agent-delta", { detail: { kind: "tool_call_args", text: '{"path": "/src/root.ts"}' } })
+      new CustomEvent("agent-delta", {
+        detail: {
+          kind: "tool_call_args",
+          text: '{"path": "/src/root.ts"}',
+          conversation_path: "0",
+        },
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", {
+        detail: { kind: "text", text: "Child preview", conversation_path: "0.1" },
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", {
+        detail: { kind: "tool_call_start", text: "run_shell", conversation_path: "0.1" },
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent("agent-delta", {
+        detail: {
+          kind: "tool_call_args",
+          text: '{"command": "npm test"}',
+          conversation_path: "0.1",
+        },
+      })
     );
 
     window.dispatchEvent(
@@ -450,11 +479,13 @@ describe("createChatPane", () => {
     );
 
     expect(pane.querySelector(".activity-indicator")).not.toBeNull();
+    expect(pane.querySelector(".activity-preview")!.textContent).toContain("/src/root.ts");
     const summariesAfterChild = pane.querySelectorAll(".message.step-summary");
     expect(summariesAfterChild.length).toBe(1);
     expect(summariesAfterChild[0].textContent).toContain("Path 0.1");
-    expect(summariesAfterChild[0].querySelector(".step-model-text")).toBeNull();
-    expect(summariesAfterChild[0].querySelectorAll(".step-tool-line").length).toBe(0);
+    expect(summariesAfterChild[0].querySelector(".step-model-text")!.textContent).toContain("Child preview");
+    expect(summariesAfterChild[0].querySelectorAll(".step-tool-line").length).toBe(1);
+    expect(summariesAfterChild[0].querySelector(".tool-arg")!.textContent).toContain("npm test");
 
     window.dispatchEvent(
       new CustomEvent("agent-step", {

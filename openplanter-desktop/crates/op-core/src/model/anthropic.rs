@@ -318,6 +318,7 @@ impl BaseModel for AnthropicModel {
                                         on_delta(DeltaEvent {
                                             kind: DeltaKind::ToolCallStart,
                                             text: name.clone(),
+                                            conversation_path: None,
                                         });
                                     }
                                     BlockState {
@@ -360,6 +361,7 @@ impl BaseModel for AnthropicModel {
                                             on_delta(DeltaEvent {
                                                 kind: DeltaKind::Text,
                                                 text: t.to_string(),
+                                                conversation_path: None,
                                             });
                                         }
                                     }
@@ -372,6 +374,7 @@ impl BaseModel for AnthropicModel {
                                             on_delta(DeltaEvent {
                                                 kind: DeltaKind::Thinking,
                                                 text: t.to_string(),
+                                                conversation_path: None,
                                             });
                                         }
                                     }
@@ -387,6 +390,7 @@ impl BaseModel for AnthropicModel {
                                             on_delta(DeltaEvent {
                                                 kind: DeltaKind::ToolCallArgs,
                                                 text: chunk.to_string(),
+                                                conversation_path: None,
                                             });
                                         }
                                     }

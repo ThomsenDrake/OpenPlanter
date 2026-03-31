@@ -16,6 +16,7 @@ import type {
   WikiNavSourceView,
 } from "../api/types";
 import { appState } from "../state/store";
+import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 
@@ -254,7 +255,16 @@ export function createOverviewPane(): HTMLElement {
     const normalized = normalizeReplayRole(entry.role);
     if (normalized === "step-summary") {
       const preview = (entry.step_model_preview || entry.content || "").trim();
-      return preview || "Step summary pending.";
+      if (preview) return preview;
+      if (entry.step_tool_calls?.length) {
+        return formatToolCallSummary(
+          entry.step_tool_calls.map((toolCall) => ({
+            name: toolCall.name,
+            keyArg: toolCall.key_arg,
+          })),
+        );
+      }
+      return "Step summary pending.";
     }
     const text = (entry.content || "").trim();
     if (!text) return "(no content)";

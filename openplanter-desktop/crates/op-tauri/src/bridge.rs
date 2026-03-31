@@ -551,9 +551,13 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
 
     fn emit_delta(&self, event: DeltaEvent) {
         // Accumulate streaming data for step summary logging (sync — no I/O)
+        let conversation_path = event
+            .conversation_path
+            .clone()
+            .unwrap_or_else(|| ROOT_CONVERSATION_PATH.to_string());
         let mut step_states = self.step_states.lock().unwrap();
         let state = step_states
-            .entry(ROOT_CONVERSATION_PATH.to_string())
+            .entry(conversation_path)
             .or_default();
         match event.kind {
             DeltaKind::Text => {
@@ -1088,6 +1092,7 @@ mod tests {
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
             text: big_text.clone(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_step(StepEvent {
             depth: 0,
@@ -1127,14 +1132,17 @@ mod tests {
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallStart,
             text: "read_file".to_string(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallArgs,
             text: "{\"path\":\"foo.md\",\"other\":\"".to_string(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallArgs,
             text: filler.clone(),
+            conversation_path: Some("0".into()),
         });
 
         let step_states = emitter.step_states.lock().unwrap();
@@ -1177,14 +1185,32 @@ mod tests {
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
             text: "root preview".into(),
+            conversation_path: Some(ROOT_CONVERSATION_PATH.into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallStart,
             text: "read_file".into(),
+            conversation_path: Some(ROOT_CONVERSATION_PATH.into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallArgs,
             text: r#"{"path":"root.txt"}"#.into(),
+            conversation_path: Some(ROOT_CONVERSATION_PATH.into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::Text,
+            text: "child preview".into(),
+            conversation_path: Some("0.1".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "run_shell".into(),
+            conversation_path: Some("0.1".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"command":"npm test"}"#.into(),
+            conversation_path: Some("0.1".into()),
         });
 
         emitter.emit_step(StepEvent {
@@ -1216,8 +1242,11 @@ mod tests {
             .iter()
             .find(|entry| entry.conversation_path.as_deref() == Some("0.1"))
             .unwrap();
-        assert!(child.step_model_preview.is_none());
-        assert!(child.step_tool_calls.is_none());
+        assert_eq!(child.step_model_preview.as_deref(), Some("child preview"));
+        let child_tool_calls = child.step_tool_calls.as_ref().unwrap();
+        assert_eq!(child_tool_calls.len(), 1);
+        assert_eq!(child_tool_calls[0].name, "run_shell");
+        assert_eq!(child_tool_calls[0].key_arg, "npm test");
 
         let root = entries
             .iter()
@@ -1280,14 +1309,17 @@ mod tests {
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
             text: "drafting".into(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallStart,
             text: "write_file".into(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::ToolCallArgs,
             text: r#"{"path":"draft.txt","content":"hello"}"#.into(),
+            conversation_path: Some("0".into()),
         });
         emitter.emit_error("Cancelled");
 
@@ -1329,6 +1361,44 @@ mod tests {
         assert!(events.contains("\"status\":\"cancelled\""));
         assert!(events.contains("\"event_type\":\"turn.cancelled\""));
         assert!(events.contains("\"failure_code\":\"cancelled\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_error_cancelled_flushes_child_partial_replay_by_path() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::Text,
+            text: "child drafting".into(),
+            conversation_path: Some("0.1".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "write_file".into(),
+            conversation_path: Some("0.1".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"path":"child.txt","content":"hello"}"#.into(),
+            conversation_path: Some("0.1".into()),
+        });
+        emitter.emit_error("Cancelled");
+
+        let entries = ReplayLogger::read_all(tmp.path()).await.unwrap();
+        let child_partial = entries
+            .iter()
+            .find(|entry| {
+                entry.role == "assistant-partial"
+                    && entry.conversation_path.as_deref() == Some("0.1")
+            })
+            .unwrap();
+        assert!(child_partial.content.contains("child drafting"));
+        let tool_calls = child_partial.step_tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "write_file");
+        assert_eq!(tool_calls[0].key_arg, "child.txt");
     }
 
     #[tokio::test(flavor = "multi_thread")]

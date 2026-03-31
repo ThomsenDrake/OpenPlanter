@@ -394,6 +394,58 @@ describe("createOverviewPane", () => {
     });
   });
 
+  it("falls back to compact tool summaries when a step has no text preview", async () => {
+    __setHandler("get_investigation_overview", () => makeOverview());
+    __setHandler("get_session_history", () => [
+      {
+        seq: 7,
+        timestamp: "2026-03-17T12:04:00Z",
+        role: "step-summary",
+        content: "",
+        step_number: 7,
+        step_tool_calls: [
+          { name: "read_file", key_arg: "/src/main.ts", elapsed: 80 },
+        ],
+      },
+      {
+        seq: 8,
+        timestamp: "2026-03-17T12:05:00Z",
+        role: "step-summary",
+        content: "",
+        step_number: 8,
+        step_tool_calls: [
+          { name: "read_file", key_arg: "/src/main.ts", elapsed: 80 },
+          { name: "run_shell", key_arg: "npm test", elapsed: 120 },
+        ],
+      },
+      {
+        seq: 9,
+        timestamp: "2026-03-17T12:06:00Z",
+        role: "step-summary",
+        content: "",
+        step_number: 9,
+        step_tool_calls: [
+          { name: "read_file", key_arg: "/src/main.ts", elapsed: 80 },
+          { name: "run_shell", key_arg: "npm test", elapsed: 120 },
+          { name: "web_search", key_arg: "trace bugs", elapsed: 250 },
+        ],
+      },
+    ]);
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain('Ran read_file "/src/main.ts"');
+      expect(pane.textContent).toContain(
+        'Ran 2 tools: read_file "/src/main.ts"; run_shell "npm test"',
+      );
+      expect(pane.textContent).toContain(
+        'Ran 3 tools: read_file "/src/main.ts"; run_shell "npm test"; +1 more',
+      );
+    });
+  });
+
   it("uses replay line locators to focus the matching replay entry by file order", async () => {
     __setHandler("get_investigation_overview", () =>
       makeOverview({
@@ -531,7 +583,12 @@ describe("createOverviewPane", () => {
 
     wikiChip!.click();
 
-    expect(openedDetail?.wikiPath).toBe("wiki/acme.md");
+    const detail = openedDetail as OpenWikiDrawerDetail | null;
+    expect(detail).not.toBeNull();
+    if (!detail) {
+      throw new Error("Expected wiki drawer detail");
+    }
+    expect(detail.wikiPath).toBe("wiki/acme.md");
     expect(appState.get().overviewSelectedWikiPath).toBe("wiki/acme.md");
 
     window.removeEventListener(OPEN_WIKI_DRAWER_EVENT, listener);

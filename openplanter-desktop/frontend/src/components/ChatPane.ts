@@ -528,25 +528,34 @@ export function createChatPane(): HTMLElement {
   // ── Handle streaming deltas ──
 
   const onAgentDelta = ((e: CustomEvent) => {
-    const { kind, text } = e.detail;
-    const buffer = getStepBuffer(ROOT_CONVERSATION_PATH);
+    const {
+      kind,
+      text,
+      conversation_path: conversationPath = ROOT_CONVERSATION_PATH,
+    } = e.detail;
+    const buffer = getStepBuffer(conversationPath);
+    const isRootConversation = conversationPath === ROOT_CONVERSATION_PATH;
 
     if (kind === "thinking") {
       buffer.thinkingBuf += text;
-      const ai = ensureActivity();
-      ai.setMode("thinking");
-      ai.setPreview(buffer.thinkingBuf);
-      autoScroll();
+      if (isRootConversation) {
+        const ai = ensureActivity();
+        ai.setMode("thinking");
+        ai.setPreview(buffer.thinkingBuf);
+        autoScroll();
+      }
     } else if (kind === "text") {
       // Transition from thinking to streaming
       if (buffer.thinkingBuf && !buffer.streamingBuf) {
         // First text delta after thinking — switch mode
       }
       buffer.streamingBuf += text;
-      const ai = ensureActivity();
-      ai.setMode("streaming");
-      ai.setPreview(stripToolXml(buffer.streamingBuf));
-      autoScroll();
+      if (isRootConversation) {
+        const ai = ensureActivity();
+        ai.setMode("streaming");
+        ai.setPreview(stripToolXml(buffer.streamingBuf));
+        autoScroll();
+      }
     } else if (kind === "tool_call_start") {
       buffer.currentToolName = text;
       buffer.toolArgsBuf = "";
@@ -556,13 +565,14 @@ export function createChatPane(): HTMLElement {
         startTime: Date.now(),
       });
 
-      const ai = ensureActivity();
-      ai.setMode("tool_args", text);
-      ai.setPreview("");
-      autoScroll();
+      if (isRootConversation) {
+        const ai = ensureActivity();
+        ai.setMode("tool_args", text);
+        ai.setPreview("");
+        autoScroll();
+      }
     } else if (kind === "tool_call_args") {
       buffer.toolArgsBuf += text;
-      const ai = ensureActivity();
 
       // Always re-extract key arg as more chunks arrive — partial JSON
       // grows with each chunk so the extracted value gets more complete.
@@ -570,11 +580,16 @@ export function createChatPane(): HTMLElement {
       if (keyArg) {
         const current = buffer.stepToolCalls[buffer.stepToolCalls.length - 1];
         if (current) current.keyArg = keyArg;
-        ai.setToolRunning(buffer.currentToolName, keyArg);
-      } else {
+        if (isRootConversation) {
+          const ai = ensureActivity();
+          ai.setToolRunning(buffer.currentToolName, keyArg);
+          autoScroll();
+        }
+      } else if (isRootConversation) {
+        const ai = ensureActivity();
         ai.setPreview(buffer.toolArgsBuf.slice(-120));
+        autoScroll();
       }
-      autoScroll();
     }
   }) as EventListener;
   window.addEventListener("agent-delta", onAgentDelta);

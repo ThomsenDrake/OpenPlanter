@@ -572,6 +572,7 @@ impl OpenAIModel {
                             on_delta(DeltaEvent {
                                 kind: DeltaKind::Text,
                                 text: content.to_string(),
+                                conversation_path: None,
                             });
                         }
                     }
@@ -584,6 +585,7 @@ impl OpenAIModel {
                                 on_delta(DeltaEvent {
                                     kind: DeltaKind::Thinking,
                                     text: value.to_string(),
+                                    conversation_path: None,
                                 });
                             }
                         }
@@ -611,6 +613,7 @@ impl OpenAIModel {
                                         on_delta(DeltaEvent {
                                             kind: DeltaKind::ToolCallStart,
                                             text: name.to_string(),
+                                            conversation_path: None,
                                         });
                                     }
                                 }
@@ -621,6 +624,7 @@ impl OpenAIModel {
                                         on_delta(DeltaEvent {
                                             kind: DeltaKind::ToolCallArgs,
                                             text: args.to_string(),
+                                            conversation_path: None,
                                         });
                                     }
                                 }

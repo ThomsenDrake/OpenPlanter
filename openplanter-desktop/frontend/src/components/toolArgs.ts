@@ -30,6 +30,11 @@ interface IndexedCandidate {
   value: string;
 }
 
+export interface ToolCallPreviewLike {
+  name: string;
+  keyArg: string;
+}
+
 function normalizePreviewValue(value: unknown): string | null {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -160,4 +165,25 @@ export function extractToolCallKeyArg(toolName: string, argsJson: string): strin
 
   const fallback = collectFallbackCandidates(argsJson)[0];
   return fallback?.value ?? null;
+}
+
+export function formatToolCallPreview(toolName: string, keyArg: string): string {
+  const trimmed = keyArg.trim();
+  return trimmed ? `${toolName} "${trimmed}"` : toolName;
+}
+
+export function formatToolCallSummary(toolCalls: ToolCallPreviewLike[]): string {
+  if (toolCalls.length === 0) return "";
+
+  if (toolCalls.length === 1) {
+    const tool = toolCalls[0];
+    return `Ran ${formatToolCallPreview(tool.name, tool.keyArg)}`;
+  }
+
+  const visibleTools = toolCalls.slice(0, 2).map((tool) =>
+    formatToolCallPreview(tool.name, tool.keyArg),
+  );
+  const extraCount = toolCalls.length - visibleTools.length;
+  const suffix = extraCount > 0 ? `; +${extraCount} more` : "";
+  return `Ran ${toolCalls.length} tools: ${visibleTools.join("; ")}${suffix}`;
 }
