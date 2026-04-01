@@ -931,6 +931,16 @@ class WorkspaceDefrag:
         # Merge entities from all sessions
         entity_index: dict[tuple[str, str], str] = {}  # (name, type) -> canonical_id
 
+        # Seed the dedup index from existing ontology content so repeated defrag
+        # runs keep reusing the canonical entity IDs already written to disk.
+        for entity_id, entity in ontology.get("entities", {}).items():
+            if not isinstance(entity, dict):
+                continue
+            name = str(entity.get("name") or entity.get("label") or "")
+            etype = str(entity.get("type") or "Entity")
+            key = (name.lower(), etype.lower())
+            entity_index[key] = entity_id
+
         for state in session_states:
             session_id = str(state.get("session_id", "unknown"))
 

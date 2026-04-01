@@ -442,6 +442,62 @@ class TestOntologySync:
                 assert "session-002" in sources
                 break
 
+    def test_ontology_reuses_existing_entity_ids(self, tmp_path: Path) -> None:
+        """Existing workspace ontology entities should remain canonical across reruns."""
+        sessions_dir = tmp_path / ".openplanter" / "sessions"
+        session_dir = sessions_dir / "session-002"
+        session_dir.mkdir(parents=True)
+
+        state = {
+            "session_id": "session-002",
+            "entities": {
+                "ent_new": {"name": "Shared Entity", "type": "Person"},
+            },
+        }
+        (session_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+        ontology_path = tmp_path / ".openplanter" / "ontology.json"
+        ontology_path.parent.mkdir(parents=True, exist_ok=True)
+        ontology_path.write_text(
+            json.dumps(
+                {
+                    "namespace": "openplanter.workspace",
+                    "version": "2026-04",
+                    "entities": {
+                        "ent_existing": {
+                            "name": "Shared Entity",
+                            "type": "Person",
+                            "source_sessions": ["session-001"],
+                        }
+                    },
+                    "claims": {},
+                    "evidence": {},
+                    "questions": {},
+                    "hypotheses": {},
+                    "links": {},
+                    "provenance_nodes": {},
+                    "indexes": {
+                        "by_external_ref": {},
+                        "by_tag": {},
+                        "by_investigation": {},
+                    },
+                    "source_sessions": ["session-001"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        defrag = WorkspaceDefrag(tmp_path, sessions_dir=sessions_dir)
+        report = defrag.run(mode="cleanup", dry_run=False)
+
+        assert report.entities_merged >= 1
+
+        ontology = json.loads(ontology_path.read_text(encoding="utf-8"))
+        assert set(ontology.get("entities", {}).keys()) == {"ent_existing"}
+        entity = ontology["entities"]["ent_existing"]
+        assert "session-001" in entity.get("source_sessions", [])
+        assert "session-002" in entity.get("source_sessions", [])
+
 
 # ---------------------------------------------------------------------------
 # Mode Tests
