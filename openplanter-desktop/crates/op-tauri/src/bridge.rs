@@ -558,8 +558,8 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
     ) -> serde_json::Value {
         let session_id = turn_ctx.map(|c| c.session_id.as_str()).unwrap_or("unknown");
         let event_id = shared_event_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("evt:{}:{:06}", session_id, entry.seq));
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .unwrap_or(serde_json::Value::Null);
 
         serde_json::json!({
             "schema_version": 2,
@@ -806,7 +806,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
 
         // Collect artifact paths first by pre-scanning step_tool_calls and writing patches
         let mut artifact_refs: Vec<String> = Vec::new();
-        for (idx, tc) in state.step_tool_calls.iter().enumerate() {
+        let mut patch_index = 0usize;
+        for tc in state.step_tool_calls.iter() {
             if tc.name != "apply_patch" || tc.args_truncated || tc.raw_args.trim().is_empty() {
                 continue;
             }
@@ -819,9 +820,11 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             if patch_text.trim().is_empty() {
                 continue;
             }
-            if let Some(path) = self.write_patch_artifact(event.depth, event.step, idx, patch_text)
+            if let Some(path) =
+                self.write_patch_artifact(event.depth, event.step, patch_index, patch_text)
             {
                 artifact_refs.push(format!("artifact:{path}"));
+                patch_index += 1;
             }
         }
 
@@ -1094,6 +1097,7 @@ mod tests {
     use super::*;
     use op_core::engine::demo_solve;
     use op_core::session::replay::ReplayLogger;
+    use std::collections::HashSet;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1170,6 +1174,45 @@ mod tests {
         assert_eq!(first["session_id"], "session-xyz");
         assert_eq!(first["turn_id"], "turn-000123");
         assert_eq!(first["channel"], "replay");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_logging_emitter_fallback_event_ids_use_final_seq() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+        emitter.set_turn_context(TurnContext {
+            turn_id: "turn-000123".to_string(),
+            session_id: "session-xyz".to_string(),
+            event_start_seq: 7,
+        });
+
+        emitter.emit_curator_update("First curator note", 1);
+        emitter.emit_curator_update("Second curator note", 2);
+        emitter.emit_error("Cancelled");
+
+        let raw = std::fs::read_to_string(tmp.path().join("replay.jsonl")).unwrap();
+        let envelopes = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(envelopes.len(), 3);
+
+        let event_ids = envelopes
+            .iter()
+            .map(|value| value["event_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let unique = event_ids.iter().cloned().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), event_ids.len());
+        assert!(!event_ids.iter().any(|id| id.ends_with(":000000")));
+
+        for envelope in &envelopes {
+            let seq = envelope["seq"].as_u64().unwrap();
+            assert_eq!(envelope["session_id"], "session-xyz");
+            assert_eq!(envelope["event_id"], format!("evt:session-xyz:{seq:06}"));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1436,6 +1479,75 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(tool_calls[0].key_arg, "root.txt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_step_keeps_patch_artifact_indices_contiguous() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "read_file".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"path":"notes.txt"}"#.into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "apply_patch".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: notes.txt\n@@\n-old\n+new\n*** End Patch\n"
+            })
+            .to_string(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "apply_patch".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: todo.txt\n@@\n-old\n+newer\n*** End Patch\n"
+            })
+            .to_string(),
+            conversation_path: Some("0".into()),
+        });
+
+        emitter.emit_step(StepEvent {
+            depth: 0,
+            step: 1,
+            conversation_path: Some("0".into()),
+            tool_name: None,
+            tokens: Default::default(),
+            elapsed_ms: 1,
+            is_final: false,
+            loop_phase: None,
+            loop_metrics: None,
+        });
+
+        let patch_one = tmp.path().join("artifacts/patches/patch-d0-s1-1.patch");
+        let patch_two = tmp.path().join("artifacts/patches/patch-d0-s1-2.patch");
+        let patch_three = tmp.path().join("artifacts/patches/patch-d0-s1-3.patch");
+        assert!(patch_one.exists());
+        assert!(patch_two.exists());
+        assert!(!patch_three.exists());
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("artifact:artifacts/patches/patch-d0-s1-1.patch"));
+        assert!(events.contains("artifact:artifacts/patches/patch-d0-s1-2.patch"));
+        assert!(!events.contains("artifact:artifacts/patches/patch-d0-s1-3.patch"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

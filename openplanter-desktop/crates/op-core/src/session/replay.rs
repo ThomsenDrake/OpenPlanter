@@ -109,6 +109,23 @@ impl ReplayLogger {
             if obj.contains_key("recorded_at") {
                 obj.insert("recorded_at".to_string(), Value::String(timestamp));
             }
+            let needs_event_id = match obj.get("event_id") {
+                None => true,
+                Some(value) if value.is_null() => true,
+                Some(Value::String(value)) if value.is_empty() => true,
+                _ => false,
+            };
+            if needs_event_id {
+                let session_id = obj
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("unknown");
+                obj.insert(
+                    "event_id".to_string(),
+                    Value::String(format!("evt:{session_id}:{seq:06}")),
+                );
+            }
         }
 
         let mut line = serde_json::to_string(&value).map_err(std::io::Error::other)?;
@@ -630,6 +647,29 @@ mod tests {
         logger.append(basic_entry("user", "hello")).await.unwrap();
 
         assert_eq!(ReplayLogger::max_seq(tmp.path()).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_append_raw_fills_missing_event_id_from_final_seq() {
+        let tmp = tempdir().unwrap();
+        let mut logger = ReplayLogger::new(tmp.path());
+
+        logger
+            .append_raw(serde_json::json!({
+                "schema_version": 2,
+                "envelope": "openplanter.trace.replay.v2",
+                "event_id": serde_json::Value::Null,
+                "session_id": "session-xyz",
+                "seq": 0,
+                "recorded_at": "",
+            }))
+            .await
+            .unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path().join("replay.jsonl")).unwrap();
+        let first: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(first["seq"], 1);
+        assert_eq!(first["event_id"], "evt:session-xyz:000001");
     }
 
     #[tokio::test]
