@@ -1618,6 +1618,16 @@ fn build_recent_revelations_with_refs(
                 } else {
                     Some(candidate.step_index)
                 },
+                turn_id: candidate_trace_refs.and_then(|r| r.turn_id.clone()),
+                event_id: candidate_trace_refs.and_then(|r| r.event_id.clone()),
+                replay_seq: Some(candidate.replay_seq),
+                replay_line: candidate_trace_refs.and_then(|r| r.replay_line),
+                source_refs: candidate_trace_refs
+                    .map(|r| r.source_refs.clone())
+                    .unwrap_or_default(),
+                evidence_refs: candidate_trace_refs
+                    .map(|r| r.evidence_refs.clone())
+                    .unwrap_or_default(),
             },
         });
         if revelations.len() >= MAX_RECENT_REVELATIONS {

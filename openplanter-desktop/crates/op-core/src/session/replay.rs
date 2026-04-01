@@ -87,6 +87,43 @@ impl ReplayLogger {
         Ok(())
     }
 
+    /// Append a raw JSON value to the replay log.
+    ///
+    /// This is used for writing v2 envelopes directly. The method manages
+    /// sequence number tracking and fills in `seq` and `recorded_at` fields
+    /// if present in the value.
+    pub async fn append_raw(&mut self, mut value: Value) -> std::io::Result<u64> {
+        if !self.seq_initialized {
+            self.seq = Self::max_seq_from_file(&self.path).await?;
+            self.seq_initialized = true;
+        }
+        self.seq += 1;
+        let seq = self.seq;
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Fill seq and recorded_at if the value has these fields
+        if let Some(obj) = value.as_object_mut() {
+            if obj.contains_key("seq") {
+                obj.insert("seq".to_string(), Value::Number(seq.into()));
+            }
+            if obj.contains_key("recorded_at") {
+                obj.insert("recorded_at".to_string(), Value::String(timestamp));
+            }
+        }
+
+        let mut line = serde_json::to_string(&value).map_err(std::io::Error::other)?;
+        line.push('\n');
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        Ok(seq)
+    }
+
     /// Return the highest sequence number currently recorded for a session.
     pub async fn max_seq(session_dir: &Path) -> std::io::Result<u64> {
         Self::max_seq_from_file(&session_dir.join("replay.jsonl")).await
@@ -339,13 +376,16 @@ fn adapt_enveloped_entry(value: &Value, line_seq: u64) -> Option<ReplayEntry> {
                 payload.and_then(|payload| payload_string_field(payload, "conversation_id"))
             }),
         step_tokens_in: payload
-            .and_then(|payload| payload_u64_field(payload, "input_tokens"))
+            .and_then(|payload| payload_u64_field(payload, "step_tokens_in"))
+            .or_else(|| payload.and_then(|payload| payload_u64_field(payload, "input_tokens")))
             .or_else(|| u64_field(value, "input_tokens")),
         step_tokens_out: payload
-            .and_then(|payload| payload_u64_field(payload, "output_tokens"))
+            .and_then(|payload| payload_u64_field(payload, "step_tokens_out"))
+            .or_else(|| payload.and_then(|payload| payload_u64_field(payload, "output_tokens")))
             .or_else(|| u64_field(value, "output_tokens")),
         step_elapsed: payload
-            .and_then(|payload| payload_u64_field(payload, "elapsed_ms"))
+            .and_then(|payload| payload_u64_field(payload, "step_elapsed"))
+            .or_else(|| payload.and_then(|payload| payload_u64_field(payload, "elapsed_ms")))
             .or_else(|| payload.and_then(|payload| elapsed_sec_ms(payload.get("elapsed_sec"))))
             .or_else(|| elapsed_sec_ms(value.get("elapsed_sec"))),
         step_model_preview: if event_type == "step.summary" {

@@ -13,9 +13,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::config::{
-    AgentConfig, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-};
+use crate::config::{AgentConfig, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChromeMcpConfigKey {
@@ -346,24 +344,22 @@ impl ChromeMcpManager {
             .stdout
             .as_mut()
             .ok_or_else(|| anyhow!("Chrome DevTools MCP stdout is unavailable"))?;
-        let response = timeout(
-            Duration::from_secs(timeout_sec.max(1) as u64),
-            async {
-                loop {
-                    let maybe_line = stdout.next_line().await?;
-                    let line = maybe_line.ok_or_else(|| anyhow!("Chrome DevTools MCP closed stdout"))?;
-                    let Ok(payload): Result<Value, _> = serde_json::from_str(&line) else {
-                        continue;
-                    };
-                    let Some(id) = payload.get("id").and_then(|value| value.as_u64()) else {
-                        continue;
-                    };
-                    if id == request_id {
-                        return Ok::<Value, anyhow::Error>(payload);
-                    }
+        let response = timeout(Duration::from_secs(timeout_sec.max(1) as u64), async {
+            loop {
+                let maybe_line = stdout.next_line().await?;
+                let line =
+                    maybe_line.ok_or_else(|| anyhow!("Chrome DevTools MCP closed stdout"))?;
+                let Ok(payload): Result<Value, _> = serde_json::from_str(&line) else {
+                    continue;
+                };
+                let Some(id) = payload.get("id").and_then(|value| value.as_u64()) else {
+                    continue;
+                };
+                if id == request_id {
+                    return Ok::<Value, anyhow::Error>(payload);
                 }
-            },
-        )
+            }
+        })
         .await
         .map_err(|_| anyhow!("Timed out waiting for Chrome DevTools MCP {method} response."))??;
 
@@ -392,7 +388,9 @@ impl ChromeMcpManager {
         stdin
             .write_all(format!("{}\n", payload).as_bytes())
             .await
-            .with_context(|| format!("failed to write Chrome DevTools MCP notification {method}"))?;
+            .with_context(|| {
+                format!("failed to write Chrome DevTools MCP notification {method}")
+            })?;
         stdin.flush().await?;
         Ok(())
     }
@@ -489,7 +487,8 @@ impl ChromeMcpManager {
                 );
             }
         }
-        if lower.contains("no such file") || lower.contains("not found") || lower.contains("spawn") {
+        if lower.contains("no such file") || lower.contains("not found") || lower.contains("spawn")
+        {
             detail.push_str(" Install Node.js/npm so `npx` is available locally.");
         }
         if self.config.browser_url.is_none() && !lower.contains("inspect/#remote-debugging") {
@@ -575,8 +574,7 @@ fn parse_call_result(result: &Value) -> String {
     if content_parts.is_empty() {
         if let Some(structured) = result.get("structuredContent") {
             content_parts.push(
-                serde_json::to_string_pretty(structured)
-                    .unwrap_or_else(|_| structured.to_string()),
+                serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string()),
             );
         }
     }

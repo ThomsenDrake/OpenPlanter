@@ -104,6 +104,9 @@ Always use non-interactive equivalents:
   later steps can re-read it instead of relying on conversation scrollback.
 - Record provenance for every dataset: source URL or file path, access timestamp,
   and any transformations applied.
+- When a workspace accumulates redundant files, un-indexed artifacts, or duplicate data,
+  use the defrag_workspace tool to consolidate. Run with mode="scan_only" first to preview,
+  then mode="full" to execute. Always review the report before proceeding with analysis.
 
 == ENTITY RESOLUTION AND CROSS-DATASET LINKING ==
 - Handle name variants systematically: fuzzy matching, case normalization, suffix
@@ -436,15 +439,44 @@ Each item should cite the relevant evidence/provenance IDs.
 RETRIEVAL_SECTION = """
 == SEMANTIC RETRIEVAL ==
 Your initial message may contain a "retrieval_packet" assembled from local
-semantic search over the runtime wiki, workspace research documents, and this
-session's memory/evidence/artifacts.
+semantic search over the runtime wiki, workspace research documents, this
+session's memory/evidence/artifacts, and typed ontology objects derived from
+investigation_state.
 
 Use retrieval_packet as bounded context, not ground truth:
+- Prefer `retrieval_packet.hits.ontology_objects` as the primary semantic
+  grounding surface for questions, claims, evidence, entities, and links.
+- Use `retrieval_packet.hits.documents` as corroborating context and follow-up
+  reading targets.
+- Treat `retrieval_packet.hits.graph_expansions` as 1-hop leads, not proof.
 - Treat retrieved excerpts as candidate leads to verify with tools.
 - Prefer the cited source paths and excerpts when choosing what to read next.
 - Re-read the underlying file or artifact before making high-confidence claims.
 - Do not quote retrieval excerpts as if they were exhaustive; they are chunked,
   relevance-ranked snippets.
+"""
+
+
+WORKSPACE_ONTOLOGY_SECTION = """
+## Workspace-Global Ontology
+
+A workspace-global ontology at `.openplanter/ontology.json` consolidates entities,
+claims, evidence, and questions across ALL investigation sessions. When the retrieval
+packet includes ontology hits with `scope: "workspace"`, these are cross-investigation
+objects discovered from other sessions — use them to:
+
+- Identify entities that appeared in prior investigations
+- Trace evidence chains across sessions via `source_sessions` metadata
+- Detect contradictions between sessions' claims about the same entity
+- Avoid re-discovering facts already established in earlier work
+
+The `cross_investigation_context` section of the question reasoning packet shows
+how many cross-investigation entities and claims are available. Use retrieval to
+pull specific objects when cross-investigation context would help answer a question.
+
+Your session has an active investigation context. Prioritize objects from your
+active investigation but leverage workspace-wide objects when they provide
+relevant evidence or context.
 """
 
 
@@ -493,6 +525,7 @@ def build_system_prompt(
     prompt += TURN_HISTORY_SECTION
     prompt += QUESTION_REASONING_SECTION
     prompt += RETRIEVAL_SECTION
+    prompt += WORKSPACE_ONTOLOGY_SECTION
     prompt += WIKI_SECTION
     if recursive:
         prompt += RECURSIVE_SECTION

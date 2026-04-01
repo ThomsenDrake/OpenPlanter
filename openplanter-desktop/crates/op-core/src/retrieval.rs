@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,15 +17,21 @@ use crate::config::{AgentConfig, normalize_embeddings_provider};
 
 pub const VOYAGE_EMBEDDING_MODEL: &str = "voyage-4";
 pub const MISTRAL_EMBEDDING_MODEL: &str = "mistral-embed";
+pub const RETRIEVAL_PACKET_VERSION: &str = "retrieval-v3";
+pub const RETRIEVAL_MODE: &str = "documents+ontology";
 
-const INDEX_VERSION: &str = "embeddings-v2";
+const INDEX_VERSION: &str = "embeddings-v3";
 const CHUNK_TARGET_CHARS: usize = 1200;
 const CHUNK_OVERLAP_CHARS: usize = 200;
 const STRUCTURED_RECORD_MAX_CHARS: usize = CHUNK_TARGET_CHARS + CHUNK_OVERLAP_CHARS;
 const MAX_EXCERPT_CHARS: usize = 280;
 const WORKSPACE_TOP_K: usize = 4;
 const SESSION_TOP_K: usize = 4;
+const FUSED_DOCUMENT_TOP_K: usize = WORKSPACE_TOP_K + SESSION_TOP_K;
+const ONTOLOGY_TOP_K: usize = 6;
 const MAX_HITS_PER_SOURCE: usize = 2;
+const MAX_HITS_PER_OBJECT: usize = 2;
+const MAX_GRAPH_RELATED_IDS: usize = 8;
 const BATCH_SIZE: usize = 32;
 const RETRIEVAL_MAX_TRANSIENT_RETRIES: usize = 4;
 const RETRIEVAL_STARTUP_RETRY_DELAY_CAP_SEC: f64 = 10.0;
@@ -75,7 +81,9 @@ impl EmbeddingsRetryPolicy {
     fn compute_delay_sec(&self, retry_count: usize, retry_after_sec: Option<f64>) -> f64 {
         let delay = retry_after_sec
             .map(|value| value.max(0.0).min(self.retry_after_cap_sec))
-            .unwrap_or_else(|| self.backoff_base_sec * 2_f64.powi((retry_count.saturating_sub(1)) as i32));
+            .unwrap_or_else(|| {
+                self.backoff_base_sec * 2_f64.powi((retry_count.saturating_sub(1)) as i32)
+            });
         delay
             .min(self.backoff_max_sec)
             .min(RETRIEVAL_STARTUP_RETRY_DELAY_CAP_SEC)
@@ -118,7 +126,9 @@ impl EmbeddingsRequestError {
 
     fn retry_after_sec(&self) -> Option<f64> {
         match self {
-            Self::RetryableTransient { retry_after_sec, .. } => *retry_after_sec,
+            Self::RetryableTransient {
+                retry_after_sec, ..
+            } => *retry_after_sec,
             _ => None,
         }
     }
@@ -135,13 +145,16 @@ impl EmbeddingsRequestError {
 
 #[derive(Debug, Clone)]
 enum RefreshIndexOutcome {
-    Complete { chunks: Vec<ChunkRecord> },
+    Complete {
+        chunks: Vec<ChunkRecord>,
+    },
     PartialCached {
         documents_done: usize,
         documents_total: usize,
         chunks_done: usize,
         chunks_total: usize,
         failure_detail: String,
+        cached_chunks: Vec<ChunkRecord>,
     },
 }
 
@@ -196,6 +209,15 @@ impl RetrievalProgress {
             })
         )
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RetrievalQuery {
+    text: String,
+    focus_question_ids: Vec<String>,
+    focus_claim_ids: Vec<String>,
+    focus_entity_ids: Vec<String>,
+    boost_object_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,7 +311,11 @@ impl EmbeddingsClient {
         }
     }
 
-    async fn embed(&self, texts: &[String], input_type: &str) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -325,20 +351,22 @@ impl EmbeddingsClient {
                     &text,
                 ));
             }
-            let parsed: Value = serde_json::from_str(&text).map_err(|_| {
-                EmbeddingsRequestError::Fatal {
+            let parsed: Value =
+                serde_json::from_str(&text).map_err(|_| EmbeddingsRequestError::Fatal {
                     status_code: Some(status.as_u16()),
                     detail: format!(
                         "{} embeddings returned non-JSON payload: {}",
                         self.provider,
                         truncate(&text, 500)
                     ),
-                }
-            })?;
+                })?;
             let Some(data) = parsed.get("data").and_then(Value::as_array) else {
                 return Err(EmbeddingsRequestError::Fatal {
                     status_code: Some(status.as_u16()),
-                    detail: format!("{} embeddings returned unexpected payload shape", self.provider),
+                    detail: format!(
+                        "{} embeddings returned unexpected payload shape",
+                        self.provider
+                    ),
                 });
             };
             let mut ordered: Vec<(usize, Vec<f64>)> = Vec::new();
@@ -409,8 +437,11 @@ trait DocumentEmbeddingsBackend: Sync {
     fn provider(&self) -> &str;
     fn model(&self) -> &str;
     fn limits(&self) -> EmbeddingsProviderLimits;
-    async fn embed(&self, texts: &[String], input_type: &str)
-        -> Result<Vec<Vec<f64>>, EmbeddingsRequestError>;
+    async fn embed(
+        &self,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f64>>, EmbeddingsRequestError>;
 }
 
 #[async_trait]
@@ -461,7 +492,9 @@ pub fn build_embeddings_status(
             provider: normalized.clone(),
             model: model.clone(),
             status: "enabled".to_string(),
-            detail: format!("Retrieval enabled via {normalized} ({model})."),
+            detail: format!(
+                "Retrieval enabled via {normalized} ({model}). Hybrid mode: {RETRIEVAL_MODE} ({RETRIEVAL_PACKET_VERSION})."
+            ),
         }
     } else {
         let missing = if normalized == "voyage" {
@@ -474,7 +507,7 @@ pub fn build_embeddings_status(
             model: model.clone(),
             status: "disabled".to_string(),
             detail: format!(
-                "Retrieval disabled: {missing} is not configured for {normalized}."
+                "Retrieval disabled: {missing} is not configured for {normalized}. Hybrid mode: {RETRIEVAL_MODE} ({RETRIEVAL_PACKET_VERSION})."
             ),
         }
     }
@@ -541,25 +574,30 @@ where
     B: DocumentEmbeddingsBackend,
     F: FnMut(String),
 {
-    emit_retrieval_progress(emit_trace, RetrievalProgress {
-        corpus: "all".to_string(),
-        phase: "scan".to_string(),
-        documents_done: 0,
-        documents_total: 0,
-        chunks_done: 0,
-        chunks_total: 0,
-        reused_documents: 0,
-        message: "Scanning workspace and session documents for retrieval.".to_string(),
-    });
+    emit_retrieval_progress(
+        emit_trace,
+        RetrievalProgress {
+            corpus: "all".to_string(),
+            phase: "scan".to_string(),
+            documents_done: 0,
+            documents_total: 0,
+            chunks_done: 0,
+            chunks_total: 0,
+            reused_documents: 0,
+            message: "Scanning workspace and session documents for retrieval.".to_string(),
+        },
+    );
     let workspace_docs = collect_workspace_documents(workspace, session_root_dir);
     let session_docs = collect_session_documents(workspace, session_dir);
+    let ontology_docs = collect_ontology_documents(workspace, session_dir);
     let total_docs = workspace_docs.len() + session_docs.len();
-    if total_docs == 0 {
+    let total_ontology_objects = ontology_docs.len();
+    if total_docs == 0 && total_ontology_objects == 0 {
         return Ok(RetrievalBuildResult {
             packet: None,
             status: RetrievalStatus {
                 detail: format!(
-                    "Retrieval enabled via {} ({}), but no indexable documents were found.",
+                    "Retrieval enabled via {} ({}), but no indexable documents or ontology objects were found.",
                     status.provider, status.model
                 ),
                 ..status.clone()
@@ -571,76 +609,70 @@ where
         .join(session_root_dir)
         .join("embeddings")
         .join("workspace");
-    let workspace_chunks = match refresh_index(
-        Some(&workspace_index_dir),
-        &workspace_docs,
-        client,
-        "workspace",
-        retry_policy,
-        cancel,
-        emit_trace,
-    )
-    .await?
-    {
-        RefreshIndexOutcome::Complete { chunks } => chunks,
-        RefreshIndexOutcome::PartialCached {
-            documents_done,
-            documents_total,
-            chunks_done,
-            chunks_total,
-            failure_detail,
-        } => {
-            return Ok(RetrievalBuildResult {
-                packet: None,
-                status: degraded_retrieval_status(
-                    status,
-                    format!(
-                        "Retrieval degraded via {} ({}); workspace indexing failed after retries and cached {documents_done}/{documents_total} document(s) ({chunks_done}/{chunks_total} chunks) for a future run. Semantic context was skipped for this solve. Last error: {failure_detail}",
-                        status.provider, status.model
-                    ),
-                ),
-            });
-        }
-    };
-
-    let session_chunks = if let Some(session_dir) = session_dir {
-        match refresh_index(
-            Some(&session_dir.join("embeddings")),
-            &session_docs,
+    let (workspace_chunks, workspace_degradation) = resolve_refresh_index_outcome(
+        refresh_index(
+            Some(&workspace_index_dir),
+            &workspace_docs,
             client,
-            "session",
+            "workspace",
             retry_policy,
             cancel,
             emit_trace,
         )
-        .await?
-        {
-            RefreshIndexOutcome::Complete { chunks } => chunks,
-            RefreshIndexOutcome::PartialCached {
-                documents_done,
-                documents_total,
-                chunks_done,
-                chunks_total,
-                failure_detail,
-            } => {
-                return Ok(RetrievalBuildResult {
-                    packet: None,
-                    status: degraded_retrieval_status(
-                        status,
-                        format!(
-                            "Retrieval degraded via {} ({}); session indexing failed after retries and cached {documents_done}/{documents_total} document(s) ({chunks_done}/{chunks_total} chunks) for a future run. Semantic context was skipped for this solve. Last error: {failure_detail}",
-                            status.provider, status.model
-                        ),
-                    ),
-                });
-            }
-        }
+        .await?,
+        "workspace",
+    );
+
+    let (session_chunks, session_degradation) = if let Some(session_dir) = session_dir {
+        resolve_refresh_index_outcome(
+            refresh_index(
+                Some(&session_dir.join("embeddings")),
+                &session_docs,
+                client,
+                "session",
+                retry_policy,
+                cancel,
+                emit_trace,
+            )
+            .await?,
+            "session",
+        )
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
+    let (ontology_chunks, ontology_degradation) = if let Some(session_dir) = session_dir {
+        resolve_refresh_index_outcome(
+            refresh_index(
+                Some(&session_dir.join("embeddings").join("ontology")),
+                &ontology_docs,
+                client,
+                "ontology",
+                retry_policy,
+                cancel,
+                emit_trace,
+            )
+            .await?,
+            "ontology",
+        )
+    } else {
+        (Vec::new(), None)
+    };
+
+    let mut degradation_notes = Vec::new();
+    for note in [
+        workspace_degradation,
+        session_degradation,
+        ontology_degradation,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        degradation_notes.push(note);
+    }
+
     let query = build_query(objective, question_reasoning_packet);
-    if query.trim().is_empty() {
+    if query.text.trim().is_empty() {
         return Ok(RetrievalBuildResult {
             packet: None,
             status: RetrievalStatus {
@@ -653,59 +685,150 @@ where
         });
     }
 
-    let query_vector =
-        match embed_query_with_retry(client, &query, retry_policy, cancel, emit_trace).await {
-            Ok(vector) => vector,
-            Err(err) => {
-                return Ok(RetrievalBuildResult {
-                    packet: None,
-                    status: degraded_retrieval_status(
-                        status,
-                        format!(
-                            "Retrieval degraded via {} ({}); indexed {} document(s), but query embedding failed after retries. Semantic context was skipped for this solve. Last error: {}",
-                            status.provider,
-                            status.model,
-                            total_docs,
-                            err.detail()
-                        ),
+    let query_vector = match embed_query_with_retry(
+        client,
+        &query.text,
+        retry_policy,
+        cancel,
+        emit_trace,
+    )
+    .await
+    {
+        Ok(vector) => vector,
+        Err(err) => {
+            return Ok(RetrievalBuildResult {
+                packet: None,
+                status: degraded_retrieval_status(
+                    status,
+                    format!(
+                        "Retrieval degraded via {} ({}); indexed {} document(s) and {} ontology object(s), but query embedding failed after retries. Semantic context was skipped for this solve. Last error: {}",
+                        status.provider,
+                        status.model,
+                        total_docs,
+                        total_ontology_objects,
+                        err.detail()
                     ),
-                });
-            }
-        };
-    let workspace_hits =
-        search_chunks(&workspace_chunks, &query_vector, WORKSPACE_TOP_K, MAX_HITS_PER_SOURCE);
-    let session_hits =
-        search_chunks(&session_chunks, &query_vector, SESSION_TOP_K, MAX_HITS_PER_SOURCE);
-    let hit_count = workspace_hits.len() + session_hits.len();
-    if hit_count == 0 {
-        return Ok(RetrievalBuildResult {
-            packet: None,
-            status: RetrievalStatus {
-                detail: format!(
-                    "Retrieval enabled via {} ({}); indexed {} document(s), but found no strong semantic matches.",
-                    status.provider, status.model, total_docs
                 ),
-                ..status.clone()
-            },
-        });
-    }
+            });
+        }
+    };
+
+    let ontology_hits = search_ontology_objects(
+        &ontology_chunks,
+        &query_vector,
+        ONTOLOGY_TOP_K,
+        MAX_HITS_PER_OBJECT,
+        &query.boost_object_ids,
+    );
+    let top_ontology_ids = ontology_hits
+        .iter()
+        .filter_map(|hit| hit.get("object_id").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let workspace_hits = search_chunks(
+        &workspace_chunks,
+        &query_vector,
+        WORKSPACE_TOP_K,
+        MAX_HITS_PER_SOURCE,
+    );
+    let session_hits = search_chunks(
+        &session_chunks,
+        &query_vector,
+        SESSION_TOP_K,
+        MAX_HITS_PER_SOURCE,
+    );
+    let document_hits = fuse_document_hits(
+        &workspace_chunks,
+        &session_chunks,
+        &query_vector,
+        &top_ontology_ids,
+        &query.boost_object_ids,
+        FUSED_DOCUMENT_TOP_K,
+        MAX_HITS_PER_SOURCE,
+    );
+    let graph_expansions = build_graph_expansions(&ontology_hits);
+    let hit_count = ontology_hits.len() + document_hits.len();
+    let packet_status = if degradation_notes.is_empty() {
+        "ready"
+    } else {
+        "degraded"
+    };
+    let packet = json!({
+        "version": RETRIEVAL_PACKET_VERSION,
+        "mode": RETRIEVAL_MODE,
+        "status": packet_status,
+        "provider": status.provider,
+        "model": status.model,
+        "query": {
+            "text": query.text,
+            "focus_question_ids": query.focus_question_ids,
+            "focus_claim_ids": query.focus_claim_ids,
+            "focus_entity_ids": query.focus_entity_ids,
+        },
+        "query_text": query.text,
+        "hits": {
+            "documents": document_hits,
+            "ontology_objects": ontology_hits,
+            "graph_expansions": graph_expansions,
+        },
+        "coverage": {
+            "documents_indexed": total_docs,
+            "ontology_objects_indexed": total_ontology_objects,
+        },
+        "workspace_hits": workspace_hits,
+        "session_hits": session_hits,
+    });
+
+    let detail = if !degradation_notes.is_empty() {
+        format!(
+            "Retrieval degraded via {} ({}); {} Selected {} hybrid semantic match(es).",
+            status.provider,
+            status.model,
+            degradation_notes.join(" "),
+            hit_count
+        )
+    } else if hit_count == 0 {
+        format!(
+            "Retrieval enabled via {} ({}); indexed {} document(s) and {} ontology object(s), but found no strong semantic matches.",
+            status.provider, status.model, total_docs, total_ontology_objects
+        )
+    } else {
+        format!(
+            "Retrieval enabled via {} ({}); indexed {} document(s) and {} ontology object(s) and selected {} hybrid semantic match(es).",
+            status.provider, status.model, total_docs, total_ontology_objects, hit_count
+        )
+    };
 
     Ok(RetrievalBuildResult {
-        packet: Some(json!({
-            "provider": status.provider,
-            "model": status.model,
-            "query": query,
-            "workspace_hits": workspace_hits,
-            "session_hits": session_hits,
-        })),
+        packet: Some(packet),
         status: RetrievalStatus {
-            detail: format!(
-                "Retrieval enabled via {} ({}); indexed {} document(s) and selected {} semantic match(es).",
-                status.provider, status.model, total_docs, hit_count
-            ),
+            detail,
+            status: packet_status.to_string(),
             ..status.clone()
         },
     })
+}
+
+fn resolve_refresh_index_outcome(
+    outcome: RefreshIndexOutcome,
+    corpus: &str,
+) -> (Vec<ChunkRecord>, Option<String>) {
+    match outcome {
+        RefreshIndexOutcome::Complete { chunks } => (chunks, None),
+        RefreshIndexOutcome::PartialCached {
+            documents_done,
+            documents_total,
+            chunks_done,
+            chunks_total,
+            failure_detail,
+            cached_chunks,
+        } => (
+            cached_chunks,
+            Some(format!(
+                "{corpus} indexing failed after retries and cached {documents_done}/{documents_total} record(s) ({chunks_done}/{chunks_total} chunks) for a future run. Last error: {failure_detail}"
+            )),
+        ),
+    }
 }
 
 fn degraded_retrieval_status(status: &RetrievalStatus, detail: String) -> RetrievalStatus {
@@ -913,7 +1036,10 @@ fn documents_from_file(path: &Path, workspace: &Path, kind: &str) -> Vec<SourceD
     }
     let rel_path = relative_path(path, workspace);
     let mut metadata = Map::new();
-    metadata.insert("extension".to_string(), Value::String(format!(".{extension}")));
+    metadata.insert(
+        "extension".to_string(),
+        Value::String(format!(".{extension}")),
+    );
     vec![SourceDocument {
         source_id: rel_path.clone(),
         path: rel_path,
@@ -984,7 +1110,10 @@ fn documents_from_investigation_state(path: &Path, workspace: &Path) -> Vec<Sour
                 continue;
             }
             let mut metadata = Map::new();
-            metadata.insert("record_type".to_string(), Value::String("evidence".to_string()));
+            metadata.insert(
+                "record_type".to_string(),
+                Value::String("evidence".to_string()),
+            );
             metadata.insert(
                 "evidence_id".to_string(),
                 Value::String(evidence_id.to_string()),
@@ -992,6 +1121,15 @@ fn documents_from_investigation_state(path: &Path, workspace: &Path) -> Vec<Sour
             metadata.insert(
                 "evidence_type".to_string(),
                 Value::String(string_field(record_obj, "evidence_type")),
+            );
+            metadata.insert(
+                "linked_object_ids".to_string(),
+                Value::Array(
+                    record_related_object_ids("evidence", record_obj, &BTreeSet::new())
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
             docs.push(SourceDocument {
                 source_id: format!("{rel_path}#evidence:{evidence_id}"),
@@ -1005,6 +1143,479 @@ fn documents_from_investigation_state(path: &Path, workspace: &Path) -> Vec<Sour
         }
     }
     docs
+}
+
+fn collect_ontology_documents(workspace: &Path, session_dir: Option<&Path>) -> Vec<SourceDocument> {
+    let mut docs = Vec::new();
+    let mut seen_object_ids = BTreeSet::new();
+
+    if let Some(session_dir) = session_dir {
+        let investigation_path = session_dir.join("investigation_state.json");
+        for doc in ontology_documents_from_investigation_state(&investigation_path, workspace) {
+            if let Some(object_id) = ontology_object_id(&doc) {
+                seen_object_ids.insert(object_id.to_string());
+            }
+            docs.push(doc);
+        }
+    }
+
+    let workspace_ontology_path = workspace.join(".openplanter").join("ontology.json");
+    for doc in ontology_documents_from_workspace_ontology(&workspace_ontology_path, workspace) {
+        let Some(object_id) = ontology_object_id(&doc) else {
+            docs.push(doc);
+            continue;
+        };
+        if seen_object_ids.insert(object_id.to_string()) {
+            docs.push(doc);
+        }
+    }
+
+    docs
+}
+
+fn ontology_documents_from_investigation_state(
+    path: &Path,
+    workspace: &Path,
+) -> Vec<SourceDocument> {
+    ontology_documents_from_state_like(
+        path,
+        workspace,
+        "session",
+        &[
+            ("question", "questions"),
+            ("claim", "claims"),
+            ("evidence", "evidence"),
+            ("entity", "entities"),
+            ("link", "links"),
+        ],
+        None,
+    )
+}
+
+fn ontology_documents_from_workspace_ontology(
+    path: &Path,
+    workspace: &Path,
+) -> Vec<SourceDocument> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    if !parsed.is_object() {
+        return Vec::new();
+    }
+
+    let top_level_source_sessions = value_string_list(parsed.get("source_sessions"));
+    ontology_documents_from_state_like(
+        path,
+        workspace,
+        "workspace",
+        &[
+            ("question", "questions"),
+            ("claim", "claims"),
+            ("evidence", "evidence"),
+            ("entity", "entities"),
+            ("link", "links"),
+            ("hypothesis", "hypotheses"),
+            ("provenance", "provenance_nodes"),
+        ],
+        Some(&top_level_source_sessions),
+    )
+}
+
+fn ontology_documents_from_state_like(
+    path: &Path,
+    workspace: &Path,
+    scope: &str,
+    collections: &[(&str, &str)],
+    top_level_source_sessions: Option<&[String]>,
+) -> Vec<SourceDocument> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(state) = parsed.as_object() else {
+        return Vec::new();
+    };
+
+    let rel_path = relative_path(path, workspace);
+    let existing_ids = collect_existing_state_ids(state);
+    let label_index = build_state_label_index(state);
+    let mut docs = Vec::new();
+
+    for (object_type, key) in collections {
+        let Some(records) = state.get(*key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (object_id, raw_record) in records {
+            let Some(record) = raw_record.as_object() else {
+                continue;
+            };
+            let source_sessions = if scope == "workspace" {
+                let record_source_sessions = value_string_list(record.get("source_sessions"));
+                if record_source_sessions.is_empty() {
+                    top_level_source_sessions.map(|value| value.to_vec())
+                } else {
+                    Some(record_source_sessions)
+                }
+            } else {
+                None
+            };
+            if let Some(doc) = ontology_document_from_record(
+                &rel_path,
+                object_type,
+                object_id,
+                record,
+                &label_index,
+                &existing_ids,
+                scope,
+                source_sessions.as_deref(),
+            ) {
+                docs.push(doc);
+            }
+        }
+    }
+
+    docs
+}
+
+fn ontology_document_from_record(
+    rel_path: &str,
+    object_type: &str,
+    object_id: &str,
+    record: &Map<String, Value>,
+    label_index: &BTreeMap<String, String>,
+    existing_ids: &BTreeSet<String>,
+    scope: &str,
+    source_sessions: Option<&[String]>,
+) -> Option<SourceDocument> {
+    let related_ids = record_related_object_ids(object_type, record, existing_ids);
+    let provenance_ids = value_string_list(record.get("provenance_ids"));
+    let label = record_label(record).unwrap_or_else(|| object_id.to_string());
+    let text = build_ontology_text(
+        object_type,
+        object_id,
+        record,
+        label_index,
+        &related_ids,
+        &provenance_ids,
+    );
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut metadata = Map::new();
+    metadata.insert(
+        "object_id".to_string(),
+        Value::String(object_id.to_string()),
+    );
+    metadata.insert(
+        "object_type".to_string(),
+        Value::String(object_type.to_string()),
+    );
+    metadata.insert("object_label".to_string(), Value::String(label.clone()));
+    metadata.insert(
+        "related_object_ids".to_string(),
+        Value::Array(related_ids.iter().cloned().map(Value::String).collect()),
+    );
+    metadata.insert(
+        "linked_object_ids".to_string(),
+        Value::Array(
+            related_ids
+                .iter()
+                .cloned()
+                .chain(std::iter::once(object_id.to_string()))
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    metadata.insert(
+        "provenance_ids".to_string(),
+        Value::Array(provenance_ids.iter().cloned().map(Value::String).collect()),
+    );
+    metadata.insert("scope".to_string(), Value::String(scope.to_string()));
+    if let Some(source_sessions) = source_sessions {
+        metadata.insert(
+            "source_sessions".to_string(),
+            Value::Array(source_sessions.iter().cloned().map(Value::String).collect()),
+        );
+    }
+
+    let fingerprint = fingerprint_text(&format!(
+        "{text}\n{}\n{}",
+        related_ids.join(","),
+        provenance_ids.join(",")
+    ));
+    Some(SourceDocument {
+        source_id: format!("{rel_path}#ontology:{object_type}:{object_id}"),
+        path: format!("{rel_path}#ontology:{object_type}:{object_id}"),
+        title: label,
+        text,
+        fingerprint,
+        kind: format!("ontology_{object_type}"),
+        metadata,
+    })
+}
+
+fn ontology_object_id(doc: &SourceDocument) -> Option<&str> {
+    doc.metadata.get("object_id").and_then(Value::as_str)
+}
+
+fn collect_existing_state_ids(state: &Map<String, Value>) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for key in [
+        "questions",
+        "claims",
+        "evidence",
+        "entities",
+        "links",
+        "hypotheses",
+        "provenance_nodes",
+        "confidence_profiles",
+    ] {
+        let Some(records) = state.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        ids.extend(records.keys().cloned());
+    }
+    ids
+}
+
+fn build_state_label_index(state: &Map<String, Value>) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    for key in [
+        "questions",
+        "claims",
+        "evidence",
+        "entities",
+        "links",
+        "hypotheses",
+        "provenance_nodes",
+        "confidence_profiles",
+    ] {
+        let Some(records) = state.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (record_id, raw_record) in records {
+            if let Some(label) = record_label_from_value(raw_record) {
+                labels.insert(record_id.clone(), label);
+            }
+        }
+    }
+    labels
+}
+
+fn build_ontology_text(
+    object_type: &str,
+    object_id: &str,
+    record: &Map<String, Value>,
+    label_index: &BTreeMap<String, String>,
+    related_ids: &[String],
+    provenance_ids: &[String],
+) -> String {
+    let mut lines = vec![
+        format!("object_type: {object_type}"),
+        format!("object_id: {object_id}"),
+    ];
+    if let Some(label) = record_label(record) {
+        lines.push(format!("label: {label}"));
+    }
+    for key in [
+        "status",
+        "priority",
+        "kind",
+        "predicate",
+        "evidence_type",
+        "canonical_name",
+        "question_text",
+        "question",
+        "claim_text",
+        "summary",
+        "source_uri",
+    ] {
+        if let Some(value) = record.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                lines.push(format!("{key}: {trimmed}"));
+            }
+        }
+    }
+    if let Some(text) = record.get("content").and_then(Value::as_str) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            lines.push(format!("content: {trimmed}"));
+        }
+    }
+    if let Some(aliases) = record.get("aliases").and_then(Value::as_array) {
+        let alias_text = aliases
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !alias_text.is_empty() {
+            lines.push(format!("aliases: {}", alias_text.join(", ")));
+        }
+    }
+    if let Some(source_entity_id) = record.get("source_entity_id").and_then(Value::as_str) {
+        lines.push(format!(
+            "source_entity: {}",
+            label_index
+                .get(source_entity_id)
+                .cloned()
+                .unwrap_or_else(|| source_entity_id.to_string())
+        ));
+    }
+    if let Some(target_entity_id) = record.get("target_entity_id").and_then(Value::as_str) {
+        lines.push(format!(
+            "target_entity: {}",
+            label_index
+                .get(target_entity_id)
+                .cloned()
+                .unwrap_or_else(|| target_entity_id.to_string())
+        ));
+    }
+    if let Some(attributes) = record
+        .get("attributes")
+        .and_then(|value| compact_json(value, 320))
+    {
+        lines.push(format!("attributes: {attributes}"));
+    }
+    if let Some(external_refs) = record
+        .get("external_refs")
+        .and_then(|value| compact_json(value, 320))
+    {
+        lines.push(format!("external_refs: {external_refs}"));
+    }
+    let related_labels = related_ids
+        .iter()
+        .take(MAX_GRAPH_RELATED_IDS)
+        .map(|id| label_index.get(id).cloned().unwrap_or_else(|| id.clone()))
+        .collect::<Vec<_>>();
+    if !related_labels.is_empty() {
+        lines.push(format!("related_objects: {}", related_labels.join(" | ")));
+    }
+    if !provenance_ids.is_empty() {
+        lines.push(format!("provenance_ids: {}", provenance_ids.join(", ")));
+    }
+    join_nonempty(&lines)
+}
+
+fn record_related_object_ids(
+    object_type: &str,
+    record: &Map<String, Value>,
+    existing_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut push_known = |value: Option<&Value>| {
+        for id in value_string_list(value) {
+            if looks_like_state_object_id(&id) || existing_ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    };
+
+    match object_type {
+        "question" => {
+            for key in [
+                "claim_ids",
+                "evidence_ids",
+                "related_entity_ids",
+                "related_hypothesis_ids",
+                "triggers",
+            ] {
+                push_known(record.get(key));
+            }
+            if let Some(value) = record.get("resolution_claim_id") {
+                push_known(Some(value));
+            }
+        }
+        "claim" => {
+            for key in [
+                "subject_refs",
+                "support_evidence_ids",
+                "contradiction_evidence_ids",
+                "evidence_support_ids",
+                "evidence_contra_ids",
+                "evidence_ids",
+            ] {
+                push_known(record.get(key));
+            }
+        }
+        "evidence" => {
+            for key in ["claim_ids", "entity_ids", "link_ids", "provenance_ids"] {
+                push_known(record.get(key));
+            }
+            if let Some(value) = record.get("confidence_id") {
+                push_known(Some(value));
+            }
+        }
+        "entity" => {
+            for key in ["entity_ids", "related_entity_ids", "provenance_ids"] {
+                push_known(record.get(key));
+            }
+            if let Some(value) = record.get("confidence_id") {
+                push_known(Some(value));
+            }
+        }
+        "link" => {
+            for key in ["provenance_ids"] {
+                push_known(record.get(key));
+            }
+            for key in ["source_entity_id", "target_entity_id", "confidence_id"] {
+                if let Some(value) = record.get(key) {
+                    push_known(Some(value));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for (key, value) in record {
+        if key.ends_with("_id") || key.ends_with("_ids") {
+            push_known(Some(value));
+        }
+    }
+
+    dedupe_strings(ids)
+}
+
+fn looks_like_state_object_id(value: &str) -> bool {
+    [
+        "q_", "cl_", "ev_", "ent_", "lnk_", "pv_", "conf_", "hyp_", "gap_",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
+}
+
+fn record_label(record: &Map<String, Value>) -> Option<String> {
+    record_label_from_value(&Value::Object(record.clone()))
+}
+
+fn record_label_from_value(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+    for key in [
+        "title",
+        "label",
+        "name",
+        "canonical_name",
+        "question_text",
+        "question",
+        "claim_text",
+        "summary",
+        "content",
+        "source_uri",
+    ] {
+        if let Some(value) = obj.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(truncate(trimmed, 96));
+            }
+        }
+    }
+    None
 }
 
 async fn refresh_index<B>(
@@ -1023,7 +1634,10 @@ where
         return Ok(RefreshIndexOutcome::Complete { chunks: Vec::new() });
     };
     fs::create_dir_all(index_dir).with_context(|| {
-        format!("failed to create embeddings index directory {}", index_dir.display())
+        format!(
+            "failed to create embeddings index directory {}",
+            index_dir.display()
+        )
     })?;
     let meta_path = index_dir.join("meta.json");
     let chunks_path = index_dir.join("chunks.jsonl");
@@ -1039,7 +1653,10 @@ where
     let mut reused_chunks = 0usize;
     for doc in documents {
         if let Some(prior) = existing.get(&doc.source_id) {
-            if prior.iter().all(|chunk| chunk.fingerprint == doc.fingerprint) {
+            if prior
+                .iter()
+                .all(|chunk| chunk.fingerprint == doc.fingerprint)
+            {
                 reused_documents += 1;
                 reused_chunks += prior.len();
                 resolved.extend(prior.clone());
@@ -1058,27 +1675,33 @@ where
     let total_documents = documents.len();
     let total_chunks = reused_chunks + pending_records.len();
     if pending_records.is_empty() {
-        emit_retrieval_progress(emit_trace, RetrievalProgress {
-            corpus: corpus.to_string(),
-            phase: "writing".to_string(),
-            documents_done: total_documents,
-            documents_total: total_documents,
-            chunks_done: total_chunks,
-            chunks_total: total_chunks,
-            reused_documents,
-            message: format!("Writing cached {corpus} retrieval index."),
-        });
+        emit_retrieval_progress(
+            emit_trace,
+            RetrievalProgress {
+                corpus: corpus.to_string(),
+                phase: "writing".to_string(),
+                documents_done: total_documents,
+                documents_total: total_documents,
+                chunks_done: total_chunks,
+                chunks_total: total_chunks,
+                reused_documents,
+                message: format!("Writing cached {corpus} retrieval index."),
+            },
+        );
     } else {
-        emit_retrieval_progress(emit_trace, RetrievalProgress {
-            corpus: corpus.to_string(),
-            phase: "embedding".to_string(),
-            documents_done: reused_documents,
-            documents_total: total_documents,
-            chunks_done: reused_chunks,
-            chunks_total: total_chunks,
-            reused_documents,
-            message: format!("Embedding {corpus} retrieval index."),
-        });
+        emit_retrieval_progress(
+            emit_trace,
+            RetrievalProgress {
+                corpus: corpus.to_string(),
+                phase: "embedding".to_string(),
+                documents_done: reused_documents,
+                documents_total: total_documents,
+                chunks_done: reused_chunks,
+                chunks_total: total_chunks,
+                reused_documents,
+                message: format!("Embedding {corpus} retrieval index."),
+            },
+        );
         let mut batch_start = 0usize;
         while batch_start < pending_records.len() {
             let chunk_boundaries = pending_chunk_boundaries(&pending_records);
@@ -1128,7 +1751,9 @@ where
                     let failure_detail = err.detail().to_string();
                     if chunks_done > 0 {
                         let mut cached_chunks = resolved.clone();
-                        cached_chunks.extend(finalize_pending_chunks(pending_records[..batch_start].to_vec()));
+                        cached_chunks.extend(finalize_pending_chunks(
+                            pending_records[..batch_start].to_vec(),
+                        ));
                         sort_chunk_records(&mut cached_chunks);
                         write_index_snapshot(
                             &meta_path,
@@ -1153,30 +1778,41 @@ where
                             ),
                         );
                     }
-                    emit_retrieval_progress(emit_trace, RetrievalProgress {
-                        corpus: corpus.to_string(),
-                        phase: "failed".to_string(),
-                        documents_done,
-                        documents_total: total_documents,
-                        chunks_done,
-                        chunks_total: reused_chunks + pending_records.len(),
-                        reused_documents,
-                        message: if chunks_done > 0 {
-                            format!(
-                                "{corpus} retrieval indexing failed after retries; cached {documents_done}/{total_documents} docs for future runs."
-                            )
-                        } else {
-                            format!(
-                                "{corpus} retrieval indexing failed before any cacheable chunks were written."
-                            )
+                    let mut cached_chunks = resolved.clone();
+                    if batch_start > 0 {
+                        cached_chunks.extend(finalize_pending_chunks(
+                            pending_records[..batch_start].to_vec(),
+                        ));
+                        sort_chunk_records(&mut cached_chunks);
+                    }
+                    emit_retrieval_progress(
+                        emit_trace,
+                        RetrievalProgress {
+                            corpus: corpus.to_string(),
+                            phase: "failed".to_string(),
+                            documents_done,
+                            documents_total: total_documents,
+                            chunks_done,
+                            chunks_total: reused_chunks + pending_records.len(),
+                            reused_documents,
+                            message: if chunks_done > 0 {
+                                format!(
+                                    "{corpus} retrieval indexing failed after retries; cached {documents_done}/{total_documents} docs for future runs."
+                                )
+                            } else {
+                                format!(
+                                    "{corpus} retrieval indexing failed before any cacheable chunks were written."
+                                )
+                            },
                         },
-                    });
+                    );
                     return Ok(RefreshIndexOutcome::PartialCached {
                         documents_done,
                         documents_total: total_documents,
                         chunks_done,
                         chunks_total: reused_chunks + pending_records.len(),
                         failure_detail,
+                        cached_chunks,
                     });
                 }
             };
@@ -1189,32 +1825,38 @@ where
             batch_start = batch_end;
             let completed_pending_docs =
                 chunk_boundaries.partition_point(|boundary| *boundary <= batch_start);
-            emit_retrieval_progress(emit_trace, RetrievalProgress {
-                corpus: corpus.to_string(),
-                phase: "embedding".to_string(),
-                documents_done: reused_documents + completed_pending_docs,
-                documents_total: total_documents,
-                chunks_done: reused_chunks + batch_start,
-                chunks_total,
-                reused_documents,
-                message: format!("Embedding {corpus} retrieval index."),
-            });
+            emit_retrieval_progress(
+                emit_trace,
+                RetrievalProgress {
+                    corpus: corpus.to_string(),
+                    phase: "embedding".to_string(),
+                    documents_done: reused_documents + completed_pending_docs,
+                    documents_total: total_documents,
+                    chunks_done: reused_chunks + batch_start,
+                    chunks_total,
+                    reused_documents,
+                    message: format!("Embedding {corpus} retrieval index."),
+                },
+            );
         }
     }
     resolved.extend(finalize_pending_chunks(pending_records));
     sort_chunk_records(&mut resolved);
     let final_chunks_total = resolved.len();
 
-    emit_retrieval_progress(emit_trace, RetrievalProgress {
-        corpus: corpus.to_string(),
-        phase: "writing".to_string(),
-        documents_done: total_documents,
-        documents_total: total_documents,
-        chunks_done: final_chunks_total,
-        chunks_total: final_chunks_total,
-        reused_documents,
-        message: format!("Writing {corpus} retrieval index files."),
-    });
+    emit_retrieval_progress(
+        emit_trace,
+        RetrievalProgress {
+            corpus: corpus.to_string(),
+            phase: "writing".to_string(),
+            documents_done: total_documents,
+            documents_total: total_documents,
+            chunks_done: final_chunks_total,
+            chunks_total: final_chunks_total,
+            reused_documents,
+            message: format!("Writing {corpus} retrieval index files."),
+        },
+    );
 
     write_index_snapshot(
         &meta_path,
@@ -1230,16 +1872,19 @@ where
         None,
         &resolved,
     )?;
-    emit_retrieval_progress(emit_trace, RetrievalProgress {
-        corpus: corpus.to_string(),
-        phase: "done".to_string(),
-        documents_done: total_documents,
-        documents_total: total_documents,
-        chunks_done: final_chunks_total,
-        chunks_total: final_chunks_total,
-        reused_documents,
-        message: format!("{} retrieval index ready.", capitalize(corpus)),
-    });
+    emit_retrieval_progress(
+        emit_trace,
+        RetrievalProgress {
+            corpus: corpus.to_string(),
+            phase: "done".to_string(),
+            documents_done: total_documents,
+            documents_total: total_documents,
+            chunks_done: final_chunks_total,
+            chunks_total: final_chunks_total,
+            reused_documents,
+            message: format!("{} retrieval index ready.", capitalize(corpus)),
+        },
+    );
     Ok(RefreshIndexOutcome::Complete { chunks: resolved })
 }
 
@@ -1349,9 +1994,25 @@ fn load_existing_chunks(chunks_path: &Path) -> HashMap<String, Vec<ChunkRecord>>
         let Ok(chunk) = serde_json::from_str::<ChunkRecord>(trimmed) else {
             continue;
         };
-        grouped.entry(chunk.source_id.clone()).or_default().push(chunk);
+        grouped
+            .entry(chunk.source_id.clone())
+            .or_default()
+            .push(chunk);
     }
     grouped
+}
+
+fn score_chunks<'a>(
+    chunks: &'a [ChunkRecord],
+    query_vector: &[f64],
+) -> Vec<(f64, &'a ChunkRecord)> {
+    let mut scored: Vec<(f64, &ChunkRecord)> = chunks
+        .iter()
+        .filter(|chunk| !chunk.vector.is_empty())
+        .map(|chunk| (dot(query_vector, &chunk.vector), chunk))
+        .collect();
+    scored.sort_by(|left, right| right.0.total_cmp(&left.0));
+    scored
 }
 
 fn search_chunks(
@@ -1360,12 +2021,7 @@ fn search_chunks(
     top_k: usize,
     per_source_cap: usize,
 ) -> Vec<Value> {
-    let mut scored: Vec<(f64, &ChunkRecord)> = chunks
-        .iter()
-        .filter(|chunk| !chunk.vector.is_empty())
-        .map(|chunk| (dot(query_vector, &chunk.vector), chunk))
-        .collect();
-    scored.sort_by(|left, right| right.0.total_cmp(&left.0));
+    let scored = score_chunks(chunks, query_vector);
 
     let mut hits = Vec::new();
     let mut per_source: BTreeMap<String, usize> = BTreeMap::new();
@@ -1383,48 +2039,290 @@ fn search_chunks(
     hits
 }
 
-fn build_query(objective: &str, question_reasoning_packet: Option<&Value>) -> String {
-    let mut parts = vec![objective.trim().to_string()];
-    let Some(packet) = question_reasoning_packet.and_then(Value::as_object) else {
-        return parts.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n");
+fn search_ontology_objects(
+    chunks: &[ChunkRecord],
+    query_vector: &[f64],
+    top_k: usize,
+    per_object_cap: usize,
+    boost_object_ids: &[String],
+) -> Vec<Value> {
+    let boost_ids = boost_object_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut per_object: BTreeMap<String, (f64, &ChunkRecord)> = BTreeMap::new();
+
+    for (base_score, chunk) in score_chunks(chunks, query_vector) {
+        let object_id = chunk
+            .metadata
+            .get("object_id")
+            .and_then(Value::as_str)
+            .unwrap_or(chunk.source_id.as_str())
+            .to_string();
+        let related_ids = linked_object_ids(&chunk.metadata);
+        let boosted_score = boosted_object_score(base_score, &object_id, &related_ids, &boost_ids);
+        let replace = per_object
+            .get(&object_id)
+            .map(|(existing, _)| boosted_score > *existing)
+            .unwrap_or(true);
+        if replace {
+            per_object.insert(object_id, (boosted_score, chunk));
+        }
+    }
+
+    let mut ranked = per_object
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.0.total_cmp(&left.0));
+
+    let mut hits = Vec::new();
+    let mut per_type: BTreeMap<String, usize> = BTreeMap::new();
+    for (score, chunk) in ranked {
+        let object_type = chunk
+            .metadata
+            .get("object_type")
+            .and_then(Value::as_str)
+            .unwrap_or("ontology")
+            .to_string();
+        let count = per_type.get(&object_type).copied().unwrap_or(0);
+        if count >= per_object_cap {
+            continue;
+        }
+        let related_ids = linked_object_ids(&chunk.metadata);
+        hits.push(json!({
+            "object_id": chunk.metadata.get("object_id").and_then(Value::as_str).unwrap_or(chunk.source_id.as_str()),
+            "object_type": object_type,
+            "score": ((score * 10_000.0).round()) / 10_000.0,
+            "summary": chunk.excerpt,
+            "title": chunk.title,
+            "path": chunk.path,
+            "source_id": chunk.source_id,
+            "record_path": chunk.record_path,
+            "content_role": chunk.content_role,
+            "related_object_ids": related_ids,
+            "provenance_ids": value_string_list(chunk.metadata.get("provenance_ids")),
+            "metadata": chunk.metadata,
+        }));
+        per_type.insert(
+            chunk
+                .metadata
+                .get("object_type")
+                .and_then(Value::as_str)
+                .unwrap_or("ontology")
+                .to_string(),
+            count + 1,
+        );
+        if hits.len() >= top_k {
+            break;
+        }
+    }
+    hits
+}
+
+fn fuse_document_hits(
+    workspace_chunks: &[ChunkRecord],
+    session_chunks: &[ChunkRecord],
+    query_vector: &[f64],
+    top_ontology_ids: &[String],
+    boost_object_ids: &[String],
+    top_k: usize,
+    per_source_cap: usize,
+) -> Vec<Value> {
+    let ontology_ids = top_ontology_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let boost_ids = boost_object_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut scored = score_chunks(workspace_chunks, query_vector);
+    scored.extend(score_chunks(session_chunks, query_vector));
+    let mut reranked = scored
+        .into_iter()
+        .map(|(score, chunk)| {
+            let linked_ids = linked_object_ids(&chunk.metadata);
+            let mut boosted = score;
+            if linked_ids.iter().any(|id| ontology_ids.contains(id)) {
+                boosted += 0.08;
+            }
+            if linked_ids.iter().any(|id| boost_ids.contains(id)) {
+                boosted += 0.05;
+            }
+            (boosted, chunk)
+        })
+        .collect::<Vec<_>>();
+    reranked.sort_by(|left, right| right.0.total_cmp(&left.0));
+
+    let mut hits = Vec::new();
+    let mut per_source: BTreeMap<String, usize> = BTreeMap::new();
+    for (score, chunk) in reranked {
+        let count = per_source.get(&chunk.source_id).copied().unwrap_or(0);
+        if count >= per_source_cap {
+            continue;
+        }
+        hits.push(chunk.hit_payload(score));
+        per_source.insert(chunk.source_id.clone(), count + 1);
+        if hits.len() >= top_k {
+            break;
+        }
+    }
+    hits
+}
+
+fn build_graph_expansions(ontology_hits: &[Value]) -> Vec<Value> {
+    ontology_hits
+        .iter()
+        .filter_map(|hit| {
+            let object_id = hit.get("object_id").and_then(Value::as_str)?;
+            let related = hit
+                .get("related_object_ids")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(MAX_GRAPH_RELATED_IDS)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if related.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "seed_object_id": object_id,
+                "seed_object_type": hit.get("object_type").and_then(Value::as_str).unwrap_or("ontology"),
+                "hops": 1,
+                "related_object_ids": related,
+            }))
+        })
+        .collect()
+}
+
+fn boosted_object_score(
+    base_score: f64,
+    object_id: &str,
+    related_ids: &[String],
+    boost_ids: &BTreeSet<String>,
+) -> f64 {
+    let mut boosted = base_score;
+    if boost_ids.contains(object_id) {
+        boosted += 0.12;
+    }
+    if related_ids.iter().any(|id| boost_ids.contains(id)) {
+        boosted += 0.06;
+    }
+    boosted
+}
+
+fn linked_object_ids(metadata: &Map<String, Value>) -> Vec<String> {
+    dedupe_strings(
+        value_string_list(metadata.get("linked_object_ids"))
+            .into_iter()
+            .chain(value_string_list(metadata.get("related_object_ids")))
+            .collect(),
+    )
+}
+
+fn build_query(objective: &str, question_reasoning_packet: Option<&Value>) -> RetrievalQuery {
+    let mut query = RetrievalQuery {
+        text: objective.trim().to_string(),
+        ..RetrievalQuery::default()
     };
+    let Some(packet) = question_reasoning_packet.and_then(Value::as_object) else {
+        return query;
+    };
+
+    query.focus_question_ids = value_string_list(packet.get("focus_question_ids"));
+    let mut parts = vec![query.text.clone()];
+    let mut focus_claim_ids = Vec::new();
+    let mut focus_entity_ids = Vec::new();
+    let mut boost_object_ids = query.focus_question_ids.clone();
+
     if let Some(questions) = packet.get("unresolved_questions").and_then(Value::as_array) {
         for question in questions.iter().take(4) {
-            if let Some(text) = question.get("text").and_then(Value::as_str) {
-                if !text.trim().is_empty() {
-                    parts.push(text.trim().to_string());
-                }
+            let text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .or_else(|| question.get("text").and_then(Value::as_str))
+                .or_else(|| question.get("question_text").and_then(Value::as_str))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !text.is_empty() {
+                parts.push(text);
             }
+            focus_claim_ids.extend(value_string_list(question.get("claim_ids")));
+            boost_object_ids.extend(value_string_list(question.get("evidence_ids")));
+            boost_object_ids.extend(value_string_list(question.get("triggers")));
         }
     }
     if let Some(findings) = packet.get("findings").and_then(Value::as_object) {
         for bucket in ["unresolved", "contested"] {
             if let Some(items) = findings.get(bucket).and_then(Value::as_array) {
-                for item in items.iter().take(2) {
-                    if let Some(summary) = item
+                for item in items.iter().take(3) {
+                    let summary = item
                         .get("summary")
                         .and_then(Value::as_str)
+                        .or_else(|| item.get("claim").and_then(Value::as_str))
                         .or_else(|| item.get("claim_text").and_then(Value::as_str))
-                    {
-                        if !summary.trim().is_empty() {
-                            parts.push(summary.trim().to_string());
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if !summary.is_empty() {
+                        parts.push(summary);
+                    }
+                    if let Some(claim_id) = item.get("id").and_then(Value::as_str) {
+                        focus_claim_ids.push(claim_id.to_string());
+                    }
+                    boost_object_ids.extend(value_string_list(item.get("support_evidence_ids")));
+                    boost_object_ids
+                        .extend(value_string_list(item.get("contradiction_evidence_ids")));
+                }
+            }
+        }
+    }
+    if let Some(actions) = packet.get("candidate_actions").and_then(Value::as_array) {
+        for action in actions.iter().take(6) {
+            if let Some(required_inputs) = action.get("required_inputs").and_then(Value::as_object)
+            {
+                focus_claim_ids.extend(value_string_list(required_inputs.get("claim_ids")));
+                focus_entity_ids.extend(value_string_list(required_inputs.get("entity_ids")));
+                boost_object_ids.extend(value_string_list(required_inputs.get("evidence_ids")));
+            }
+            if let Some(refs) = action.get("ontology_object_refs").and_then(Value::as_array) {
+                for object_ref in refs {
+                    let Some(object_ref) = object_ref.as_object() else {
+                        continue;
+                    };
+                    if let Some(label) = object_ref.get("label").and_then(Value::as_str) {
+                        if !label.trim().is_empty() {
+                            parts.push(label.trim().to_string());
                         }
+                    }
+                    let object_id = object_ref
+                        .get("object_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if object_id.is_empty() {
+                        continue;
+                    }
+                    boost_object_ids.push(object_id.to_string());
+                    match object_ref.get("object_type").and_then(Value::as_str) {
+                        Some("claim") => focus_claim_ids.push(object_id.to_string()),
+                        Some("entity") => focus_entity_ids.push(object_id.to_string()),
+                        _ => {}
                     }
                 }
             }
         }
     }
-    parts
+
+    query.focus_claim_ids = dedupe_strings(focus_claim_ids);
+    query.focus_entity_ids = dedupe_strings(focus_entity_ids);
+    query.boost_object_ids = dedupe_strings(boost_object_ids);
+    query.text = parts
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    query
 }
 
-fn emit_retrieval_progress(
-    emit_trace: &mut impl FnMut(String),
-    progress: RetrievalProgress,
-) {
+fn emit_retrieval_progress(emit_trace: &mut impl FnMut(String), progress: RetrievalProgress) {
     emit_trace(progress.to_trace_message());
 }
 
@@ -1481,7 +2379,10 @@ fn classify_embeddings_http_error(
     } else {
         status.to_string()
     };
-    let detail = format!("{provider} embeddings HTTP {}: {detail_body}", status.as_u16());
+    let detail = format!(
+        "{provider} embeddings HTTP {}: {detail_body}",
+        status.as_u16()
+    );
     if let Some(input_id) = extract_oversize_input_id(&detail) {
         return EmbeddingsRequestError::Oversize { input_id, detail };
     }
@@ -1546,7 +2447,9 @@ fn extract_provider_error_fields(payload: &Value) -> (String, Option<String>, Op
 
 fn extract_provider_code(value: Option<&Value>) -> Option<String> {
     match value {
-        Some(Value::String(text)) => Some(text.trim().to_string()).filter(|value| !value.is_empty()),
+        Some(Value::String(text)) => {
+            Some(text.trim().to_string()).filter(|value| !value.is_empty())
+        }
         Some(Value::Number(num)) => Some(num.to_string()),
         _ => None,
     }
@@ -1914,10 +2817,7 @@ fn semantic_records_from_wrapper_payload(
     }
     if let Some(text_value) = payload.get("text") {
         records.extend(semantic_records_from_json_value(
-            text_value,
-            "text",
-            "body",
-            metadata,
+            text_value, "text", "body", metadata,
         ));
     }
     if let Some(response) = payload.get("response") {
@@ -2065,7 +2965,12 @@ fn semantic_records_from_delimited(
         for (idx, header) in headers.iter().enumerate() {
             row.insert(
                 header.trim().to_string(),
-                values.get(idx).copied().unwrap_or_default().trim().to_string(),
+                values
+                    .get(idx)
+                    .copied()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
             );
         }
         records.extend(semantic_records_from_table_row(
@@ -2206,7 +3111,11 @@ fn chunk_paragraph_text(text: &str) -> Vec<String> {
         if chunk.chars().count() <= STRUCTURED_RECORD_MAX_CHARS {
             expanded.push(chunk);
         } else {
-            expanded.extend(sliding_windows(&chunk, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS));
+            expanded.extend(sliding_windows(
+                &chunk,
+                CHUNK_TARGET_CHARS,
+                CHUNK_OVERLAP_CHARS,
+            ));
         }
     }
     expanded
@@ -2242,7 +3151,10 @@ fn split_query_windows(text: &str, max_chars: usize) -> Vec<String> {
     if trimmed.chars().count() <= max_chars {
         return vec![trimmed.to_string()];
     }
-    let overlap_chars = max_chars.saturating_div(4).clamp(1, 400).min(max_chars.saturating_sub(1));
+    let overlap_chars = max_chars
+        .saturating_div(4)
+        .clamp(1, 400)
+        .min(max_chars.saturating_sub(1));
     sliding_windows(trimmed, max_chars, overlap_chars)
 }
 
@@ -2268,7 +3180,11 @@ fn compact_json(value: &Value, max_chars: usize) -> Option<String> {
 fn json_scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::Bool(flag) => Some(if *flag { "true".to_string() } else { "false".to_string() }),
+        Value::Bool(flag) => Some(if *flag {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
         Value::Number(number) => Some(number.to_string()),
         Value::String(text) => {
             let trimmed = text.trim();
@@ -2289,7 +3205,11 @@ fn format_leaf_text(value: &str, record_path: &str, content_role: &str) -> Strin
     ) {
         return value.to_string();
     }
-    let mut label = record_path.rsplit('.').next().unwrap_or(record_path).to_string();
+    let mut label = record_path
+        .rsplit('.')
+        .next()
+        .unwrap_or(record_path)
+        .to_string();
     if let Some((prefix, _)) = label.split_once('[') {
         label = prefix.to_string();
     }
@@ -2305,18 +3225,32 @@ fn json_child_role(key: &str, parent_role: &str) -> String {
     if lowered == "markdown" {
         return "page_markdown".to_string();
     }
-    if matches!(lowered.as_str(), "text" | "content" | "summary" | "description" | "body") {
+    if matches!(
+        lowered.as_str(),
+        "text" | "content" | "summary" | "description" | "body"
+    ) {
         return "body".to_string();
     }
     if matches!(lowered.as_str(), "document_annotation" | "annotation") {
         return "annotation".to_string();
     }
-    if matches!(lowered.as_str(), "segment" | "segments" | "transcript" | "transcription") {
+    if matches!(
+        lowered.as_str(),
+        "segment" | "segments" | "transcript" | "transcription"
+    ) {
         return "transcript_segment".to_string();
     }
     if matches!(
         lowered.as_str(),
-        "provider" | "service" | "model" | "operation" | "options" | "artifacts" | "usage_info" | "file" | "path"
+        "provider"
+            | "service"
+            | "model"
+            | "operation"
+            | "options"
+            | "artifacts"
+            | "usage_info"
+            | "file"
+            | "path"
     ) {
         return "metadata".to_string();
     }
@@ -2338,7 +3272,14 @@ fn json_list_role(record_path: &str, parent_role: &str) -> String {
 
 fn is_wrapper_artifact(payload: &Map<String, Value>) -> bool {
     let mut count = 0usize;
-    for key in ["provider", "operation", "response", "text", "artifacts", "service"] {
+    for key in [
+        "provider",
+        "operation",
+        "response",
+        "text",
+        "artifacts",
+        "service",
+    ] {
         if payload.contains_key(key) {
             count += 1;
         }
@@ -2386,7 +3327,10 @@ fn split_paragraphs(text: &str) -> Vec<String> {
     if !current.is_empty() {
         paragraphs.push(current.join("\n").trim().to_string());
     }
-    paragraphs.into_iter().filter(|value| !value.is_empty()).collect()
+    paragraphs
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn should_skip_walk_entry(path: &Path, workspace: &Path, session_root_dir: &str) -> bool {
@@ -2396,7 +3340,10 @@ fn should_skip_walk_entry(path: &Path, workspace: &Path, session_root_dir: &str)
     let Ok(rel) = path.strip_prefix(workspace) else {
         return false;
     };
-    let parts = rel.iter().filter_map(|part| part.to_str()).collect::<Vec<_>>();
+    let parts = rel
+        .iter()
+        .filter_map(|part| part.to_str())
+        .collect::<Vec<_>>();
     if parts.iter().any(|part| EXCLUDED_DIR_NAMES.contains(part)) {
         return true;
     }
@@ -2469,6 +3416,32 @@ fn join_nonempty(values: &[String]) -> String {
         .join("\n")
 }
 
+fn value_string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.trim().to_string()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            })
+            .filter(|value| !value.is_empty())
+            .collect(),
+        Some(Value::String(text)) if !text.trim().is_empty() => vec![text.trim().to_string()],
+        Some(Value::Number(number)) => vec![number.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
 fn normalize_vector(values: Vec<f64>) -> Vec<f64> {
     let norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
     if norm <= 0.0 {
@@ -2488,7 +3461,10 @@ fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    text.chars().take(max_chars.saturating_sub(3)).collect::<String>() + "..."
+    text.chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>()
+        + "..."
 }
 
 fn capitalize(text: &str) -> String {
@@ -2503,10 +3479,7 @@ fn capitalize(text: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     #[test]
@@ -2578,9 +3551,21 @@ mod tests {
 
         assert!(!pending.is_empty());
         assert!(pending.iter().any(|chunk| chunk.record_path == "summary"));
-        assert!(pending.iter().any(|chunk| chunk.record_path.starts_with("text")));
-        assert!(pending.iter().any(|chunk| chunk.record_path.contains("response.pages")));
-        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+        assert!(
+            pending
+                .iter()
+                .any(|chunk| chunk.record_path.starts_with("text"))
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|chunk| chunk.record_path.contains("response.pages"))
+        );
+        assert!(
+            pending
+                .iter()
+                .all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS)
+        );
     }
 
     #[test]
@@ -2610,8 +3595,16 @@ mod tests {
 
         let pending = build_pending_chunks_for_document(&doc);
 
-        assert!(pending.iter().any(|chunk| chunk.record_path.contains("items[0].note")));
-        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+        assert!(
+            pending
+                .iter()
+                .any(|chunk| chunk.record_path.contains("items[0].note"))
+        );
+        assert!(
+            pending
+                .iter()
+                .all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS)
+        );
     }
 
     #[test]
@@ -2632,8 +3625,16 @@ mod tests {
 
         let pending = build_pending_chunks_for_document(&doc);
 
-        assert!(pending.iter().any(|chunk| chunk.record_path.ends_with(".notes")));
-        assert!(pending.iter().all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS));
+        assert!(
+            pending
+                .iter()
+                .any(|chunk| chunk.record_path.ends_with(".notes"))
+        );
+        assert!(
+            pending
+                .iter()
+                .all(|chunk| chunk.text.chars().count() <= STRUCTURED_RECORD_MAX_CHARS)
+        );
     }
 
     #[test]
@@ -2643,6 +3644,161 @@ mod tests {
         let pooled = mean_pool_vectors(&[vec![1.0, 0.0], vec![0.0, 1.0]]);
         assert!((pooled[0] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         assert!((pooled[1] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_build_query_uses_question_claim_and_entity_focus() {
+        let packet = json!({
+            "focus_question_ids": ["q_1"],
+            "unresolved_questions": [
+                {
+                    "id": "q_1",
+                    "question": "Who controls the shell company?",
+                    "claim_ids": ["cl_1"],
+                    "evidence_ids": ["ev_1"],
+                }
+            ],
+            "findings": {
+                "unresolved": [{"id": "cl_1", "claim": "Control remains unclear"}],
+                "contested": [],
+            },
+            "candidate_actions": [
+                {
+                    "required_inputs": {
+                        "claim_ids": ["cl_1"],
+                        "entity_ids": ["ent_1"],
+                        "evidence_ids": ["ev_1"],
+                    },
+                    "ontology_object_refs": [
+                        {"object_id": "ent_1", "object_type": "entity", "label": "Acme Holdings"}
+                    ]
+                }
+            ]
+        });
+
+        let query = build_query("Investigate beneficial ownership", Some(&packet));
+
+        assert!(query.text.contains("Investigate beneficial ownership"));
+        assert!(query.text.contains("Who controls the shell company?"));
+        assert!(query.text.contains("Acme Holdings"));
+        assert_eq!(query.focus_question_ids, vec!["q_1"]);
+        assert_eq!(query.focus_claim_ids, vec!["cl_1"]);
+        assert_eq!(query.focus_entity_ids, vec!["ent_1"]);
+        assert!(query.boost_object_ids.contains(&"ev_1".to_string()));
+    }
+
+    #[test]
+    fn test_collect_ontology_documents_includes_workspace_scope_and_extra_types() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path();
+        let session_dir = workspace.join(".openplanter/sessions/session-1");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(workspace.join(".openplanter")).unwrap();
+
+        fs::write(
+            session_dir.join("investigation_state.json"),
+            r#"{
+                "entities": {
+                    "ent_session": {
+                        "id": "ent_session",
+                        "canonical_name": "Session Entity"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        fs::write(
+            workspace.join(".openplanter/ontology.json"),
+            r#"{
+                "source_sessions": ["session-1", "session-2"],
+                "entities": {
+                    "ent_workspace": {
+                        "id": "ent_workspace",
+                        "canonical_name": "Workspace Entity"
+                    }
+                },
+                "hypotheses": {
+                    "hyp_1": {
+                        "id": "hyp_1",
+                        "summary": "Hypothesis summary",
+                        "source_sessions": ["session-2"]
+                    }
+                },
+                "provenance_nodes": {
+                    "prov_1": {
+                        "id": "prov_1",
+                        "summary": "Captured from archive"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let docs = collect_ontology_documents(workspace, Some(&session_dir));
+        let workspace_entity = docs
+            .iter()
+            .find(|doc| ontology_object_id(doc) == Some("ent_workspace"))
+            .expect("workspace ontology entity");
+        assert_eq!(
+            workspace_entity
+                .metadata
+                .get("scope")
+                .and_then(Value::as_str),
+            Some("workspace")
+        );
+        assert_eq!(
+            value_string_list(workspace_entity.metadata.get("source_sessions")),
+            vec!["session-1".to_string(), "session-2".to_string()]
+        );
+        assert!(docs.iter().any(|doc| doc.kind == "ontology_hypothesis"));
+        assert!(docs.iter().any(|doc| doc.kind == "ontology_provenance"));
+    }
+
+    #[test]
+    fn test_collect_ontology_documents_prefers_session_copy_over_workspace() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path();
+        let session_dir = workspace.join(".openplanter/sessions/session-1");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(workspace.join(".openplanter")).unwrap();
+
+        fs::write(
+            session_dir.join("investigation_state.json"),
+            r#"{
+                "entities": {
+                    "ent_shared": {
+                        "id": "ent_shared",
+                        "canonical_name": "Session Copy"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".openplanter/ontology.json"),
+            r#"{
+                "entities": {
+                    "ent_shared": {
+                        "id": "ent_shared",
+                        "canonical_name": "Workspace Copy"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let docs = collect_ontology_documents(workspace, Some(&session_dir));
+        let shared = docs
+            .iter()
+            .filter(|doc| ontology_object_id(doc) == Some("ent_shared"))
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            shared[0].metadata.get("scope").and_then(Value::as_str),
+            Some("session")
+        );
+        assert!(shared[0].text.contains("Session Copy"));
     }
 
     #[derive(Clone)]
@@ -2697,9 +3853,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(FakeResponse::Success)
             {
-                FakeResponse::Success => {
-                    Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
-                }
+                FakeResponse::Success => Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect()),
                 FakeResponse::Error(err) => Err(err),
             }
         }
@@ -2777,7 +3931,11 @@ mod tests {
 
         assert_eq!(vectors.len(), 1);
         assert_eq!(backend.calls.lock().unwrap().len(), 2);
-        assert!(events.iter().any(|line| line.contains("transient embeddings failure")));
+        assert!(
+            events
+                .iter()
+                .any(|line| line.contains("transient embeddings failure"))
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2883,7 +4041,11 @@ mod tests {
         };
 
         assert!(chunks.len() > 1);
-        assert!(events.iter().any(|line| line.contains("retrying batch after provider oversize")));
+        assert!(
+            events
+                .iter()
+                .any(|line| line.contains("retrying batch after provider oversize"))
+        );
     }
 
     #[tokio::test]
@@ -2920,10 +4082,25 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.packet.is_none());
+        let packet = result.packet.expect("hybrid retrieval packet");
         assert_eq!(result.status.status, "degraded");
-        assert!(result.status.detail.contains("Semantic context was skipped"));
-        assert!(events.iter().any(|line| line.contains("\"phase\":\"failed\"")));
+        assert!(
+            result
+                .status
+                .detail
+                .contains("workspace indexing failed after retries")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|line| line.contains("\"phase\":\"failed\""))
+        );
+        assert_eq!(
+            packet["version"],
+            Value::String(RETRIEVAL_PACKET_VERSION.to_string())
+        );
+        assert_eq!(packet["status"], Value::String("degraded".to_string()));
+        assert_eq!(packet["coverage"]["documents_indexed"], Value::from(2));
 
         let meta = fs::read_to_string(
             tmp.path()
@@ -2943,7 +4120,10 @@ mod tests {
     async fn test_refresh_index_reuses_partial_snapshot_and_completes_follow_up_run() {
         let tmp = tempdir().unwrap();
         let index_dir = tmp.path().join(".openplanter/embeddings/workspace");
-        let docs = vec![test_doc("a.md", "alpha document"), test_doc("b.md", "beta document")];
+        let docs = vec![
+            test_doc("a.md", "alpha document"),
+            test_doc("b.md", "beta document"),
+        ];
 
         let first_backend = FakeBackend::new(
             test_limits(1),

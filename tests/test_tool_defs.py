@@ -36,6 +36,7 @@ class ToolDefinitionsTests(unittest.TestCase):
             "run_shell", "run_shell_bg", "check_shell_bg", "kill_shell_bg",
             "think", "subtask", "execute",
             "list_artifacts", "read_artifact",
+            "defrag_workspace",
         }
         self.assertEqual(set(names), expected)
 

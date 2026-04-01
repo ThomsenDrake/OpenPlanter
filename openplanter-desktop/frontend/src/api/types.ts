@@ -256,6 +256,7 @@ export interface SessionInfo {
   created_at: string;
   turn_count: number;
   last_objective: string | null;
+  investigation_id?: string;
 }
 
 export interface PersistentSettings {
@@ -282,6 +283,7 @@ export interface PersistentSettings {
   recursion_policy?: string | null;
   min_subtask_depth?: number | null;
   max_depth?: number | null;
+  default_investigation_id?: string | null;
 }
 
 export type CredentialService =

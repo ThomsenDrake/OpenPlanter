@@ -69,6 +69,19 @@ describe("createStatusBar", () => {
     expect(bar.querySelector(".continuity")!.textContent).toBe("continuity:continue");
   });
 
+  it("renders hybrid embeddings version", () => {
+    appState.update((s) => ({
+      ...s,
+      embeddingsProvider: "mistral",
+      embeddingsStatus: "enabled",
+      embeddingsPacketVersion: "retrieval-v3",
+    }));
+    const bar = createStatusBar();
+    expect(bar.querySelector(".embeddings")!.textContent).toBe(
+      "emb:mistral:enabled hybrid:retrieval-v3"
+    );
+  });
+
   it("renders retrieval progress when vectorization is active", () => {
     appState.update((s) => ({
       ...s,

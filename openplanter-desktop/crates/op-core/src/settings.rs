@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{
     normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
     normalize_embeddings_provider, normalize_model_alias, normalize_recursion_policy,
-    normalize_web_search_provider,
-    normalize_zai_plan,
+    normalize_web_search_provider, normalize_zai_plan,
 };
 
 const VALID_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
@@ -75,6 +74,7 @@ pub struct PersistentSettings {
     pub chrome_mcp_channel: Option<String>,
     pub chrome_mcp_connect_timeout_sec: Option<i64>,
     pub chrome_mcp_rpc_timeout_sec: Option<i64>,
+    pub default_investigation_id: Option<String>,
 }
 
 impl PersistentSettings {
@@ -170,6 +170,7 @@ impl PersistentSettings {
                 .chrome_mcp_connect_timeout_sec
                 .map(|value| value.max(1)),
             chrome_mcp_rpc_timeout_sec: self.chrome_mcp_rpc_timeout_sec.map(|value| value.max(1)),
+            default_investigation_id: trim_opt(&self.default_investigation_id),
         })
     }
 
@@ -212,6 +213,7 @@ impl PersistentSettings {
             "chrome_mcp_connect_timeout_sec"
         );
         add!(chrome_mcp_rpc_timeout_sec, "chrome_mcp_rpc_timeout_sec");
+        add!(default_investigation_id, "default_investigation_id");
         payload
     }
 
@@ -264,6 +266,7 @@ impl PersistentSettings {
             chrome_mcp_rpc_timeout_sec: obj
                 .get("chrome_mcp_rpc_timeout_sec")
                 .and_then(|value| value.as_i64()),
+            default_investigation_id: get_str(obj, "default_investigation_id"),
         };
         settings.normalized()
     }

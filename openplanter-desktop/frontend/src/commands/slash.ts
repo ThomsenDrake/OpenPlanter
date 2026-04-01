@@ -64,7 +64,8 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/new": {
       try {
-        const session = await openSession();
+        const investigationId = appState.get().activeInvestigationId;
+        const session = await openSession(undefined, false, investigationId);
         appState.update((s) => ({
           ...s,
           sessionId: session.id,
@@ -111,6 +112,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
           `Embeddings:  ${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})`,
           `Retrieval:   ${s.embeddingsStatusDetail}`,
+          `Hybrid:      ${s.embeddingsMode || "documents+ontology"} (${s.embeddingsPacketVersion || "retrieval-v3"})`,
           `Vectorize:   ${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}`,
           `Web search:  ${s.webSearchProvider || "exa"}`,
           `Continuity:  ${s.continuityMode || "auto"}`,

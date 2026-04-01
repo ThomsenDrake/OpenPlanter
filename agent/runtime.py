@@ -17,6 +17,7 @@ from .investigation_state import (
     load_investigation_state,
     migrate_legacy_state,
     normalize_legacy_state,
+    project_to_wiki_graph,
     save_investigation_state,
     state_to_legacy_projection,
     upsert_legacy_observations,
@@ -253,6 +254,9 @@ class SessionStore:
     def _investigation_state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "investigation_state.json"
 
+    def _graph_projection_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "graph_projection.json"
+
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
@@ -300,7 +304,7 @@ class SessionStore:
         return out
 
     def open_session(
-        self, session_id: str | None = None, resume: bool = False
+        self, session_id: str | None = None, resume: bool = False, investigation_id: str | None = None
     ) -> tuple[str, dict[str, Any], bool]:
         sid = session_id
         if resume and sid is None:
@@ -333,6 +337,14 @@ class SessionStore:
             self._touch_metadata(sid, continuity_mode="resume" if resume else None)
 
         state = self.load_state(sid)
+
+        # Store active_investigation_id in typed state if provided
+        if investigation_id is not None and isinstance(investigation_id, str) and investigation_id.strip():
+            typed_state = self.load_typed_state(sid)
+            typed_state["active_investigation_id"] = investigation_id.strip()
+            investigation_path = self._investigation_state_path(sid)
+            save_investigation_state(investigation_path, typed_state)
+
         return sid, state, created_new
 
     def _warn(self, message: str) -> None:
@@ -441,6 +453,18 @@ class SessionStore:
         typed_state["updated_at"] = normalized_legacy.get("saved_at", _utc_now())
         typed_state.setdefault("created_at", typed_state["updated_at"])
         save_investigation_state(investigation_path, typed_state)
+
+        # Project investigation state to wiki graph format
+        try:
+            graph_projection = project_to_wiki_graph(typed_state)
+            graph_projection_path = self._graph_projection_path(session_id)
+            graph_projection_path.write_text(
+                json.dumps(graph_projection, indent=2),
+                encoding="utf-8",
+            )
+        except (OSError, TypeError):
+            pass  # Non-fatal: projection is optional
+
         self._touch_metadata(session_id)
 
     def append_event(
@@ -450,6 +474,8 @@ class SessionStore:
         payload: dict[str, Any],
         *,
         turn_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         event_path = self._events_path(session_id)
         seq = self._next_seq(event_path)
@@ -494,7 +520,12 @@ class SessionStore:
                 "source_refs": [],
                 "evidence_refs": [],
                 "ontology_refs": [],
-                "generated_from": {},
+                "generated_from": {
+                    "provider": provider,
+                    "model": model,
+                    "request_id": None,
+                    "conversation_id": None,
+                },
             },
             "compat": {
                 "legacy_role": None,
@@ -721,6 +752,12 @@ class SessionRuntime:
     max_turn_summaries: int = 50
     loop_metrics: dict[str, Any] | None = None
 
+    def _provider_name(self) -> str | None:
+        return self.engine.config.provider if self.engine.config else None
+
+    def _model_name(self) -> str | None:
+        return self.engine.config.model if self.engine.config else None
+
     def _flush_store_warnings(self, emit: EventCallback | None = None) -> None:
         for message in self.store.drain_warnings():
             if emit is not None:
@@ -731,6 +768,8 @@ class SessionRuntime:
                     self.session_id,
                     "trace",
                     {"message": message},
+                    provider=self._provider_name(),
+                    model=self._model_name(),
                 )
             except OSError:
                 pass
@@ -742,6 +781,7 @@ class SessionRuntime:
         config: AgentConfig,
         session_id: str | None = None,
         resume: bool = False,
+        investigation_id: str | None = None,
     ) -> "SessionRuntime":
         store = SessionStore(
             workspace=config.workspace,
@@ -751,7 +791,9 @@ class SessionRuntime:
             _seed_wiki(config.workspace, config.session_root_dir)
         except OSError:
             pass
-        sid, state, created_new = store.open_session(session_id=session_id, resume=resume)
+        sid, state, created_new = store.open_session(
+            session_id=session_id, resume=resume, investigation_id=investigation_id
+        )
         persisted = state.get("external_observations", [])
         obs = [str(x) for x in persisted] if isinstance(persisted, list) else []
         max_obs = max(1, config.max_persisted_observations)
@@ -807,6 +849,8 @@ class SessionRuntime:
                 sid,
                 "session_started",
                 {"resume": resume, "created_new": created_new},
+                provider=runtime._provider_name(),
+                model=runtime._model_name(),
             )
         except OSError:
             pass
@@ -841,6 +885,8 @@ class SessionRuntime:
                 "objective",
                 {"text": objective},
                 turn_id=turn_id,
+                provider=self._provider_name(),
+                model=self._model_name(),
             )
         except OSError:
             pass
@@ -853,6 +899,8 @@ class SessionRuntime:
                     "trace",
                     {"message": msg},
                     turn_id=turn_id,
+                    provider=self._provider_name(),
+                    model=self._model_name(),
                 )
             except OSError:
                 pass
@@ -862,7 +910,11 @@ class SessionRuntime:
         def _combined_on_step(step_event: dict[str, Any]) -> None:
             nonlocal patch_counter
             try:
-                self.store.append_event(self.session_id, "step", step_event, turn_id=turn_id)
+                self.store.append_event(
+                    self.session_id, "step", step_event, turn_id=turn_id,
+                    provider=self._provider_name(),
+                    model=self._model_name(),
+                )
             except OSError:
                 pass
             action = step_event.get("action")
@@ -887,6 +939,8 @@ class SessionRuntime:
                             "artifact",
                             {"kind": "patch", "path": artifact_rel},
                             turn_id=turn_id,
+                            provider=self._provider_name(),
+                            model=self._model_name(),
                         )
                     except OSError:
                         pass
@@ -908,7 +962,14 @@ class SessionRuntime:
 
         typed_state = self.store.load_typed_state(self.session_id)
         self._flush_store_warnings(_on_event)
-        question_reasoning_packet = build_question_reasoning_packet(typed_state)
+        ws_ontology_path = self.store.workspace / ".openplanter" / "ontology.json"
+        ws_ontology = None
+        if ws_ontology_path.exists():
+            try:
+                ws_ontology = json.loads(ws_ontology_path.read_text())
+            except (OSError, ValueError):
+                pass
+        question_reasoning_packet = build_question_reasoning_packet(typed_state, workspace_ontology=ws_ontology)
         if not _has_reasoning_content(question_reasoning_packet):
             question_reasoning_packet = None
         retrieval_result = build_retrieval_packet(
@@ -1008,6 +1069,8 @@ class SessionRuntime:
                     "loop_metrics": latest_loop_metrics,
                 },
                 turn_id=turn_id,
+                provider=self._provider_name(),
+                model=self._model_name(),
             )
         except OSError:
             pass
@@ -1081,6 +1144,14 @@ class SessionRuntime:
             pass
         try:
             self._persist_state()
+            try:
+                from .defrag import sync_session_to_workspace_ontology
+                typed_state = self.store.load_typed_state(self.session_id)
+                sync_session_to_workspace_ontology(
+                    self.store.workspace, self.session_id, typed_state
+                )
+            except Exception:
+                pass  # Never crash session finalization for ontology sync
         except OSError:
             pass
         self._flush_store_warnings(_on_event)

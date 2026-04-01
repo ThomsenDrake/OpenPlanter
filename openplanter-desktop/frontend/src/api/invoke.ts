@@ -80,13 +80,44 @@ export async function listSessions(limit?: number): Promise<SessionInfo[]> {
 
 export async function openSession(
   id?: string,
-  resume: boolean = false
+  resume: boolean = false,
+  investigationId?: string,
 ): Promise<SessionInfo> {
-  return invoke("open_session", { id: id ?? null, resume });
+  return invoke("open_session", {
+    id: id ?? null,
+    resume,
+    investigation_id: investigationId ?? null,
+  });
 }
 
 export async function deleteSession(id: string): Promise<void> {
   return invoke("delete_session", { id });
+}
+
+export async function getSessionDirectory(sessionId: string): Promise<string> {
+  return invoke("get_session_directory", { sessionId });
+}
+
+export async function writeSessionArtifact(
+  sessionDir: string,
+  filename: string,
+  content: string,
+): Promise<void> {
+  return invoke("write_session_artifact", { sessionDir, filename, content });
+}
+
+export async function readSessionArtifact(
+  sessionDir: string,
+  filename: string,
+): Promise<string | null> {
+  return invoke("read_session_artifact", { sessionDir, filename });
+}
+
+export async function readSessionEvent(
+  sessionId: string,
+  eventId: string,
+): Promise<Record<string, unknown> | null> {
+  return invoke("read_session_event", { sessionId, eventId });
 }
 
 export async function getGraphData(): Promise<GraphData> {

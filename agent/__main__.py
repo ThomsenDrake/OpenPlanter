@@ -24,6 +24,7 @@ from .credentials import (
     parse_env_file,
     prompt_for_credentials,
 )
+from .defrag import WorkspaceDefrag
 from .model import ModelError
 from .retrieval import build_embeddings_status
 from .runtime import SessionError, SessionRuntime, SessionStore
@@ -43,6 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="openplanter-agent",
         description="OpenPlanter coding agent with terminal UI.",
     )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Main agent command (default behavior)
     parser.add_argument("--workspace", default=".", help="Workspace root directory.")
     parser.add_argument(
         "--provider",
@@ -198,6 +202,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume an existing session (with --session-id or latest session).",
     )
     parser.add_argument(
+        "--investigation-id",
+        help="Investigation ID to associate with the session. If omitted, the agent will infer the investigation from your objective.",
+    )
+    parser.add_argument(
         "--list-sessions",
         action="store_true",
         help="List known sessions in .openplanter and exit.",
@@ -222,6 +230,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Censor entity names and workspace path segments in output (UI-only).",
     )
+
+    # Defrag subcommand
+    defrag_parser = subparsers.add_parser(
+        "defrag",
+        help="Workspace defragmentation: deduplicate files, sync wiki, merge ontologies.",
+    )
+    defrag_parser.add_argument(
+        "workspace_path",
+        nargs="?",
+        default=".",
+        help="Workspace root directory (default: current directory).",
+    )
+    defrag_parser.add_argument(
+        "--mode",
+        default="full",
+        choices=["full", "scan_only", "dedup", "ingest", "cleanup"],
+        help="Operation mode (default: full).",
+    )
+    defrag_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without making changes.",
+    )
+
     return parser
 
 
@@ -669,6 +701,7 @@ def _print_settings(settings: PersistentSettings) -> None:
         "  chrome_mcp_rpc_timeout_sec: "
         f"{settings.chrome_mcp_rpc_timeout_sec if settings.chrome_mcp_rpc_timeout_sec is not None else '(unset)'}"
     )
+    print(f"  default_investigation_id: {settings.default_investigation_id or '(unset)'}")
 
 
 def _has_non_interactive_command(args: argparse.Namespace) -> bool:
@@ -710,6 +743,18 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     workspace_flag_explicit = _workspace_flag_explicit(argv)
+
+    # Handle defrag subcommand
+    if args.command == "defrag":
+        workspace = Path(args.workspace_path or ".").resolve()
+        defrag = WorkspaceDefrag(
+            workspace=workspace,
+            wiki_dir=workspace / ".openplanter" / "wiki",
+            sessions_dir=workspace / ".openplanter" / "sessions",
+        )
+        report = defrag.run(mode=args.mode, dry_run=args.dry_run)
+        print(report.to_summary())
+        return
 
     if args.resume and args.session_id is None and args.session_id_positional:
         args.session_id = args.session_id_positional
@@ -818,12 +863,37 @@ def main() -> None:
         mistral_api_key=cfg.mistral_api_key,
     )
 
+    # Resolve investigation context
+    investigation_id = getattr(args, 'investigation_id', None)
+    if investigation_id is None and not getattr(args, 'resume', False):
+        # Only run inference if we have an upfront objective (--task in headless mode)
+        # In interactive TUI mode, the objective isn't known until user types
+        objective = getattr(args, 'task', None)
+        if objective and objective.strip():
+            try:
+                from .investigation_resolver import create_llm_callable, resolve_investigation
+                llm_call = create_llm_callable(engine.model)
+                # Only run interactive prompts if stdin is a tty
+                is_interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.headless
+                # Get default investigation from settings if available
+                default_inv_id = getattr(settings, 'default_investigation_id', None)
+                investigation_id = resolve_investigation(
+                    workspace=cfg.workspace,
+                    objective=objective,
+                    llm_call=llm_call,
+                    interactive=is_interactive,
+                    default_investigation_id=default_inv_id,
+                )
+            except Exception:
+                pass  # Don't block session start if resolver fails
+
     try:
         runtime = SessionRuntime.bootstrap(
             engine=engine,
             config=engine.config,
             session_id=args.session_id,
             resume=args.resume,
+            investigation_id=investigation_id,
         )
     except SessionError as exc:
         print(f"Session error: {exc}")

@@ -11,7 +11,7 @@ use op_core::credentials::{
     parse_env_file,
 };
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
-use op_core::retrieval::build_embeddings_status;
+use op_core::retrieval::{RETRIEVAL_MODE, RETRIEVAL_PACKET_VERSION, build_embeddings_status};
 use op_core::settings::{PersistentSettings, SettingsStore};
 use std::collections::HashMap;
 use tauri::State;
@@ -36,6 +36,8 @@ async fn make_config_view(
         embeddings_provider: cfg.embeddings_provider.clone(),
         embeddings_status: embeddings_status.status,
         embeddings_status_detail: embeddings_status.detail,
+        embeddings_mode: RETRIEVAL_MODE.to_string(),
+        embeddings_packet_version: RETRIEVAL_PACKET_VERSION.to_string(),
         continuity_mode: cfg.continuity_mode.clone(),
         mistral_document_ai_use_shared_key: cfg.mistral_document_ai_use_shared_key,
         chrome_mcp_enabled: cfg.chrome_mcp_enabled,
@@ -62,6 +64,9 @@ fn merge_settings(
     incoming: PersistentSettings,
 ) -> PersistentSettings {
     PersistentSettings {
+        default_investigation_id: incoming
+            .default_investigation_id
+            .or(existing.default_investigation_id),
         default_model: incoming.default_model.or(existing.default_model),
         default_reasoning_effort: incoming
             .default_reasoning_effort
@@ -86,7 +91,9 @@ fn merge_settings(
         web_search_provider: incoming
             .web_search_provider
             .or(existing.web_search_provider),
-        embeddings_provider: incoming.embeddings_provider.or(existing.embeddings_provider),
+        embeddings_provider: incoming
+            .embeddings_provider
+            .or(existing.embeddings_provider),
         continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
         recursive: incoming.recursive.or(existing.recursive),
         recursion_policy: incoming.recursion_policy.or(existing.recursion_policy),
@@ -443,7 +450,8 @@ fn merged_credential_status(
     status.insert(
         "mistral_transcription".to_string(),
         has_effective_mistral_transcription_key(
-            cfg.mistral_transcription_api_key.as_deref()
+            cfg.mistral_transcription_api_key
+                .as_deref()
                 .or(env_creds.mistral_transcription_api_key.as_deref()),
             cfg.mistral_api_key
                 .as_deref()
@@ -612,6 +620,24 @@ mod tests {
                 assert_eq!(m.provider, *provider, "provider mismatch for {}", m.id);
             }
         }
+    }
+
+    #[test]
+    fn test_merge_settings_preserves_default_investigation_id() {
+        let existing = PersistentSettings {
+            default_investigation_id: Some("existing-investigation".to_string()),
+            ..PersistentSettings::default()
+        };
+        let incoming = PersistentSettings {
+            default_investigation_id: Some("incoming-investigation".to_string()),
+            ..PersistentSettings::default()
+        };
+
+        let merged = merge_settings(existing, incoming);
+        assert_eq!(
+            merged.default_investigation_id.as_deref(),
+            Some("incoming-investigation")
+        );
     }
 
     // ── build_credential_status ──

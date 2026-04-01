@@ -78,6 +78,8 @@ export interface AppState {
   embeddingsProvider: string;
   embeddingsStatus: string;
   embeddingsStatusDetail: string;
+  embeddingsMode: string;
+  embeddingsPacketVersion: string;
   retrievalProgressActive: boolean;
   retrievalProgressLabel: string | null;
   retrievalProgressPercent: number | null;
@@ -92,6 +94,7 @@ export interface AppState {
   chromeMcpStatus: string;
   chromeMcpStatusDetail: string;
   sessionId: string | null;
+  activeInvestigationId: string | null;
   inputTokens: number;
   outputTokens: number;
   isRunning: boolean;
@@ -132,7 +135,9 @@ export const appState = new Store<AppState>({
   webSearchProvider: "exa",
   embeddingsProvider: "voyage",
   embeddingsStatus: "disabled",
-  embeddingsStatusDetail: "Retrieval disabled: VOYAGE_API_KEY is not configured for voyage.",
+  embeddingsStatusDetail: "Retrieval disabled: VOYAGE_API_KEY is not configured for voyage. Hybrid mode: documents+ontology (retrieval-v3).",
+  embeddingsMode: "documents+ontology",
+  embeddingsPacketVersion: "retrieval-v3",
   retrievalProgressActive: false,
   retrievalProgressLabel: null,
   retrievalProgressPercent: null,
@@ -147,6 +152,7 @@ export const appState = new Store<AppState>({
   chromeMcpStatus: "disabled",
   chromeMcpStatusDetail: "Chrome DevTools MCP is disabled.",
   sessionId: null,
+  activeInvestigationId: null,
   inputTokens: 0,
   outputTokens: 0,
   isRunning: false,

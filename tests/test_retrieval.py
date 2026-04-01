@@ -11,8 +11,10 @@ from agent.retrieval import (
     ChunkRecord,
     EmbeddingsClient,
     EmbeddingsProviderLimits,
+    RETRIEVAL_PACKET_VERSION,
     RetrievalError,
     SourceDocument,
+    _build_query,
     _build_pending_chunks_for_document,
     _documents_from_file,
     _refresh_index,
@@ -147,7 +149,7 @@ class RetrievalTests(unittest.TestCase):
             client = FakeEmbeddingsClient(input_char_limit=3_000, emergency_input_char_limit=1_200)
             events: list[str] = []
 
-            chunks = _refresh_index(
+            result = _refresh_index(
                 index_dir=index_dir,
                 documents=[doc],
                 client=client,
@@ -156,6 +158,7 @@ class RetrievalTests(unittest.TestCase):
                 corpus="workspace",
                 on_event=events.append,
             )
+            chunks = result.chunks
 
             self.assertTrue(chunks)
             self.assertTrue(any(chunk.record_path == "summary" for chunk in chunks))
@@ -164,6 +167,7 @@ class RetrievalTests(unittest.TestCase):
             self.assertTrue(all(len(chunk.text) <= client.limits.input_char_limit for chunk in chunks))
             self.assertTrue((index_dir / "meta.json").exists())
             self.assertTrue((index_dir / "chunks.jsonl").exists())
+            self.assertEqual(result.completion, "complete")
 
     def test_build_pending_chunks_recursively_splits_large_json_field(self) -> None:
         doc = SourceDocument(
@@ -230,7 +234,7 @@ class RetrievalTests(unittest.TestCase):
             )
             events: list[str] = []
 
-            chunks = _refresh_index(
+            result = _refresh_index(
                 index_dir=index_dir,
                 documents=[doc],
                 client=client,
@@ -239,9 +243,11 @@ class RetrievalTests(unittest.TestCase):
                 corpus="workspace",
                 on_event=events.append,
             )
+            chunks = result.chunks
 
             self.assertGreater(len(chunks), 1)
             self.assertTrue(any("retrying batch after provider oversize" in event for event in events))
+            self.assertEqual(result.completion, "complete")
 
     def test_query_embedding_pools_multiple_windows(self) -> None:
         client = QueryPoolingClient()
@@ -252,6 +258,50 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(len(client.calls[0]), 2)
         self.assertAlmostEqual(vector[0], math.sqrt(0.5), places=6)
         self.assertAlmostEqual(vector[1], math.sqrt(0.5), places=6)
+
+    def test_build_query_extracts_hybrid_focus_ids(self) -> None:
+        query = _build_query(
+            "Investigate beneficial ownership",
+            {
+                "focus_question_ids": ["q_1"],
+                "unresolved_questions": [
+                    {
+                        "id": "q_1",
+                        "question": "Who controls the shell company?",
+                        "claim_ids": ["cl_1"],
+                        "evidence_ids": ["ev_1"],
+                    }
+                ],
+                "findings": {
+                    "unresolved": [{"id": "cl_1", "claim": "Control remains unclear"}],
+                    "contested": [],
+                },
+                "candidate_actions": [
+                    {
+                        "required_inputs": {
+                            "claim_ids": ["cl_1"],
+                            "entity_ids": ["ent_1"],
+                            "evidence_ids": ["ev_1"],
+                        },
+                        "ontology_object_refs": [
+                            {
+                                "object_id": "ent_1",
+                                "object_type": "entity",
+                                "label": "Acme Holdings",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("Who controls the shell company?", query.text)
+        self.assertIn("Acme Holdings", query.text)
+        self.assertEqual(query.focus_question_ids, ["q_1"])
+        self.assertEqual(query.focus_claim_ids, ["cl_1"])
+        self.assertEqual(query.focus_entity_ids, ["ent_1"])
+        self.assertIn("ev_1", query.boost_object_ids)
+        self.assertEqual(RETRIEVAL_PACKET_VERSION, "retrieval-v3")
 
 
 if __name__ == "__main__":

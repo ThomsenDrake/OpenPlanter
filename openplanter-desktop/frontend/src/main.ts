@@ -103,6 +103,8 @@ async function init() {
       embeddingsProvider: config.embeddings_provider,
       embeddingsStatus: config.embeddings_status,
       embeddingsStatusDetail: config.embeddings_status_detail,
+      embeddingsMode: config.embeddings_mode,
+      embeddingsPacketVersion: config.embeddings_packet_version,
       continuityMode: config.continuity_mode,
       mistralDocumentAiUseSharedKey: config.mistral_document_ai_use_shared_key,
       chromeMcpEnabled: config.chrome_mcp_enabled,

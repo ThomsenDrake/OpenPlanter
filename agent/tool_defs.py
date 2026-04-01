@@ -481,6 +481,26 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "defrag_workspace",
+        "description": "Scan and optimize the workspace: detect duplicate files (LLM-driven), ingest un-indexed data into the wiki and ontology, merge duplicate entities across sessions, and clean up structure. Returns a before/after report. Run with mode='scan_only' first to preview changes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "scan_only", "dedup", "ingest", "cleanup"],
+                    "description": "Operation mode: 'full' runs all phases, 'scan_only' reports without changes, 'dedup' removes duplicates only, 'ingest' ingests un-indexed files into wiki only, 'cleanup' removes duplicates and empty dirs"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, report what would change without modifying anything. Defaults to false."
+                }
+            },
+            "required": ["mode"],
+            "additionalProperties": False
+        }
+    },
+    {
         "name": "think",
         "description": "Record an internal planning thought. Use this to reason about the task before acting.",
         "parameters": {

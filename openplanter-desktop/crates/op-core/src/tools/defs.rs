@@ -522,18 +522,36 @@ fn merged_tool_defs(
         delegation_tool_defs(include_acceptance_criteria)
             .into_iter()
             .take(1)
-            .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters))
+            .map(|def| {
+                (
+                    def.name.to_string(),
+                    def.description.to_string(),
+                    def.parameters,
+                )
+            })
             .collect()
     } else {
         let mut defs: Vec<(String, String, Value)> = workspace_tool_defs()
             .into_iter()
-            .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters))
+            .map(|def| {
+                (
+                    def.name.to_string(),
+                    def.description.to_string(),
+                    def.parameters,
+                )
+            })
             .collect();
         if include_delegation {
             defs.extend(
                 delegation_tool_defs(include_acceptance_criteria)
                     .into_iter()
-                    .map(|def| (def.name.to_string(), def.description.to_string(), def.parameters)),
+                    .map(|def| {
+                        (
+                            def.name.to_string(),
+                            def.description.to_string(),
+                            def.parameters,
+                        )
+                    }),
             );
         }
         defs
@@ -653,21 +671,21 @@ pub fn to_openai_tools_with_options(
         delegation_only,
         include_acceptance_criteria,
     )
-        .into_iter()
-        .map(|def| {
-            let (name, description, mut params) = def;
-            strict_fixup(&mut params);
-            json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": params,
-                    "strict": true
-                }
-            })
+    .into_iter()
+    .map(|def| {
+        let (name, description, mut params) = def;
+        strict_fixup(&mut params);
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": params,
+                "strict": true
+            }
         })
-        .collect()
+    })
+    .collect()
 }
 
 /// Convert to Anthropic tools format: `[{ name, description, input_schema }]`
@@ -691,16 +709,16 @@ pub fn to_anthropic_tools_with_options(
         delegation_only,
         include_acceptance_criteria,
     )
-        .into_iter()
-        .map(|def| {
-            let (name, description, parameters) = def;
-            json!({
-                "name": name,
-                "description": description,
-                "input_schema": parameters
-            })
+    .into_iter()
+    .map(|def| {
+        let (name, description, parameters) = def;
+        json!({
+            "name": name,
+            "description": description,
+            "input_schema": parameters
         })
-        .collect()
+    })
+    .collect()
 }
 
 /// Build tool definitions for the given provider.

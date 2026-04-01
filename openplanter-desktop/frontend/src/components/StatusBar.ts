@@ -61,7 +61,9 @@ export function createStatusBar(): HTMLElement {
     zaiPlanEl.textContent =
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
-    embeddingsEl.textContent = `emb:${s.embeddingsProvider || "voyage"}:${s.embeddingsStatus || "disabled"}`;
+    embeddingsEl.textContent =
+      `emb:${s.embeddingsProvider || "voyage"}:${s.embeddingsStatus || "disabled"}` +
+      ` hybrid:${s.embeddingsPacketVersion || "retrieval-v3"}`;
     retrievalEl.textContent = s.retrievalProgressActive
       ? `index:${s.retrievalProgressPercent ?? 0}% ${s.retrievalProgressLabel || "vectorizing"}`
       : "";

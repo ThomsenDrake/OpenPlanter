@@ -2002,6 +2002,10 @@ class RLMEngine:
                 return False, "kill_shell_bg requires job_id"
             return False, self.tools.kill_shell_bg(int(raw_id))
 
+        if name == "defrag_workspace":
+            obs = self.tools.defrag_workspace(**args)
+            return False, obs
+
         if name == "subtask":
             if not self.config.recursive:
                 return False, "Subtask tool not available in flat mode."

@@ -63,6 +63,8 @@ class ReplayLogger:
     _has_header: bool = field(default=False, init=False)
     _registry_path: Path = field(init=False, repr=False)
     _file_state: _ReplayFileState = field(init=False, repr=False)
+    _provider: str | None = field(default=None, init=False)
+    _model: str | None = field(default=None, init=False)
 
     _registry_lock: ClassVar[threading.Lock] = threading.Lock()
     _file_states: ClassVar[dict[Path, _ReplayFileState]] = {}
@@ -90,13 +92,16 @@ class ReplayLogger:
         child_id = f"{self.conversation_id}/d{depth}s{step}"
         if owner is not None:
             child_id = f"{child_id}/o{_normalize_owner_slug(owner)}_{_owner_hash(owner)}"
-        return ReplayLogger(
+        child_logger = ReplayLogger(
             path=self.path,
             conversation_id=child_id,
             force_snapshot_first_call=self.force_snapshot_first_call,
             session_id=self.session_id,
             turn_id=self.turn_id,
         )
+        child_logger._provider = self._provider
+        child_logger._model = self._model
+        return child_logger
 
     def write_header(
         self,
@@ -172,6 +177,8 @@ class ReplayLogger:
             record["temperature"] = temperature
         with self._file_state.lock:
             self._append_locked(record)
+        self._provider = provider
+        self._model = model
         self._has_header = True
 
     def log_call(
@@ -210,6 +217,8 @@ class ReplayLogger:
                     "id": self.conversation_id,
                     "display": "OpenPlanter",
                     "runtime_family": "python",
+                    "provider": self._provider,
+                    "model": self._model,
                 },
             }
             if not self._has_call:
@@ -247,6 +256,8 @@ class ReplayLogger:
                 "evidence_refs": [],
                 "ontology_refs": [],
                 "generated_from": {
+                    "provider": self._provider,
+                    "model": self._model,
                     "conversation_id": self.conversation_id,
                 },
             }

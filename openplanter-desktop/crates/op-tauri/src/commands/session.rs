@@ -4,10 +4,165 @@ use op_core::session::replay::{ReplayEntry, ReplayLogger};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::State;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
+
+/// Write an artifact file to the session directory.
+#[tauri::command]
+pub async fn write_session_artifact(
+    session_dir: String,
+    filename: String,
+    content: String,
+) -> Result<(), String> {
+    let path = normalize_session_artifact_path(&session_dir, &filename)?;
+    if let Some(parent) = path.parent() {
+        tokio_fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to prepare artifact directory: {e}"))?;
+    }
+
+    tokio_fs::write(&path, content)
+        .await
+        .map_err(|e| format!("Failed to write artifact: {e}"))
+}
+
+/// Read an artifact file from the session directory.
+/// Returns None if the file doesn't exist.
+#[tauri::command]
+pub async fn read_session_artifact(
+    session_dir: String,
+    filename: String,
+) -> Result<Option<String>, String> {
+    let path = normalize_session_artifact_path(&session_dir, &filename)?;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = tokio_fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read artifact: {e}"))?;
+
+    Ok(Some(content))
+}
+
+#[tauri::command]
+pub async fn read_session_event(
+    session_id: String,
+    event_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<Value>, String> {
+    if !is_safe_session_id(&session_id) {
+        return Err("Invalid session id".to_string());
+    }
+    let session_dir = sessions_dir(&state).await.join(&session_id);
+    read_session_event_by_path(&session_dir, &event_id)
+        .await
+        .map_err(|e| format!("Failed to read session event: {e}"))
+}
+
+fn looks_like_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return true;
+    }
+    value.starts_with("\\\\")
+}
+
+/// Validate and normalize a session-relative artifact path.
+fn normalize_session_artifact_path(
+    session_dir: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let session_path = Path::new(session_dir);
+    if !session_path.is_absolute() {
+        return Err("Session directory must be absolute".to_string());
+    }
+    let canonical_session = session_path
+        .canonicalize()
+        .map_err(|_| "Session directory does not exist".to_string())?;
+
+    let trimmed = relative_path.trim();
+    if trimmed.is_empty() {
+        return Err("Artifact path must not be empty".to_string());
+    }
+    if trimmed.contains('\0') {
+        return Err("Artifact path contains invalid characters".to_string());
+    }
+    if looks_like_windows_absolute_path(trimmed) {
+        return Err("Artifact path must be relative".to_string());
+    }
+
+    let relative = Path::new(trimmed);
+    if relative.is_absolute() {
+        return Err("Artifact path must be relative".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+    let mut saw_normal = false;
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                normalized.push(part);
+                saw_normal = true;
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("Artifact path escapes the session directory".to_string());
+            }
+        }
+    }
+
+    if !saw_normal {
+        return Err("Artifact path must point to a file".to_string());
+    }
+
+    Ok(canonical_session.join(normalized))
+}
+
+async fn read_session_event_by_path(
+    session_dir: &Path,
+    event_id: &str,
+) -> Result<Option<Value>, std::io::Error> {
+    let path = session_dir.join("events.jsonl");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = tokio_fs::read_to_string(path).await?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if value
+            .get("event_id")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate == event_id)
+        {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+/// Get the full session directory path for a given session ID.
+#[tauri::command]
+pub async fn get_session_directory(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let dir = sessions_dir(&state).await.join(&session_id);
+    Ok(dir.to_string_lossy().to_string())
+}
 
 pub(crate) const TRACE_SCHEMA_VERSION: u32 = 2;
 pub(crate) const SESSION_FORMAT: &str = "openplanter.session.v2";
@@ -86,6 +241,10 @@ pub struct AppendSessionEventOptions {
     pub status: Option<String>,
     pub failure: Option<FailureInfo>,
     pub actor_kind: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub source_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,11 +346,15 @@ struct SessionMetadataFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     continuity_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     source_compat: Option<SessionSourceCompat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<SessionCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     durability: Option<SessionDurability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    investigation_id: Option<String>,
     #[serde(default, flatten)]
     extra: serde_json::Map<String, Value>,
 }
@@ -219,6 +382,7 @@ impl SessionMetadataFile {
             created_at: self.resolved_created_at(),
             turn_count: self.turn_count,
             last_objective: self.last_objective.clone(),
+            investigation_id: self.investigation_id.clone(),
         }
     }
 
@@ -386,7 +550,10 @@ pub fn collect_sessions(dir: &Path, limit: usize) -> Vec<SessionInfo> {
 }
 
 /// Create a new session in the given directory, returning the SessionInfo.
-pub fn create_session(dir: &Path) -> Result<SessionInfo, std::io::Error> {
+pub fn create_session(
+    dir: &Path,
+    investigation_id: Option<String>,
+) -> Result<SessionInfo, std::io::Error> {
     fs::create_dir_all(dir)?;
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -407,6 +574,7 @@ pub fn create_session(dir: &Path) -> Result<SessionInfo, std::io::Error> {
         last_objective: None,
         status: Some("active".to_string()),
         continuity_mode: Some("new".to_string()),
+        investigation_id,
         ..SessionMetadataFile::default()
     };
     metadata.refresh_v2(&session_dir, &new_id, &now);
@@ -483,9 +651,15 @@ pub fn append_session_event(
             },
             "parent_event_id": Value::Null,
             "caused_by": [],
-            "source_refs": [],
-            "evidence_refs": [],
+            "source_refs": options.source_refs,
+            "evidence_refs": options.evidence_refs,
             "ontology_refs": [],
+            "generated_from": {
+                "provider": options.provider.as_ref().map(|s| Value::String(s.clone())).unwrap_or(Value::Null),
+                "model": options.model.as_ref().map(|s| Value::String(s.clone())).unwrap_or(Value::Null),
+                "request_id": Value::Null,
+                "conversation_id": Value::Null,
+            },
         },
         "compat": {
             "legacy_role": Value::Null,
@@ -526,6 +700,7 @@ pub async fn list_sessions(
 pub async fn open_session(
     id: Option<String>,
     resume: bool,
+    investigation_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SessionInfo, String> {
     let dir = sessions_dir(&state).await;
@@ -539,6 +714,9 @@ pub async fn open_session(
                 let now = chrono::Utc::now().to_rfc3339();
                 metadata.continuity_mode = Some("resume".to_string());
                 metadata.status = Some("active".to_string());
+                if investigation_id.is_some() {
+                    metadata.investigation_id = investigation_id.clone();
+                }
                 metadata.refresh_v2(&session_dir, session_id, &now);
                 write_metadata_file(&session_dir, &metadata)
                     .await
@@ -557,7 +735,7 @@ pub async fn open_session(
         }
     }
 
-    let info = create_session(&dir).map_err(|e| e.to_string())?;
+    let info = create_session(&dir, investigation_id.clone()).map_err(|e| e.to_string())?;
     let mut session_lock = state.session_id.lock().await;
     *session_lock = Some(info.id.clone());
     let _ = append_session_event(
@@ -1152,7 +1330,7 @@ mod tests {
     fn test_creates_session_dir() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let session_dir = dir.join(&info.id);
         assert!(session_dir.exists(), "session dir should exist");
         assert!(
@@ -1169,7 +1347,7 @@ mod tests {
     fn test_session_id_format() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let re = regex::Regex::new(r"^\d{8}-\d{6}-[0-9a-f]{8}$").unwrap();
         assert!(
             re.is_match(&info.id),
@@ -1182,7 +1360,7 @@ mod tests {
     fn test_metadata_json_valid() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let meta_path = dir.join(&info.id).join("metadata.json");
         let content = fs::read_to_string(&meta_path).unwrap();
         let deserialized: SessionInfo = serde_json::from_str(&content).unwrap();
@@ -1193,7 +1371,7 @@ mod tests {
     fn test_session_turn_count_zero() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         assert_eq!(info.turn_count, 0);
         assert!(info.last_objective.is_none());
     }
@@ -1202,7 +1380,7 @@ mod tests {
     fn test_create_session_writes_v2_metadata_fields() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let meta_path = dir.join(&info.id).join("metadata.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(meta_path).unwrap()).unwrap();
         assert_eq!(value["schema_version"], 2);
@@ -1243,7 +1421,7 @@ mod tests {
     async fn test_update_session_metadata_appends_turn_events_and_writes_turn_state() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let session_dir = dir.join(&info.id);
 
         let turn = update_session_metadata(&session_dir, "Investigate donor network")
@@ -1306,7 +1484,7 @@ mod tests {
     async fn test_finalize_session_turn_appends_turn_record_and_updates_metadata() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sessions");
-        let info = create_session(&dir).unwrap();
+        let info = create_session(&dir, None).unwrap();
         let session_dir = dir.join(&info.id);
         let turn = update_session_metadata(&session_dir, "Investigate Acme")
             .await
@@ -1381,5 +1559,75 @@ mod tests {
         assert!(events.contains("\"event_type\":\"turn.cancelled\""));
         assert!(events.contains("\"failure\":{"));
         assert!(events.contains("\"code\":\"cancelled\""));
+    }
+
+    #[tokio::test]
+    async fn test_write_and_read_session_artifact_allow_nested_relative_paths() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        write_session_artifact(
+            session_dir.display().to_string(),
+            "artifacts/patches/example.patch".to_string(),
+            "diff --git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let content = read_session_artifact(
+            session_dir.display().to_string(),
+            "artifacts/patches/example.patch".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(content.as_deref(), Some("diff --git"));
+        assert!(session_dir.join("artifacts/patches/example.patch").exists());
+    }
+
+    #[test]
+    fn test_normalize_session_artifact_path_rejects_traversal_and_absolute_paths() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let session_dir_str = session_dir.display().to_string();
+
+        for invalid in [
+            "",
+            "../escape.txt",
+            "artifacts/../../escape.txt",
+            "/tmp/escape.txt",
+            "C:\\temp\\escape.txt",
+            "\\\\server\\share\\escape.txt",
+        ] {
+            assert!(
+                normalize_session_artifact_path(&session_dir_str, invalid).is_err(),
+                "expected invalid artifact path to fail: {invalid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_session_event_by_path_returns_matching_event() {
+        let tmp = tempdir().unwrap();
+        tokio_fs::write(
+            tmp.path().join("events.jsonl"),
+            concat!(
+                "{\"event_id\":\"evt-000001\",\"event_type\":\"turn.started\"}\n",
+                "{\"event_id\":\"evt-000002\",\"event_type\":\"turn.completed\",\"payload\":{\"status\":\"ok\"}}\n"
+            ),
+        )
+        .await
+        .unwrap();
+
+        let event = read_session_event_by_path(tmp.path(), "evt-000002")
+            .await
+            .unwrap()
+            .expect("event should be present");
+
+        assert_eq!(event["event_id"], "evt-000002");
+        assert_eq!(event["event_type"], "turn.completed");
+        assert_eq!(event["payload"]["status"], "ok");
     }
 }

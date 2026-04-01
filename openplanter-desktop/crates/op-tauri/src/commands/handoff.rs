@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
+use tokio::fs as tokio_fs;
 
 const HANDOFF_FORMAT: &str = "openplanter.session_handoff.v1";
 const HANDOFF_SCHEMA_VERSION: u32 = 1;
@@ -47,6 +48,8 @@ pub struct SessionHandoffSource {
     pub continuity_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -178,6 +181,12 @@ pub async fn export_session_handoff(
             ..AppendSessionEventOptions::default()
         },
     );
+
+    // Update the turn record with checkpoint_ref pointing to the handoff artifact
+    if let Some(ref turn_id) = handoff.source.turn_id {
+        let checkpoint_ref = relative_session_path(&session_dir, &output_path);
+        let _ = update_turn_checkpoint_ref(&session_dir, turn_id, &checkpoint_ref).await;
+    }
 
     Ok(ExportSessionHandoffResult {
         path: output_path.display().to_string(),
@@ -367,7 +376,7 @@ async fn import_handoff_into_session(
             .await
             .map_err(|err| format!("Failed to append import replay note: {err}"))?;
     }
-    refresh_metadata_for_import(session_dir, handoff)?;
+    refresh_metadata_for_import(session_dir, handoff, &stored_path)?;
 
     Ok(stored_path)
 }
@@ -385,7 +394,7 @@ fn resolve_import_target(
         return Ok((session_id.to_string(), session_dir, false));
     }
 
-    let session = create_session(sessions_root).map_err(|err| err.to_string())?;
+    let session = create_session(sessions_root, None).map_err(|err| err.to_string())?;
     let session_dir = sessions_root.join(&session.id);
     Ok((session.id, session_dir, true))
 }
@@ -439,6 +448,7 @@ fn persist_handoff_package(path: &Path, handoff: &SessionHandoffPackage) -> std:
 fn refresh_metadata_for_import(
     session_dir: &Path,
     handoff: &SessionHandoffPackage,
+    stored_path: &Path,
 ) -> Result<(), String> {
     let session_id = session_dir_name(session_dir);
     let now = chrono::Utc::now().to_rfc3339();
@@ -472,6 +482,10 @@ fn refresh_metadata_for_import(
     metadata.insert(
         "continuity_mode".to_string(),
         Value::String("imported".to_string()),
+    );
+    metadata.insert(
+        "checkpoint_ref".to_string(),
+        Value::String(relative_session_path(session_dir, stored_path)),
     );
     metadata.insert("status".to_string(), Value::String("active".to_string()));
     metadata.insert("capabilities".to_string(), session_capabilities_value());
@@ -564,6 +578,11 @@ fn build_source(
             })
             .or_else(|| string_field(metadata, "continuity_mode")),
         session_status: string_field(metadata, "status"),
+        checkpoint_ref: turn_value.and_then(|turn| {
+            turn.pointer("/continuity/checkpoint_ref")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        }),
     }
 }
 
@@ -930,6 +949,70 @@ fn is_safe_handoff_id(handoff_id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
+/// Updates the checkpoint_ref field in a turn record within turns.jsonl.
+/// This is used to link a turn to its exported handoff artifact.
+async fn update_turn_checkpoint_ref(
+    session_dir: &Path,
+    turn_id: &str,
+    checkpoint_ref: &str,
+) -> std::io::Result<()> {
+    let turns_path = session_dir.join("turns.jsonl");
+    if !turns_path.exists() {
+        return Ok(());
+    }
+
+    let content = tokio_fs::read_to_string(&turns_path).await?;
+    let mut updated_lines = Vec::new();
+    let mut found = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            updated_lines.push(line.to_string());
+            continue;
+        }
+
+        let mut value: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                updated_lines.push(line.to_string());
+                continue;
+            }
+        };
+
+        if let Some(existing_turn_id) = value.get("turn_id").and_then(Value::as_str) {
+            if existing_turn_id == turn_id {
+                // Update the continuity.checkpoint_ref field
+                if let Some(continuity) = value.get_mut("continuity").and_then(Value::as_object_mut)
+                {
+                    continuity.insert(
+                        "checkpoint_ref".to_string(),
+                        Value::String(checkpoint_ref.to_string()),
+                    );
+                } else if let Some(obj) = value.as_object_mut() {
+                    // Create continuity object if it doesn't exist
+                    let mut continuity = serde_json::Map::new();
+                    continuity.insert(
+                        "checkpoint_ref".to_string(),
+                        Value::String(checkpoint_ref.to_string()),
+                    );
+                    obj.insert("continuity".to_string(), Value::Object(continuity));
+                }
+                found = true;
+            }
+        }
+
+        updated_lines.push(serde_json::to_string(&value).map_err(std::io::Error::other)?);
+    }
+
+    if found {
+        let updated_content = updated_lines.join("\n");
+        tokio_fs::write(&turns_path, updated_content).await?;
+    }
+
+    Ok(())
+}
+
 fn new_handoff_id(now: chrono::DateTime<chrono::Utc>, suffix: &str) -> String {
     let random = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1210,7 +1293,7 @@ mod tests {
     async fn import_handoff_into_session_updates_metadata_and_replay() {
         let tmp = tempdir().unwrap();
         let sessions_dir = tmp.path().join("sessions");
-        let session = create_session(&sessions_dir).unwrap();
+        let session = create_session(&sessions_dir, None).unwrap();
         let session_dir = sessions_dir.join(&session.id);
         let handoff = SessionHandoffPackage {
             schema_version: HANDOFF_SCHEMA_VERSION,

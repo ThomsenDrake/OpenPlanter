@@ -334,7 +334,16 @@ pub async fn solve(
         TauriEmitter::new(app),
         replay,
         session_dir.clone(),
+        Some(cfg.provider.clone()),
+        Some(cfg.model.clone()),
     ));
+    if let Some(turn_context) = turn_context.as_ref() {
+        emitter.set_turn_context(crate::bridge::TurnContext {
+            turn_id: turn_context.turn_id.clone(),
+            session_id: turn_context.session_id.clone(),
+            event_start_seq: turn_context.event_start_seq,
+        });
+    }
     let cwd = std::env::current_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|_| "<unavailable>".to_string());
@@ -475,6 +484,8 @@ pub async fn solve(
             }
         }
 
+        emitter.clear_turn_context();
+
         {
             let mut running = running_flag.lock().await;
             *running = false;
@@ -507,6 +518,7 @@ pub async fn cancel(state: State<'_, AppState>) -> Result<(), String> {
         token.cancel();
     }
     if let Some(session_id) = state.session_id.lock().await.clone() {
+        let cfg = state.config.lock().await.clone();
         let session_dir = sessions_dir(&state).await.join(session_id);
         let _ = append_session_event(
             &session_dir,
@@ -516,6 +528,8 @@ pub async fn cancel(state: State<'_, AppState>) -> Result<(), String> {
                 status: Some("info".to_string()),
                 failure: Some(FailureInfo::cancelled("Cancellation requested.")),
                 actor_kind: Some("runtime".to_string()),
+                provider: Some(cfg.provider.clone()),
+                model: Some(cfg.model.clone()),
                 ..AppendSessionEventOptions::default()
             },
         );

@@ -2284,17 +2284,23 @@ async fn test_solve_uses_separate_context_finalizer_rescue_before_meta_stall() {
     let rescue_request: serde_json::Value = serde_json::from_str(&captured[2]).unwrap();
     assert!(rescue_request.get("tools").is_none());
     assert_eq!(
-        rescue_request["messages"].as_array().map(|messages| messages.len()),
+        rescue_request["messages"]
+            .as_array()
+            .map(|messages| messages.len()),
         Some(1)
     );
-    assert!(rescue_request["system"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Return only the direct final deliverable as plain text."));
-    assert!(rescue_request["messages"][0]["content"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Failure label: meta_rejection_stall"));
+    assert!(
+        rescue_request["system"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Return only the direct final deliverable as plain text.")
+    );
+    assert!(
+        rescue_request["messages"][0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Failure label: meta_rejection_stall")
+    );
     assert!(
         !recorded.iter().any(|event| matches!(event, Ev7::Error(_))),
         "did not expect errors, got: {recorded:?}"
