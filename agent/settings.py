@@ -84,6 +84,7 @@ class PersistentSettings:
     chrome_mcp_channel: str | None = None
     chrome_mcp_connect_timeout_sec: int | None = None
     chrome_mcp_rpc_timeout_sec: int | None = None
+    default_investigation_id: str | None = None
 
     def default_model_for_provider(self, provider: str) -> str | None:
         per_provider = {
@@ -126,6 +127,7 @@ class PersistentSettings:
                 if self.chrome_mcp_rpc_timeout_sec is not None
                 else None
             ),
+            default_investigation_id=(self.default_investigation_id or "").strip() or None,
         )
 
     def to_json(self) -> dict[str, str]:
@@ -160,6 +162,8 @@ class PersistentSettings:
             payload["chrome_mcp_connect_timeout_sec"] = self.chrome_mcp_connect_timeout_sec
         if self.chrome_mcp_rpc_timeout_sec is not None:
             payload["chrome_mcp_rpc_timeout_sec"] = self.chrome_mcp_rpc_timeout_sec
+        if self.default_investigation_id:
+            payload["default_investigation_id"] = self.default_investigation_id
         return payload
 
     @classmethod
@@ -192,6 +196,7 @@ class PersistentSettings:
                 if payload.get("chrome_mcp_rpc_timeout_sec") is not None
                 else None
             ),
+            default_investigation_id=(str(payload.get("default_investigation_id", "")).strip() or None),
         ).normalized()
 
 

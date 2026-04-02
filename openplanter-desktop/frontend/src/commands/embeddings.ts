@@ -18,6 +18,7 @@ export async function handleEmbeddingsCommand(args: string): Promise<CommandResu
       lines: [
         `Embeddings provider: ${state.embeddingsProvider || "voyage"}`,
         `Retrieval: ${state.embeddingsStatus || "disabled"} | ${state.embeddingsStatusDetail}`,
+        `Hybrid retrieval: ${state.embeddingsMode || "documents+ontology"} (${state.embeddingsPacketVersion || "retrieval-v3"})`,
         `Valid providers: ${VALID_EMBEDDINGS_PROVIDERS.join(", ")}`,
       ],
     };
@@ -42,11 +43,14 @@ export async function handleEmbeddingsCommand(args: string): Promise<CommandResu
       embeddingsProvider: config.embeddings_provider,
       embeddingsStatus: config.embeddings_status,
       embeddingsStatusDetail: config.embeddings_status_detail,
+      embeddingsMode: config.embeddings_mode,
+      embeddingsPacketVersion: config.embeddings_packet_version,
     }));
 
     const lines = [
       `Embeddings provider set to: ${config.embeddings_provider}`,
       `Retrieval: ${config.embeddings_status} | ${config.embeddings_status_detail}`,
+      `Hybrid retrieval: ${config.embeddings_mode} (${config.embeddings_packet_version})`,
     ];
     if (save) {
       await saveSettings({ embeddings_provider: config.embeddings_provider });

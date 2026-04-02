@@ -16,14 +16,20 @@ from .config import normalize_embeddings_provider
 
 VOYAGE_EMBEDDING_MODEL = "voyage-4"
 MISTRAL_EMBEDDING_MODEL = "mistral-embed"
+RETRIEVAL_PACKET_VERSION = "retrieval-v3"
+RETRIEVAL_MODE = "documents+ontology"
 _CHUNK_TARGET_CHARS = 1200
 _CHUNK_OVERLAP_CHARS = 200
 _STRUCTURED_RECORD_MAX_CHARS = _CHUNK_TARGET_CHARS + _CHUNK_OVERLAP_CHARS
 _MAX_EXCERPT_CHARS = 280
-_INDEX_VERSION = "embeddings-v2"
+_INDEX_VERSION = "embeddings-v3"
 _WORKSPACE_TOP_K = 4
 _SESSION_TOP_K = 4
+_FUSED_DOCUMENT_TOP_K = _WORKSPACE_TOP_K + _SESSION_TOP_K
+_ONTOLOGY_TOP_K = 6
 _MAX_HITS_PER_SOURCE = 2
+_MAX_HITS_PER_OBJECT = 2
+_MAX_GRAPH_RELATED_IDS = 8
 _BATCH_SIZE = 32
 _TEXT_EXTENSIONS = {".md", ".txt", ".json", ".csv", ".tsv", ".yaml", ".yml", ".patch"}
 _EXCLUDED_DIR_NAMES = {
@@ -105,6 +111,15 @@ class RetrievalProgress:
             separators=(",", ":"),
             ensure_ascii=False,
         )
+
+
+@dataclass(slots=True)
+class RetrievalQuery:
+    text: str
+    focus_question_ids: list[str]
+    focus_claim_ids: list[str]
+    focus_entity_ids: list[str]
+    boost_object_ids: list[str]
 
 
 @dataclass(slots=True)
@@ -210,6 +225,17 @@ class ChunkRecord:
             ),
             vector=_normalize_vector(vector),
         )
+
+
+@dataclass(slots=True)
+class RefreshIndexResult:
+    chunks: list[ChunkRecord]
+    completion: str
+    documents_done: int
+    documents_total: int
+    chunks_done: int
+    chunks_total: int
+    failure_detail: str | None = None
 
 
 class RetrievalError(RuntimeError):
@@ -360,14 +386,20 @@ def build_embeddings_status(
             provider=normalized,
             model=model,
             status="enabled",
-            detail=f"Retrieval enabled via {normalized} ({model}).",
+            detail=(
+                f"Retrieval enabled via {normalized} ({model}). "
+                f"Hybrid mode: {RETRIEVAL_MODE} ({RETRIEVAL_PACKET_VERSION})."
+            ),
         )
     missing = "VOYAGE_API_KEY" if normalized == "voyage" else "MISTRAL_API_KEY"
     return RetrievalStatus(
         provider=normalized,
         model=model,
         status="disabled",
-        detail=f"Retrieval disabled: {missing} is not configured for {normalized}.",
+        detail=(
+            f"Retrieval disabled: {missing} is not configured for {normalized}. "
+            f"Hybrid mode: {RETRIEVAL_MODE} ({RETRIEVAL_PACKET_VERSION})."
+        ),
     )
 
 
@@ -419,14 +451,22 @@ def build_retrieval_packet(
         workspace=workspace,
         session_dir=session_dir,
     )
+    ontology_docs = _collect_ontology_documents(
+        workspace=workspace,
+        session_dir=session_dir,
+    )
     total_docs = len(workspace_docs) + len(session_docs)
-    if total_docs == 0:
+    total_ontology_objects = len(ontology_docs)
+    if total_docs == 0 and total_ontology_objects == 0:
         return RetrievalBuildResult(
             packet=None,
             provider=status.provider,
             model=status.model,
             status=status.status,
-            detail=f"Retrieval enabled via {status.provider} ({status.model}), but no indexable documents were found.",
+            detail=(
+                f"Retrieval enabled via {status.provider} ({status.model}), "
+                "but no indexable documents or ontology objects were found."
+            ),
         )
 
     if on_event:
@@ -437,13 +477,9 @@ def build_retrieval_packet(
         except Exception:
             pass
 
-    workspace_index_dir = (
-        workspace / session_root_dir / "embeddings" / "workspace"
-    )
-    session_index_dir = (
-        session_dir / "embeddings" if session_dir is not None else None
-    )
-    workspace_chunks = _refresh_index(
+    workspace_index_dir = workspace / session_root_dir / "embeddings" / "workspace"
+    session_index_dir = session_dir / "embeddings" if session_dir is not None else None
+    workspace_index = _refresh_index(
         index_dir=workspace_index_dir,
         documents=workspace_docs,
         client=client,
@@ -452,7 +488,7 @@ def build_retrieval_packet(
         corpus="workspace",
         on_event=on_event,
     )
-    session_chunks = _refresh_index(
+    session_index = _refresh_index(
         index_dir=session_index_dir,
         documents=session_docs,
         client=client,
@@ -461,9 +497,28 @@ def build_retrieval_packet(
         corpus="session",
         on_event=on_event,
     )
+    ontology_index = _refresh_index(
+        index_dir=(session_index_dir / "ontology") if session_index_dir is not None else None,
+        documents=ontology_docs,
+        client=client,
+        provider=status.provider,
+        model=status.model,
+        corpus="ontology",
+        on_event=on_event,
+    )
+
+    degradation_notes = [
+        _refresh_degradation_note("workspace", workspace_index),
+        _refresh_degradation_note("session", session_index),
+        _refresh_degradation_note("ontology", ontology_index),
+    ]
+    degradation_notes = [note for note in degradation_notes if note]
+    workspace_chunks = workspace_index.chunks
+    session_chunks = session_index.chunks
+    ontology_chunks = ontology_index.chunks
 
     query = _build_query(objective, question_reasoning_packet)
-    if not query.strip():
+    if not query.text.strip():
         return RetrievalBuildResult(
             packet=None,
             provider=status.provider,
@@ -471,7 +526,33 @@ def build_retrieval_packet(
             status=status.status,
             detail=f"Retrieval enabled via {status.provider} ({status.model}), but no query text was available.",
         )
-    query_vector = client.embed_query(query)
+    try:
+        query_vector = client.embed_query(query.text)
+    except RetrievalError as exc:
+        return RetrievalBuildResult(
+            packet=None,
+            provider=status.provider,
+            model=status.model,
+            status="degraded",
+            detail=(
+                f"Retrieval degraded via {status.provider} ({status.model}); "
+                f"indexed {total_docs} document(s) and {total_ontology_objects} ontology object(s), "
+                f"but query embedding failed. Semantic context was skipped for this solve. Last error: {exc}"
+            ),
+        )
+
+    ontology_hits = _search_ontology_objects(
+        ontology_chunks,
+        query_vector,
+        top_k=_ONTOLOGY_TOP_K,
+        per_object_cap=_MAX_HITS_PER_OBJECT,
+        boost_object_ids=query.boost_object_ids,
+    )
+    top_ontology_ids = [
+        str(hit.get("object_id") or "")
+        for hit in ontology_hits
+        if str(hit.get("object_id") or "").strip()
+    ]
     workspace_hits = _search_chunks(
         workspace_chunks,
         query_vector,
@@ -484,35 +565,67 @@ def build_retrieval_packet(
         top_k=_SESSION_TOP_K,
         per_source_cap=_MAX_HITS_PER_SOURCE,
     )
-    hit_count = len(workspace_hits) + len(session_hits)
-    if hit_count == 0:
-        return RetrievalBuildResult(
-            packet=None,
-            provider=status.provider,
-            model=status.model,
-            status=status.status,
-            detail=(
-                f"Retrieval enabled via {status.provider} ({status.model}); "
-                f"indexed {total_docs} document(s), but found no strong semantic matches."
-            ),
-        )
+    document_hits = _fuse_document_hits(
+        workspace_chunks,
+        session_chunks,
+        query_vector,
+        top_ontology_ids=top_ontology_ids,
+        boost_object_ids=query.boost_object_ids,
+        top_k=_FUSED_DOCUMENT_TOP_K,
+        per_source_cap=_MAX_HITS_PER_SOURCE,
+    )
+    graph_expansions = _build_graph_expansions(ontology_hits)
+    hit_count = len(document_hits) + len(ontology_hits)
+    packet_status = "degraded" if degradation_notes else "ready"
 
     packet = {
+        "version": RETRIEVAL_PACKET_VERSION,
+        "mode": RETRIEVAL_MODE,
+        "status": packet_status,
         "provider": status.provider,
         "model": status.model,
-        "query": query,
+        "query": {
+            "text": query.text,
+            "focus_question_ids": query.focus_question_ids,
+            "focus_claim_ids": query.focus_claim_ids,
+            "focus_entity_ids": query.focus_entity_ids,
+        },
+        "query_text": query.text,
+        "hits": {
+            "documents": document_hits,
+            "ontology_objects": ontology_hits,
+            "graph_expansions": graph_expansions,
+        },
+        "coverage": {
+            "documents_indexed": total_docs,
+            "ontology_objects_indexed": total_ontology_objects,
+        },
         "workspace_hits": workspace_hits,
         "session_hits": session_hits,
     }
+    if degradation_notes:
+        detail = (
+            f"Retrieval degraded via {status.provider} ({status.model}); "
+            f"{' '.join(degradation_notes)} Selected {hit_count} hybrid semantic match(es)."
+        )
+    elif hit_count == 0:
+        detail = (
+            f"Retrieval enabled via {status.provider} ({status.model}); "
+            f"indexed {total_docs} document(s) and {total_ontology_objects} ontology object(s), "
+            "but found no strong semantic matches."
+        )
+    else:
+        detail = (
+            f"Retrieval enabled via {status.provider} ({status.model}); "
+            f"indexed {total_docs} document(s) and {total_ontology_objects} ontology object(s) "
+            f"and selected {hit_count} hybrid semantic match(es)."
+        )
     return RetrievalBuildResult(
         packet=packet,
         provider=status.provider,
         model=status.model,
-        status=status.status,
-        detail=(
-            f"Retrieval enabled via {status.provider} ({status.model}); "
-            f"indexed {total_docs} document(s) and selected {hit_count} semantic match(es)."
-        ),
+        status=packet_status,
+        detail=detail,
     )
 
 
@@ -675,10 +788,378 @@ def _documents_from_investigation_state(
                         "record_type": "evidence",
                         "evidence_id": str(evidence_id),
                         "evidence_type": str(record.get("evidence_type") or ""),
+                        "linked_object_ids": _record_related_object_ids(
+                            "evidence",
+                            record,
+                            set(),
+                        ),
                     },
                 )
             )
     return docs
+
+
+def _collect_ontology_documents(
+    *,
+    workspace: Path,
+    session_dir: Path | None,
+) -> list[SourceDocument]:
+    docs: list[SourceDocument] = []
+    session_object_ids: set[str] = set()
+
+    # Collect session-scoped ontology documents
+    if session_dir is not None:
+        session_docs = _ontology_documents_from_investigation_state(
+            session_dir / "investigation_state.json",
+            workspace=workspace,
+            scope="session",
+        )
+        for doc in session_docs:
+            docs.append(doc)
+            session_object_ids.add(doc.metadata.get("object_id", ""))
+
+    # Collect workspace-global ontology documents
+    workspace_ontology_path = workspace / ".openplanter" / "ontology.json"
+    if workspace_ontology_path.exists():
+        workspace_docs = _ontology_documents_from_workspace_ontology(
+            workspace_ontology_path,
+            workspace=workspace,
+            scope="workspace",
+        )
+        for doc in workspace_docs:
+            object_id = doc.metadata.get("object_id", "")
+            # Deduplicate: skip if same object_id exists in session docs
+            if object_id and object_id in session_object_ids:
+                continue
+            docs.append(doc)
+
+    return docs
+
+
+def _ontology_documents_from_investigation_state(
+    path: Path,
+    *,
+    workspace: Path,
+    scope: str = "session",
+) -> list[SourceDocument]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+
+    rel_path = _rel_path(path, workspace)
+    existing_ids = _collect_existing_state_ids(parsed)
+    label_index = _build_state_label_index(parsed)
+    docs: list[SourceDocument] = []
+    for object_type, key in (
+        ("question", "questions"),
+        ("claim", "claims"),
+        ("evidence", "evidence"),
+        ("entity", "entities"),
+        ("link", "links"),
+    ):
+        records = parsed.get(key)
+        if not isinstance(records, dict):
+            continue
+        for object_id, raw_record in records.items():
+            if not isinstance(raw_record, dict):
+                continue
+            doc = _ontology_document_from_record(
+                rel_path=rel_path,
+                object_type=object_type,
+                object_id=str(object_id),
+                record=raw_record,
+                label_index=label_index,
+                existing_ids=existing_ids,
+                scope=scope,
+            )
+            if doc is not None:
+                docs.append(doc)
+    return docs
+
+
+def _ontology_documents_from_workspace_ontology(
+    path: Path,
+    *,
+    workspace: Path,
+    scope: str = "workspace",
+) -> list[SourceDocument]:
+    """Load ontology documents from workspace-global ontology.json.
+
+    The workspace ontology has the same structure as investigation_state
+    but is stored as a plain JSON file without a state.json wrapper.
+    """
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+
+    rel_path = _rel_path(path, workspace)
+    existing_ids = _collect_existing_state_ids(parsed)
+    label_index = _build_state_label_index(parsed)
+    # Get top-level source_sessions if present
+    top_level_source_sessions = _value_string_list(parsed.get("source_sessions"))
+    docs: list[SourceDocument] = []
+    for object_type, key in (
+        ("question", "questions"),
+        ("claim", "claims"),
+        ("evidence", "evidence"),
+        ("entity", "entities"),
+        ("link", "links"),
+        ("hypothesis", "hypotheses"),
+        ("provenance", "provenance_nodes"),
+    ):
+        records = parsed.get(key)
+        if not isinstance(records, dict):
+            continue
+        for object_id, raw_record in records.items():
+            if not isinstance(raw_record, dict):
+                continue
+            # Get source_sessions from object or fall back to top-level
+            object_source_sessions = _value_string_list(
+                raw_record.get("source_sessions")
+            ) or top_level_source_sessions
+            doc = _ontology_document_from_record(
+                rel_path=rel_path,
+                object_type=object_type,
+                object_id=str(object_id),
+                record=raw_record,
+                label_index=label_index,
+                existing_ids=existing_ids,
+                scope=scope,
+                source_sessions=object_source_sessions,
+            )
+            if doc is not None:
+                docs.append(doc)
+    return docs
+
+
+def _ontology_document_from_record(
+    *,
+    rel_path: str,
+    object_type: str,
+    object_id: str,
+    record: dict[str, Any],
+    label_index: dict[str, str],
+    existing_ids: set[str],
+    scope: str = "session",
+    source_sessions: list[str] | None = None,
+) -> SourceDocument | None:
+    related_ids = _record_related_object_ids(object_type, record, existing_ids)
+    provenance_ids = _value_string_list(record.get("provenance_ids"))
+    label = _record_label(record) or object_id
+    text = _build_ontology_text(
+        object_type=object_type,
+        object_id=object_id,
+        record=record,
+        label_index=label_index,
+        related_ids=related_ids,
+        provenance_ids=provenance_ids,
+    )
+    if not text.strip():
+        return None
+    fingerprint = _fingerprint_text(
+        f"{text}\n{','.join(related_ids)}\n{','.join(provenance_ids)}"
+    )
+    metadata: dict[str, Any] = {
+        "object_id": object_id,
+        "object_type": object_type,
+        "object_label": label,
+        "related_object_ids": related_ids,
+        "linked_object_ids": _dedupe_strings(related_ids + [object_id]),
+        "provenance_ids": provenance_ids,
+        "scope": scope,
+    }
+    if source_sessions is not None:
+        metadata["source_sessions"] = source_sessions
+    return SourceDocument(
+        source_id=f"{rel_path}#ontology:{object_type}:{object_id}",
+        path=f"{rel_path}#ontology:{object_type}:{object_id}",
+        title=label,
+        text=text,
+        fingerprint=fingerprint,
+        kind=f"ontology_{object_type}",
+        metadata=metadata,
+    )
+
+
+def _collect_existing_state_ids(state: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for key in (
+        "questions",
+        "claims",
+        "evidence",
+        "entities",
+        "links",
+        "provenance_nodes",
+        "confidence_profiles",
+    ):
+        records = state.get(key)
+        if isinstance(records, dict):
+            ids.update(str(record_id) for record_id in records.keys())
+    return ids
+
+
+def _build_state_label_index(state: dict[str, Any]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for key in (
+        "questions",
+        "claims",
+        "evidence",
+        "entities",
+        "links",
+        "provenance_nodes",
+        "confidence_profiles",
+    ):
+        records = state.get(key)
+        if not isinstance(records, dict):
+            continue
+        for record_id, raw_record in records.items():
+            label = _record_label(raw_record if isinstance(raw_record, dict) else None)
+            if label:
+                labels[str(record_id)] = label
+    return labels
+
+
+def _build_ontology_text(
+    *,
+    object_type: str,
+    object_id: str,
+    record: dict[str, Any],
+    label_index: dict[str, str],
+    related_ids: list[str],
+    provenance_ids: list[str],
+) -> str:
+    lines = [f"object_type: {object_type}", f"object_id: {object_id}"]
+    label = _record_label(record)
+    if label:
+        lines.append(f"label: {label}")
+    for key in (
+        "status",
+        "priority",
+        "kind",
+        "predicate",
+        "evidence_type",
+        "canonical_name",
+        "question_text",
+        "question",
+        "claim_text",
+        "summary",
+        "source_uri",
+    ):
+        value = str(record.get(key) or "").strip()
+        if value:
+            lines.append(f"{key}: {value}")
+    content = str(record.get("content") or "").strip()
+    if content:
+        lines.append(f"content: {content}")
+    aliases = [
+        str(alias).strip()
+        for alias in (record.get("aliases") if isinstance(record.get("aliases"), list) else [])
+        if str(alias).strip()
+    ]
+    if aliases:
+        lines.append(f"aliases: {', '.join(aliases)}")
+    for key, label_key in (
+        ("source_entity_id", "source_entity"),
+        ("target_entity_id", "target_entity"),
+    ):
+        object_ref = str(record.get(key) or "").strip()
+        if object_ref:
+            lines.append(f"{label_key}: {label_index.get(object_ref, object_ref)}")
+    if "attributes" in record:
+        attributes = _compact_json(record.get("attributes"), max_chars=320)
+        if attributes:
+            lines.append(f"attributes: {attributes}")
+    if "external_refs" in record:
+        external_refs = _compact_json(record.get("external_refs"), max_chars=320)
+        if external_refs:
+            lines.append(f"external_refs: {external_refs}")
+    related_labels = [
+        label_index.get(object_id, object_id)
+        for object_id in related_ids[:_MAX_GRAPH_RELATED_IDS]
+    ]
+    if related_labels:
+        lines.append(f"related_objects: {' | '.join(related_labels)}")
+    if provenance_ids:
+        lines.append(f"provenance_ids: {', '.join(provenance_ids)}")
+    return _join_nonempty(lines)
+
+
+def _record_related_object_ids(
+    object_type: str,
+    record: dict[str, Any],
+    existing_ids: set[str],
+) -> list[str]:
+    ids: list[str] = []
+
+    def push_known(value: Any) -> None:
+        for item in _value_string_list(value):
+            if _looks_like_state_object_id(item) or item in existing_ids:
+                ids.append(item)
+
+    if object_type == "question":
+        for key in ("claim_ids", "evidence_ids", "related_entity_ids", "related_hypothesis_ids", "triggers"):
+            push_known(record.get(key))
+        push_known(record.get("resolution_claim_id"))
+    elif object_type == "claim":
+        for key in (
+            "subject_refs",
+            "support_evidence_ids",
+            "contradiction_evidence_ids",
+            "evidence_support_ids",
+            "evidence_contra_ids",
+            "evidence_ids",
+        ):
+            push_known(record.get(key))
+    elif object_type == "evidence":
+        for key in ("claim_ids", "entity_ids", "link_ids", "provenance_ids"):
+            push_known(record.get(key))
+        push_known(record.get("confidence_id"))
+    elif object_type == "entity":
+        for key in ("entity_ids", "related_entity_ids", "provenance_ids"):
+            push_known(record.get(key))
+        push_known(record.get("confidence_id"))
+    elif object_type == "link":
+        for key in ("provenance_ids",):
+            push_known(record.get(key))
+        for key in ("source_entity_id", "target_entity_id", "confidence_id"):
+            push_known(record.get(key))
+
+    for key, value in record.items():
+        if key.endswith("_id") or key.endswith("_ids"):
+            push_known(value)
+
+    return _dedupe_strings(ids)
+
+
+def _looks_like_state_object_id(value: str) -> bool:
+    return value.startswith(("q_", "cl_", "ev_", "ent_", "lnk_", "pv_", "conf_", "hyp_", "gap_"))
+
+
+def _record_label(record: dict[str, Any] | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    for key in (
+        "title",
+        "label",
+        "name",
+        "canonical_name",
+        "question_text",
+        "question",
+        "claim_text",
+        "summary",
+        "content",
+        "source_uri",
+    ):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value[:96]
+    return None
 
 
 def _refresh_index(
@@ -690,9 +1171,16 @@ def _refresh_index(
     model: str,
     corpus: str,
     on_event: Callable[[str], None] | None = None,
-) -> list[ChunkRecord]:
+) -> RefreshIndexResult:
     if index_dir is None:
-        return []
+        return RefreshIndexResult(
+            chunks=[],
+            completion="complete",
+            documents_done=0,
+            documents_total=0,
+            chunks_done=0,
+            chunks_total=0,
+        )
     index_dir.mkdir(parents=True, exist_ok=True)
     meta_path = index_dir / "meta.json"
     chunks_path = index_dir / "chunks.jsonl"
@@ -775,14 +1263,66 @@ def _refresh_index(
                     on_event=on_event,
                 ):
                     continue
-                raise
+                completed_pending_docs = bisect.bisect_right(chunk_boundaries, batch_start)
+                documents_done = reused_documents + completed_pending_docs
+                chunks_done = reused_chunks + batch_start
+                cached_chunks = list(resolved_chunks)
+                if batch_start > 0:
+                    cached_chunks.extend(_finalize_pending_chunks(pending_records[:batch_start]))
+                    cached_chunks.sort(key=lambda chunk: (chunk.path, chunk.chunk_id))
+                    _write_index_snapshot(
+                        meta_path=meta_path,
+                        chunks_path=chunks_path,
+                        provider=provider,
+                        model=model,
+                        corpus=corpus,
+                        completion="partial",
+                        documents_done=documents_done,
+                        documents_total=total_documents,
+                        chunks_done=chunks_done,
+                        chunks_total=reused_chunks + len(pending_records),
+                        last_failure=str(exc),
+                        chunks=cached_chunks,
+                    )
+                    _emit_trace(
+                        on_event,
+                        (
+                            f"[retrieval] cached partial {corpus} index provider={provider} "
+                            f"documents_done={documents_done}/{total_documents} "
+                            f"chunks_done={chunks_done}/{reused_chunks + len(pending_records)}"
+                        ),
+                    )
+                _emit_progress(
+                    on_event,
+                    RetrievalProgress(
+                        corpus=corpus,
+                        phase="failed",
+                        documents_done=documents_done,
+                        documents_total=total_documents,
+                        chunks_done=chunks_done,
+                        chunks_total=reused_chunks + len(pending_records),
+                        reused_documents=reused_documents,
+                        message=(
+                            f"{corpus} retrieval indexing failed after retries; "
+                            f"cached {documents_done}/{total_documents} docs for future runs."
+                            if chunks_done > 0
+                            else f"{corpus} retrieval indexing failed before any cacheable chunks were written."
+                        ),
+                    ),
+                )
+                return RefreshIndexResult(
+                    chunks=cached_chunks,
+                    completion="partial",
+                    documents_done=documents_done,
+                    documents_total=total_documents,
+                    chunks_done=chunks_done,
+                    chunks_total=reused_chunks + len(pending_records),
+                    failure_detail=str(exc),
+                )
             for record, vector in zip(batch_records, batch_vectors, strict=True):
                 record.vector = vector
             batch_start += len(batch_records)
-            completed_pending_docs = bisect.bisect_right(
-                chunk_boundaries,
-                batch_start,
-            )
+            completed_pending_docs = bisect.bisect_right(chunk_boundaries, batch_start)
             _emit_progress(
                 on_event,
                 RetrievalProgress(
@@ -799,6 +1339,7 @@ def _refresh_index(
         resolved_chunks.extend(_finalize_pending_chunks(pending_records))
 
     resolved_chunks.sort(key=lambda chunk: (chunk.path, chunk.chunk_id))
+    final_chunks_total = len(resolved_chunks)
     _emit_progress(
         on_event,
         RetrievalProgress(
@@ -806,35 +1347,25 @@ def _refresh_index(
             phase="writing",
             documents_done=total_documents,
             documents_total=total_documents,
-            chunks_done=total_chunks,
-            chunks_total=total_chunks,
+            chunks_done=final_chunks_total,
+            chunks_total=final_chunks_total,
             reused_documents=reused_documents,
             message=f"Writing {corpus} retrieval index files.",
         ),
     )
-    meta_path.write_text(
-        json.dumps(
-            {
-                "version": _INDEX_VERSION,
-                "provider": provider,
-                "model": model,
-                "corpus": corpus,
-                "chunk_target_chars": _CHUNK_TARGET_CHARS,
-                "chunk_overlap_chars": _CHUNK_OVERLAP_CHARS,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    chunks_path.write_text(
-        "\n".join(
-            json.dumps(
-                chunk.to_json(provider=provider, model=model),
-                ensure_ascii=False,
-            )
-            for chunk in resolved_chunks
-        ),
-        encoding="utf-8",
+    _write_index_snapshot(
+        meta_path=meta_path,
+        chunks_path=chunks_path,
+        provider=provider,
+        model=model,
+        corpus=corpus,
+        completion="complete",
+        documents_done=total_documents,
+        documents_total=total_documents,
+        chunks_done=final_chunks_total,
+        chunks_total=final_chunks_total,
+        last_failure=None,
+        chunks=resolved_chunks,
     )
     _emit_progress(
         on_event,
@@ -843,13 +1374,20 @@ def _refresh_index(
             phase="done",
             documents_done=total_documents,
             documents_total=total_documents,
-            chunks_done=total_chunks,
-            chunks_total=total_chunks,
+            chunks_done=final_chunks_total,
+            chunks_total=final_chunks_total,
             reused_documents=reused_documents,
             message=f"{corpus.capitalize()} retrieval index ready.",
         ),
     )
-    return resolved_chunks
+    return RefreshIndexResult(
+        chunks=resolved_chunks,
+        completion="complete",
+        documents_done=total_documents,
+        documents_total=total_documents,
+        chunks_done=final_chunks_total,
+        chunks_total=final_chunks_total,
+    )
 
 
 def _load_meta(
@@ -901,6 +1439,123 @@ def _load_existing_chunks(chunks_path: Path) -> dict[str, list[ChunkRecord]]:
     return grouped
 
 
+def _write_index_snapshot(
+    *,
+    meta_path: Path,
+    chunks_path: Path,
+    provider: str,
+    model: str,
+    corpus: str,
+    completion: str,
+    documents_done: int,
+    documents_total: int,
+    chunks_done: int,
+    chunks_total: int,
+    last_failure: str | None,
+    chunks: list[ChunkRecord],
+) -> None:
+    meta_path.write_text(
+        json.dumps(
+            {
+                "version": _INDEX_VERSION,
+                "provider": provider,
+                "model": model,
+                "corpus": corpus,
+                "chunk_target_chars": _CHUNK_TARGET_CHARS,
+                "chunk_overlap_chars": _CHUNK_OVERLAP_CHARS,
+                "completion": completion,
+                "documents_done": documents_done,
+                "documents_total": documents_total,
+                "chunks_done": chunks_done,
+                "chunks_total": chunks_total,
+                "last_failure": last_failure,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    chunks_path.write_text(
+        "\n".join(
+            json.dumps(
+                chunk.to_json(provider=provider, model=model),
+                ensure_ascii=False,
+            )
+            for chunk in chunks
+        ),
+        encoding="utf-8",
+    )
+
+
+def _refresh_degradation_note(corpus: str, result: RefreshIndexResult) -> str | None:
+    if result.completion != "partial" or not result.failure_detail:
+        return None
+    return (
+        f"{corpus} indexing failed after retries and cached "
+        f"{result.documents_done}/{result.documents_total} record(s) "
+        f"({result.chunks_done}/{result.chunks_total} chunks) for a future run. "
+        f"Last error: {result.failure_detail}"
+    )
+
+
+def _boosted_object_score(
+    base_score: float,
+    object_id: str,
+    related_ids: list[str],
+    boost_ids: set[str],
+) -> float:
+    boosted = base_score
+    if object_id in boost_ids:
+        boosted += 0.12
+    if any(related_id in boost_ids for related_id in related_ids):
+        boosted += 0.06
+    return boosted
+
+
+def _linked_object_ids(metadata: dict[str, Any]) -> list[str]:
+    return _dedupe_strings(
+        _value_string_list(metadata.get("linked_object_ids"))
+        + _value_string_list(metadata.get("related_object_ids"))
+    )
+
+
+def _value_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        text = value.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _score_chunks(
+    chunks: list[ChunkRecord],
+    query_vector: list[float],
+) -> list[tuple[float, ChunkRecord]]:
+    scored: list[tuple[float, ChunkRecord]] = []
+    for chunk in chunks:
+        if not chunk.vector:
+            continue
+        scored.append((_dot(query_vector, chunk.vector), chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
 def _search_chunks(
     chunks: list[ChunkRecord],
     query_vector: list[float],
@@ -908,12 +1563,7 @@ def _search_chunks(
     top_k: int,
     per_source_cap: int,
 ) -> list[dict[str, Any]]:
-    scored: list[tuple[float, ChunkRecord]] = []
-    for chunk in chunks:
-        if not chunk.vector:
-            continue
-        scored.append((_dot(query_vector, chunk.vector), chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
+    scored = _score_chunks(chunks, query_vector)
     hits: list[dict[str, Any]] = []
     per_source: dict[str, int] = {}
     for score, chunk in scored:
@@ -940,24 +1590,200 @@ def _search_chunks(
     return hits
 
 
-def _build_query(objective: str, question_reasoning_packet: dict[str, Any] | None) -> str:
+def _search_ontology_objects(
+    chunks: list[ChunkRecord],
+    query_vector: list[float],
+    *,
+    top_k: int,
+    per_object_cap: int,
+    boost_object_ids: list[str],
+) -> list[dict[str, Any]]:
+    boost_ids = set(boost_object_ids)
+    per_object: dict[str, tuple[float, ChunkRecord]] = {}
+    for base_score, chunk in _score_chunks(chunks, query_vector):
+        object_id = str(chunk.metadata.get("object_id") or chunk.source_id)
+        related_ids = _linked_object_ids(chunk.metadata)
+        boosted_score = _boosted_object_score(base_score, object_id, related_ids, boost_ids)
+        if object_id not in per_object or boosted_score > per_object[object_id][0]:
+            per_object[object_id] = (boosted_score, chunk)
+
+    ranked = sorted(per_object.values(), key=lambda item: item[0], reverse=True)
+    hits: list[dict[str, Any]] = []
+    per_type: dict[str, int] = {}
+    for score, chunk in ranked:
+        object_type = str(chunk.metadata.get("object_type") or "ontology")
+        count = per_type.get(object_type, 0)
+        if count >= per_object_cap:
+            continue
+        hits.append(
+            {
+                "object_id": str(chunk.metadata.get("object_id") or chunk.source_id),
+                "object_type": object_type,
+                "score": round(score, 4),
+                "summary": chunk.excerpt,
+                "title": chunk.title,
+                "path": chunk.path,
+                "source_id": chunk.source_id,
+                "record_path": chunk.record_path,
+                "content_role": chunk.content_role,
+                "related_object_ids": _linked_object_ids(chunk.metadata),
+                "provenance_ids": _value_string_list(chunk.metadata.get("provenance_ids")),
+                "metadata": chunk.metadata,
+            }
+        )
+        per_type[object_type] = count + 1
+        if len(hits) >= top_k:
+            break
+    return hits
+
+
+def _fuse_document_hits(
+    workspace_chunks: list[ChunkRecord],
+    session_chunks: list[ChunkRecord],
+    query_vector: list[float],
+    *,
+    top_ontology_ids: list[str],
+    boost_object_ids: list[str],
+    top_k: int,
+    per_source_cap: int,
+) -> list[dict[str, Any]]:
+    ontology_ids = set(top_ontology_ids)
+    boost_ids = set(boost_object_ids)
+    reranked: list[tuple[float, ChunkRecord]] = []
+    for score, chunk in _score_chunks(workspace_chunks, query_vector) + _score_chunks(session_chunks, query_vector):
+        linked_ids = _linked_object_ids(chunk.metadata)
+        boosted = score
+        if any(object_id in ontology_ids for object_id in linked_ids):
+            boosted += 0.08
+        if any(object_id in boost_ids for object_id in linked_ids):
+            boosted += 0.05
+        reranked.append((boosted, chunk))
+    reranked.sort(key=lambda item: item[0], reverse=True)
+
+    hits: list[dict[str, Any]] = []
+    per_source: dict[str, int] = {}
+    for score, chunk in reranked:
+        count = per_source.get(chunk.source_id, 0)
+        if count >= per_source_cap:
+            continue
+        hits.append(
+            {
+                "path": chunk.path,
+                "title": chunk.title,
+                "score": round(score, 4),
+                "excerpt": chunk.excerpt,
+                "source_id": chunk.source_id,
+                "kind": chunk.kind,
+                "record_path": chunk.record_path,
+                "content_role": chunk.content_role,
+                "subchunk_index": chunk.subchunk_index,
+                "metadata": chunk.metadata,
+            }
+        )
+        per_source[chunk.source_id] = count + 1
+        if len(hits) >= top_k:
+            break
+    return hits
+
+
+def _build_graph_expansions(ontology_hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expansions: list[dict[str, Any]] = []
+    for hit in ontology_hits:
+        object_id = str(hit.get("object_id") or "").strip()
+        related = [
+            str(value).strip()
+            for value in hit.get("related_object_ids", [])[:_MAX_GRAPH_RELATED_IDS]
+            if str(value).strip()
+        ]
+        if not object_id or not related:
+            continue
+        expansions.append(
+            {
+                "seed_object_id": object_id,
+                "seed_object_type": str(hit.get("object_type") or "ontology"),
+                "hops": 1,
+                "related_object_ids": related,
+            }
+        )
+    return expansions
+
+
+def _build_query(objective: str, question_reasoning_packet: dict[str, Any] | None) -> RetrievalQuery:
     parts = [objective.strip()]
     if not isinstance(question_reasoning_packet, dict):
-        return "\n\n".join(part for part in parts if part)
+        return RetrievalQuery(
+            text="\n\n".join(part for part in parts if part),
+            focus_question_ids=[],
+            focus_claim_ids=[],
+            focus_entity_ids=[],
+            boost_object_ids=[],
+        )
+
+    focus_question_ids = _value_string_list(question_reasoning_packet.get("focus_question_ids"))
+    focus_claim_ids: list[str] = []
+    focus_entity_ids: list[str] = []
+    boost_object_ids = list(focus_question_ids)
+
     for question in question_reasoning_packet.get("unresolved_questions", [])[:4]:
         if isinstance(question, dict):
-            text = str(question.get("text") or "").strip()
+            text = str(
+                question.get("question")
+                or question.get("text")
+                or question.get("question_text")
+                or ""
+            ).strip()
             if text:
                 parts.append(text)
+            focus_claim_ids.extend(_value_string_list(question.get("claim_ids")))
+            boost_object_ids.extend(_value_string_list(question.get("evidence_ids")))
+            boost_object_ids.extend(_value_string_list(question.get("triggers")))
     findings = question_reasoning_packet.get("findings")
     if isinstance(findings, dict):
         for bucket in ("unresolved", "contested"):
-            for item in findings.get(bucket, [])[:2]:
+            for item in findings.get(bucket, [])[:3]:
                 if isinstance(item, dict):
-                    summary = str(item.get("summary") or item.get("claim_text") or "").strip()
+                    summary = str(
+                        item.get("summary") or item.get("claim") or item.get("claim_text") or ""
+                    ).strip()
                     if summary:
                         parts.append(summary)
-    return "\n\n".join(part for part in parts if part)
+                    claim_id = str(item.get("id") or "").strip()
+                    if claim_id:
+                        focus_claim_ids.append(claim_id)
+                    boost_object_ids.extend(_value_string_list(item.get("support_evidence_ids")))
+                    boost_object_ids.extend(
+                        _value_string_list(item.get("contradiction_evidence_ids"))
+                    )
+    for action in question_reasoning_packet.get("candidate_actions", [])[:6]:
+        if not isinstance(action, dict):
+            continue
+        required_inputs = action.get("required_inputs")
+        if isinstance(required_inputs, dict):
+            focus_claim_ids.extend(_value_string_list(required_inputs.get("claim_ids")))
+            focus_entity_ids.extend(_value_string_list(required_inputs.get("entity_ids")))
+            boost_object_ids.extend(_value_string_list(required_inputs.get("evidence_ids")))
+        for object_ref in action.get("ontology_object_refs", []):
+            if not isinstance(object_ref, dict):
+                continue
+            label = str(object_ref.get("label") or "").strip()
+            if label:
+                parts.append(label)
+            object_id = str(object_ref.get("object_id") or "").strip()
+            if not object_id:
+                continue
+            boost_object_ids.append(object_id)
+            if object_ref.get("object_type") == "claim":
+                focus_claim_ids.append(object_id)
+            if object_ref.get("object_type") == "entity":
+                focus_entity_ids.append(object_id)
+
+    return RetrievalQuery(
+        text="\n\n".join(part for part in parts if part),
+        focus_question_ids=_dedupe_strings(focus_question_ids),
+        focus_claim_ids=_dedupe_strings(focus_claim_ids),
+        focus_entity_ids=_dedupe_strings(focus_entity_ids),
+        boost_object_ids=_dedupe_strings(boost_object_ids),
+    )
 
 
 def _build_pending_chunks_for_document(doc: SourceDocument) -> list[PendingChunk]:

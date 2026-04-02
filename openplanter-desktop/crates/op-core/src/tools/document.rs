@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde_json::{json, Map, Value};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Map, Value, json};
 
-use super::{filesystem, ToolResult};
+use super::{ToolResult, filesystem};
 
 const DOCUMENT_PDF_EXTENSIONS: &[&str] = &[".pdf"];
 const DOCUMENT_IMAGE_EXTENSIONS: &[&str] = &[".avif", ".jpg", ".jpeg", ".png", ".webp"];
@@ -1160,7 +1160,7 @@ pub async fn document_qa(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Bytes, routing::post, Json, Router};
+    use axum::{Json, Router, body::Bytes, routing::post};
     use tempfile::tempdir;
     use tokio::net::TcpListener;
 
@@ -1315,10 +1315,12 @@ mod tests {
                 .get("image_base64")
                 .is_none()
         );
-        assert!(parsed["response"]["raw_body"]
-            .as_str()
-            .unwrap()
-            .contains("\"document_url\":\"data:application/pdf;base64,"));
+        assert!(
+            parsed["response"]["raw_body"]
+                .as_str()
+                .unwrap()
+                .contains("\"document_url\":\"data:application/pdf;base64,")
+        );
     }
 
     #[tokio::test]

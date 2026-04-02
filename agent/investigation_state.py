@@ -27,6 +27,44 @@ _LEGACY_KNOWN_KEYS = {
     "loop_metrics",
 }
 
+INVESTIGATION_ONTOLOGY_TYPES: dict[str, dict[str, Any]] = {
+    "Question": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["text", "status", "priority", "created_at", "answered_at"],
+        "link_types": ["relates_to_claim", "answered_by_evidence"],
+    },
+    "Claim": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["text", "confidence", "status", "source", "created_at"],
+        "link_types": ["supported_by_evidence", "contradicted_by_evidence", "answers_question"],
+    },
+    "Evidence": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["text", "source", "type", "confidence", "created_at", "url"],
+        "link_types": ["supports_claim", "contradicts_claim"],
+    },
+    "Hypothesis": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["text", "confidence", "status", "created_at"],
+        "link_types": ["tested_by_evidence", "predicts_claim"],
+    },
+    "Task": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["description", "status", "priority", "created_at", "completed_at"],
+        "link_types": ["addresses_question", "produces_evidence"],
+    },
+    "Entity": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["name", "type", "label", "created_at"],
+        "link_types": ["related_to", "owns", "employed_by", "located_in"],
+    },
+    "Action": {
+        "namespace": ONTOLOGY_NAMESPACE,
+        "properties": ["action_type", "status", "priority", "created_at"],
+        "link_types": ["targets_claim", "targets_question", "requires_evidence"],
+    },
+}
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -40,6 +78,7 @@ def default_state(session_id: str, now: str | None = None) -> dict[str, Any]:
         "created_at": ts,
         "updated_at": ts,
         "objective": "",
+        "active_investigation_id": None,
         "ontology": {
             "namespace": ONTOLOGY_NAMESPACE,
             "version": ONTOLOGY_VERSION,
@@ -237,6 +276,7 @@ def build_question_reasoning_packet(
     *,
     max_questions: int = 8,
     max_evidence_per_item: int = 6,
+    workspace_ontology: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a question-centric reasoning packet from canonical typed state."""
 
@@ -363,6 +403,36 @@ def build_question_reasoning_packet(
         max_evidence_per_item=max_evidence_per_item,
     )
 
+    if workspace_ontology is not None:
+        cross_investigation_context = {
+            "available": True,
+            "total_entities": len(workspace_ontology.get("entities", {})),
+            "total_claims": len(workspace_ontology.get("claims", {})),
+            "source_sessions": workspace_ontology.get("source_sessions", []),
+            "investigations": list(workspace_ontology.get("indexes", {}).get("by_investigation", {}).keys()),
+        }
+    else:
+        cross_investigation_context = {"available": False}
+
+    # Look up related entities from workspace ontology if active_investigation_id is set
+    active_investigation_id = state.get("active_investigation_id")
+    related_entity_ids: list[str] = []
+    if (
+        workspace_ontology is not None
+        and active_investigation_id is not None
+        and isinstance(active_investigation_id, str)
+        and active_investigation_id.strip()
+    ):
+        by_investigation = workspace_ontology.get("indexes", {}).get("by_investigation", {})
+        if isinstance(by_investigation, dict):
+            investigation_entities = by_investigation.get(active_investigation_id)
+            if isinstance(investigation_entities, list):
+                related_entity_ids = [
+                    str(entity_id)
+                    for entity_id in investigation_entities
+                    if entity_id is not None
+                ][:20]
+
     return {
         "reasoning_mode": "question_centric",
         "loop": [
@@ -382,6 +452,8 @@ def build_question_reasoning_packet(
         "contradictions": contradictions,
         "evidence_index": evidence_index,
         "candidate_actions": candidate_actions,
+        "cross_investigation_context": cross_investigation_context,
+        "related_entities": related_entity_ids,
     }
 
 
@@ -1105,3 +1177,319 @@ def _is_legacy_evidence(evidence_id: str, record: Any) -> bool:
         return False
     normalization = record.get("normalization")
     return isinstance(normalization, dict) and normalization.get("kind") == "legacy_observation"
+
+
+def project_to_wiki_graph(state: dict[str, Any]) -> dict[str, Any]:
+    """Project investigation state objects into wiki knowledge graph nodes and edges.
+
+    Returns a dict with 'nodes' and 'edges' lists suitable for merging
+    into the wiki graph.
+    """
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    session_id = str(state.get("session_id") or "unknown")
+
+    # Project questions
+    questions = state.get("questions")
+    if isinstance(questions, dict):
+        for qid, question in questions.items():
+            if not isinstance(question, dict):
+                continue
+            question_text = str(
+                question.get("question_text")
+                or question.get("text")
+                or question.get("question")
+                or ""
+            )
+            nodes.append({
+                "id": f"question:{qid}",
+                "type": "Question",
+                "label": _truncate_graph_label(question_text, 80),
+                "properties": {
+                    "text": question_text,
+                    "status": str(question.get("status") or "open"),
+                    "priority": str(question.get("priority") or "medium"),
+                    "created_at": str(question.get("created_at") or ""),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Question",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+            # Link questions to claims
+            claim_ids = _id_list(question.get("claim_ids") or question.get("claims"))
+            for claim_id in claim_ids:
+                edges.append({
+                    "source": f"question:{qid}",
+                    "target": f"claim:{claim_id}",
+                    "type": "relates_to_claim",
+                    "properties": {},
+                })
+            # Link questions to evidence
+            evidence_ids = _id_list(question.get("evidence_ids"))
+            for evidence_id in evidence_ids:
+                edges.append({
+                    "source": f"question:{qid}",
+                    "target": f"evidence:{evidence_id}",
+                    "type": "answered_by_evidence",
+                    "properties": {},
+                })
+
+    # Project claims
+    claims = state.get("claims")
+    if isinstance(claims, dict):
+        for cid, claim in claims.items():
+            if not isinstance(claim, dict):
+                continue
+            claim_text = str(claim.get("claim_text") or claim.get("text") or "")
+            nodes.append({
+                "id": f"claim:{cid}",
+                "type": "Claim",
+                "label": _truncate_graph_label(claim_text, 80),
+                "properties": {
+                    "text": claim_text,
+                    "confidence": claim.get("confidence"),
+                    "status": str(claim.get("status") or "unverified"),
+                    "source": str(claim.get("source") or ""),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Claim",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+
+            # Link claims to supporting evidence
+            support_ids = _id_list(
+                claim.get("support_evidence_ids")
+                or claim.get("evidence_support_ids")
+                or claim.get("evidence_ids")
+            )
+            for ev_ref in support_ids:
+                edges.append({
+                    "source": f"claim:{cid}",
+                    "target": f"evidence:{ev_ref}",
+                    "type": "supported_by_evidence",
+                    "properties": {},
+                })
+
+            # Link claims to contradicting evidence
+            contra_ids = _id_list(
+                claim.get("contradiction_evidence_ids")
+                or claim.get("evidence_contra_ids")
+            )
+            for ev_ref in contra_ids:
+                edges.append({
+                    "source": f"claim:{cid}",
+                    "target": f"evidence:{ev_ref}",
+                    "type": "contradicted_by_evidence",
+                    "properties": {},
+                })
+
+            # Link claims to questions they answer
+            question_refs = _id_list(claim.get("question_ids") or claim.get("questions"))
+            for q_ref in question_refs:
+                edges.append({
+                    "source": f"claim:{cid}",
+                    "target": f"question:{q_ref}",
+                    "type": "answers_question",
+                    "properties": {},
+                })
+
+    # Project evidence
+    evidence = state.get("evidence")
+    if isinstance(evidence, dict):
+        for eid, ev_record in evidence.items():
+            if not isinstance(ev_record, dict):
+                continue
+            ev_text = str(
+                ev_record.get("content")
+                or ev_record.get("text")
+                or ev_record.get("description")
+                or ""
+            )
+            nodes.append({
+                "id": f"evidence:{eid}",
+                "type": "Evidence",
+                "label": _truncate_graph_label(ev_text, 80),
+                "properties": {
+                    "text": ev_text,
+                    "source": str(ev_record.get("source_uri") or ev_record.get("source") or ""),
+                    "type": str(ev_record.get("evidence_type") or ev_record.get("type") or ""),
+                    "confidence": ev_record.get("confidence"),
+                    "url": str(ev_record.get("url") or ""),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Evidence",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+            # Link evidence to provenance
+            for prov_id in _id_list(ev_record.get("provenance_ids")):
+                edges.append({
+                    "source": f"evidence:{eid}",
+                    "target": f"provenance:{prov_id}",
+                    "type": "has_provenance",
+                    "properties": {},
+                })
+
+    # Project hypotheses
+    hypotheses = state.get("hypotheses")
+    if isinstance(hypotheses, dict):
+        for hid, hypothesis in hypotheses.items():
+            if not isinstance(hypothesis, dict):
+                continue
+            hyp_text = str(hypothesis.get("text") or hypothesis.get("description") or "")
+            nodes.append({
+                "id": f"hypothesis:{hid}",
+                "type": "Hypothesis",
+                "label": _truncate_graph_label(hyp_text, 80),
+                "properties": {
+                    "text": hyp_text,
+                    "confidence": hypothesis.get("confidence"),
+                    "status": str(hypothesis.get("status") or "proposed"),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Hypothesis",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+
+    # Project tasks
+    tasks = state.get("tasks")
+    if isinstance(tasks, dict):
+        for tid, task in tasks.items():
+            if not isinstance(task, dict):
+                continue
+            task_desc = str(task.get("description") or task.get("text") or "")
+            nodes.append({
+                "id": f"task:{tid}",
+                "type": "Task",
+                "label": _truncate_graph_label(task_desc, 80),
+                "properties": {
+                    "description": task_desc,
+                    "status": str(task.get("status") or "pending"),
+                    "priority": str(task.get("priority") or "medium"),
+                    "created_at": str(task.get("created_at") or ""),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Task",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+            # Link tasks to questions
+            for qid in _id_list(task.get("question_ids")):
+                edges.append({
+                    "source": f"task:{tid}",
+                    "target": f"question:{qid}",
+                    "type": "addresses_question",
+                    "properties": {},
+                })
+            # Link tasks to evidence
+            for ev_id in _id_list(task.get("evidence_ids")):
+                edges.append({
+                    "source": f"task:{tid}",
+                    "target": f"evidence:{ev_id}",
+                    "type": "produces_evidence",
+                    "properties": {},
+                })
+
+    # Project actions
+    actions = state.get("actions")
+    if isinstance(actions, dict):
+        for aid, action in actions.items():
+            if not isinstance(action, dict):
+                continue
+            nodes.append({
+                "id": f"action:{aid}",
+                "type": "Action",
+                "label": _truncate_graph_label(str(action.get("action_type") or aid), 80),
+                "properties": {
+                    "action_type": str(action.get("action_type") or ""),
+                    "status": str(action.get("status") or "proposed"),
+                    "priority": str(action.get("priority") or "medium"),
+                    "session_id": session_id,
+                },
+                "ontology_type": "Action",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+            # Link actions to claims
+            for cid in _id_list(action.get("target_claim_ids")):
+                edges.append({
+                    "source": f"action:{aid}",
+                    "target": f"claim:{cid}",
+                    "type": "targets_claim",
+                    "properties": {},
+                })
+            # Link actions to questions
+            for qid in _id_list(action.get("target_question_ids")):
+                edges.append({
+                    "source": f"action:{aid}",
+                    "target": f"question:{qid}",
+                    "type": "targets_question",
+                    "properties": {},
+                })
+
+    # Project entities (these are already closer to ontology objects)
+    entities = state.get("entities")
+    if isinstance(entities, dict):
+        for entity_id, entity in entities.items():
+            if not isinstance(entity, dict):
+                continue
+            entity_name = str(
+                entity.get("name")
+                or entity.get("label")
+                or entity_id
+            )
+            nodes.append({
+                "id": f"entity:{entity_id}",
+                "type": entity.get("type", "Entity"),
+                "label": entity_name,
+                "properties": dict(entity.get("properties", {})),
+                "ontology_type": entity.get("type", "Entity"),
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+
+    # Project links between entities
+    links = state.get("links")
+    if isinstance(links, dict):
+        for link_id, link in links.items():
+            if not isinstance(link, dict):
+                continue
+            source_id = link.get("source")
+            target_id = link.get("target")
+            if source_id and target_id:
+                edges.append({
+                    "source": f"entity:{source_id}",
+                    "target": f"entity:{target_id}",
+                    "type": str(link.get("type") or "related_to"),
+                    "properties": dict(link.get("properties", {})),
+                })
+
+    # Project provenance nodes
+    provenance_nodes = state.get("provenance_nodes")
+    if isinstance(provenance_nodes, dict):
+        for prov_id, prov in provenance_nodes.items():
+            if not isinstance(prov, dict):
+                continue
+            prov_title = str(
+                prov.get("title")
+                or prov.get("name")
+                or prov.get("source_uri")
+                or prov_id
+            )
+            nodes.append({
+                "id": f"provenance:{prov_id}",
+                "type": "ProvenanceNode",
+                "label": _truncate_graph_label(prov_title, 80),
+                "properties": {
+                    "title": prov_title,
+                    "source_uri": str(prov.get("source_uri") or ""),
+                    "session_id": session_id,
+                },
+                "ontology_type": "ProvenanceNode",
+                "namespace": ONTOLOGY_NAMESPACE,
+            })
+
+    return {"nodes": nodes, "edges": edges, "session_id": session_id}
+
+
+def _truncate_graph_label(text: str, max_len: int) -> str:
+    """Truncate text for graph node labels."""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len - 3] + "..."

@@ -4,8 +4,8 @@
 /// (files-read set, background jobs) and routes tool calls to the appropriate module.
 pub mod audio;
 pub mod chrome_mcp;
-pub mod document;
 pub mod defs;
+pub mod document;
 pub mod filesystem;
 pub mod patching;
 pub mod shell;
@@ -142,8 +142,8 @@ impl WorkspaceTools {
             mistral_document_ai_ocr_model: config.mistral_document_ai_ocr_model.clone(),
             mistral_document_ai_qa_model: config.mistral_document_ai_qa_model.clone(),
             mistral_document_ai_max_bytes: config.mistral_document_ai_max_bytes as usize,
-            mistral_document_ai_request_timeout_sec: config
-                .mistral_document_ai_request_timeout_sec as u64,
+            mistral_document_ai_request_timeout_sec: config.mistral_document_ai_request_timeout_sec
+                as u64,
             mistral_transcription_api_key: config.mistral_transcription_api_key.clone(),
             mistral_transcription_base_url: config.mistral_transcription_base_url.clone(),
             mistral_transcription_model: config.mistral_transcription_model.clone(),
@@ -194,8 +194,8 @@ impl WorkspaceTools {
             mistral_document_ai_ocr_model: config.mistral_document_ai_ocr_model.clone(),
             mistral_document_ai_qa_model: config.mistral_document_ai_qa_model.clone(),
             mistral_document_ai_max_bytes: config.mistral_document_ai_max_bytes as usize,
-            mistral_document_ai_request_timeout_sec: config
-                .mistral_document_ai_request_timeout_sec as u64,
+            mistral_document_ai_request_timeout_sec: config.mistral_document_ai_request_timeout_sec
+                as u64,
             mistral_transcription_api_key: config.mistral_transcription_api_key.clone(),
             mistral_transcription_base_url: config.mistral_transcription_base_url.clone(),
             mistral_transcription_model: config.mistral_transcription_model.clone(),
@@ -484,14 +484,18 @@ impl WorkspaceTools {
                     if value.is_object() {
                         Some(value.clone())
                     } else {
-                        value.as_str().and_then(|raw| serde_json::from_str(raw).ok())
+                        value
+                            .as_str()
+                            .and_then(|raw| serde_json::from_str(raw).ok())
                     }
                 });
                 let bbox_schema = args.get("bbox_schema").and_then(|value| {
                     if value.is_object() {
                         Some(value.clone())
                     } else {
-                        value.as_str().and_then(|raw| serde_json::from_str(raw).ok())
+                        value
+                            .as_str()
+                            .and_then(|raw| serde_json::from_str(raw).ok())
                     }
                 });
                 let instruction = args
@@ -533,10 +537,7 @@ impl WorkspaceTools {
             }
             "document_qa" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let question = args
-                    .get("question")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
                 let model = args
                     .get("model")
                     .and_then(|v| v.as_str())
@@ -848,14 +849,18 @@ mod tests {
             }],
         );
 
-        assert!(!first
-            .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
-            .await
-            .is_error);
-        assert!(!second
-            .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
-            .await
-            .is_error);
+        assert!(
+            !first
+                .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
+                .await
+                .is_error
+        );
+        assert!(
+            !second
+                .execute("read_file", r#"{"path":"shared.txt","hashline":false}"#)
+                .await
+                .is_error
+        );
 
         let first_result = first
             .execute(
@@ -863,7 +868,11 @@ mod tests {
                 r#"{"path":"shared.txt","content":"first child"}"#,
             )
             .await;
-        assert!(!first_result.is_error, "unexpected error: {}", first_result.content);
+        assert!(
+            !first_result.is_error,
+            "unexpected error: {}",
+            first_result.content
+        );
 
         let second_result = second
             .execute(

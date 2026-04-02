@@ -528,6 +528,13 @@ Financial institutions, insurance companies, and regulatory bodies that need to 
 
 **Deliverable**: A working ontology service with API, basic ingestion, and a minimal UI that lets you define a schema, import data, resolve entities, and browse entities and their relationships.
 
+**Success Criteria**:
+1. **Schema CRUD**: Define ontology schema (>=3 object types, >=2 link types) via REST API. Minimum: less than 2s p99. Target: less than 500ms p99.
+2. **Ingest benchmark**: Import entities from CSV. Minimum: 1K entities in less than 5 min. Target: 10K entities in less than 5 min on a 4-core/16GB machine.
+3. **Entity resolution**: Rule-based dedup on reference dataset. Minimum: >=80% exact-match. Target: >=90% exact + >=70% fuzzy.
+4. **Session durability**: Every turn writes v2-conformant `turns.jsonl`. Minimum: interrupted sessions lose <=2 turns. Target: <=1 turn loss (verified by kill-test).
+5. **Cross-runtime compat**: Both Python and desktop can read each other's sessions. Minimum: >=80% of fixture matrix. Target: 100%.
+
 ### Phase 1: Core Visualization & Search (Months 4-8)
 
 **Goal**: The investigative experience -- graph, map, search, and collaboration.
@@ -547,6 +554,13 @@ Financial institutions, insurance companies, and regulatory bodies that need to 
 
 **Deliverable**: An analyst can ingest data from multiple sources, search across entities, explore relationships in a graph canvas, view entities on a map, and collaborate with teammates in shared workspaces.
 
+**Success Criteria**:
+1. **Graph performance**: Expand node to 3 hops, filter 2+ types, >=500 entities. Minimum: >=15fps. Target: >=30fps.
+2. **Search recall**: Top-5 results for test suite. Minimum: >=60% of 50 queries. Target: >=80%.
+3. **Provenance drill-down**: Revelation cards resolve to evidence. Minimum: >=50% of cards have >=1 drill-down link. Target: 100%.
+4. **Connector SDK**: Working connectors pass ingestion test. Minimum: 2 connectors. Target: 3+ (PostgreSQL, CSV, REST API).
+5. **Audit completeness**: Minimum: >=90% coverage. Target: 100% of data operations logged.
+
 ### Phase 2: AI & Advanced Analytics (Months 9-14)
 
 **Goal**: AI-powered analysis and richer visualization.
@@ -565,6 +579,13 @@ Financial institutions, insurance companies, and regulatory bodies that need to 
 
 **Deliverable**: An analyst can ask questions in natural language, have AI agents traverse the ontology to find answers, ingest and extract entities from documents, build dashboards, and set up automated data pipelines.
 
+**Success Criteria**:
+1. **RAG accuracy**: Ontology-grounded answers (human eval). Minimum: >=50% correct, <=10% hallucination. Target: >=70% correct, <=5% hallucination.
+2. **NL query translation**: Valid ontology queries. Minimum: >=40% of 40-query suite. Target: >=60%.
+3. **Entity extraction**: NER F1 on reference corpus. Minimum: >=60% F1. Target: >=75% F1.
+4. **Dashboard builder**: Non-technical user creates 3-widget dashboard. Minimum: less than 20 min. Target: less than 10 min.
+5. **Pipeline reliability**: 100 consecutive runs. Minimum: <=5% failure. Target: <=2% failure.
+
 ### Phase 3: Actions, Agents & Operational Workflows (Months 15-20)
 
 **Goal**: Transform from an analytical platform into an operational one.
@@ -582,6 +603,12 @@ Financial institutions, insurance companies, and regulatory bodies that need to 
 
 **Deliverable**: The platform is operational -- insights lead to actions, workflows automate responses, AI agents work alongside human analysts, and the security model supports sensitive use cases.
 
+**Success Criteria**:
+1. **Action round-trip**: Flag entity, write-back reflected in ontology. Minimum: less than 60s. Target: less than 30s.
+2. **Agent sandboxing**: Restricted agent cannot access out-of-scope entities. Minimum: 0 escapes in 10-op test. Target: 0 escapes in 20-op test.
+3. **Workflow reliability**: 5-step event-triggered workflow. Minimum: >=90% over 50 runs. Target: >=95%.
+4. **Pattern search**: Subgraph pattern on >=100K entities. Minimum: less than 10s. Target: less than 5s.
+
 ### Phase 4: Scale, Deploy Anywhere & Ecosystem (Months 21+)
 
 **Goal**: Production hardening, deployment flexibility, and community ecosystem.
@@ -595,6 +622,20 @@ Financial institutions, insurance companies, and regulatory bodies that need to 
 - [ ] **Compliance Frameworks**: FedRAMP, SOC 2, GDPR compliance tooling
 - [ ] **Mobile UI**: Responsive interface for field use
 - [ ] **Real-Time Collaboration**: Google Docs-style concurrent editing of canvases and annotations
+
+**Success Criteria**:
+1. **Horizontal scale**: 10M+ entities, 3-hop traversal. Minimum: less than 5s p95. Target: less than 2s p95.
+2. **Air-gapped**: Full function without network. Minimum: 24h. Target: 72h+.
+3. **Multi-tenancy isolation**: Cross-tenant query provably blocked. Minimum: verified by test suite.
+
+### 9.5 Success Metrics Dashboard
+
+The following operational metrics are tracked continuously across all phases:
+
+- **Session contract conformance rate**: % of sessions with valid v2 metadata
+- **Provenance coverage**: % of revelation cards with >=1 drill-down target
+- **Cross-runtime compatibility score**: % of test matrix passing
+- **Mean time to evidence**: Seconds from overview card click to evidence display
 
 ---
 

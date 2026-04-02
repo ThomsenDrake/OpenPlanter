@@ -175,10 +175,7 @@ fn parse_chunks(raw_lines: &[&str]) -> Vec<PatchChunk> {
     }
 }
 
-pub(crate) fn collect_write_targets(
-    root: &Path,
-    patch_text: &str,
-) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn collect_write_targets(root: &Path, patch_text: &str) -> Result<Vec<PathBuf>, String> {
     let ops = parse_agent_patch(patch_text)?;
     let mut targets = Vec::new();
 

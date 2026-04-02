@@ -75,6 +75,11 @@ describe("createApp", () => {
       reasoning_effort: null,
       zai_plan: "paygo",
       web_search_provider: "exa",
+      embeddings_provider: "voyage",
+      embeddings_status: "enabled",
+      embeddings_status_detail: "Retrieval enabled via voyage (voyage-4). Hybrid mode: documents+ontology (retrieval-v3).",
+      embeddings_mode: "documents+ontology",
+      embeddings_packet_version: "retrieval-v3",
       continuity_mode: "auto",
       mistral_document_ai_use_shared_key:
         partial.mistral_document_ai_use_shared_key ?? true,

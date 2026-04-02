@@ -242,6 +242,18 @@ pub struct OverviewRevelationProvenanceView {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
 }
 
 /// Recent revelation entry shown in the overview.
@@ -393,6 +405,8 @@ pub struct SessionInfo {
     pub turn_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub investigation_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for SessionInfo {
@@ -408,6 +422,7 @@ impl<'de> Deserialize<'de> for SessionInfo {
             created_at: String,
             turn_count: u32,
             last_objective: Option<String>,
+            investigation_id: Option<String>,
         }
 
         let raw = SessionInfoCompat::deserialize(deserializer)?;
@@ -416,6 +431,7 @@ impl<'de> Deserialize<'de> for SessionInfo {
             created_at: raw.created_at,
             turn_count: raw.turn_count,
             last_objective: raw.last_objective,
+            investigation_id: raw.investigation_id,
         })
     }
 }

@@ -294,10 +294,16 @@ Each item should cite the relevant evidence/provenance IDs."#;
 pub const RETRIEVAL_SECTION: &str = r#"
 == SEMANTIC RETRIEVAL ==
 Your initial message may contain a "retrieval_packet" assembled from local
-semantic search over the runtime wiki, workspace research documents, and this
-session's memory/evidence/artifacts.
+semantic search over the runtime wiki, workspace research documents, this
+session's memory/evidence/artifacts, and typed ontology objects derived from
+investigation_state.
 
 Use retrieval_packet as bounded context, not ground truth:
+- Prefer `retrieval_packet.hits.ontology_objects` as the primary semantic
+  grounding surface for questions, claims, evidence, entities, and links.
+- Use `retrieval_packet.hits.documents` as corroborating context and follow-up
+  reading targets.
+- Treat `retrieval_packet.hits.graph_expansions` as 1-hop leads, not proof.
 - Treat retrieved excerpts as candidate leads to verify with tools.
 - Prefer the cited source paths and excerpts when choosing what to read next.
 - Re-read the underlying file or artifact before making high-confidence claims.
@@ -488,6 +494,7 @@ mod tests {
         assert!(prompt.contains("TURN HISTORY"));
         assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
         assert!(prompt.contains("candidate_actions"));
+        assert!(prompt.contains("retrieval_packet.hits.ontology_objects"));
         assert!(prompt.contains("DATA SOURCES WIKI"));
         assert!(prompt.contains("High-volume tool outputs are ephemeral"));
         assert!(!prompt.contains("REPL STRUCTURE"));

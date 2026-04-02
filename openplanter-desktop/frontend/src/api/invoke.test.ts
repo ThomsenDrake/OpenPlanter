@@ -20,6 +20,10 @@ import {
   listSessions,
   openSession,
   deleteSession,
+  getSessionDirectory,
+  writeSessionArtifact,
+  readSessionArtifact,
+  readSessionEvent,
   getGraphData,
   getInvestigationOverview,
   getInitStatus,
@@ -182,9 +186,10 @@ describe("invoke wrappers", () => {
   });
 
   it("openSession with no args", async () => {
-    __setHandler("open_session", ({ id, resume }: any) => {
+    __setHandler("open_session", ({ id, resume, investigation_id }: any) => {
       expect(id).toBeNull();
       expect(resume).toBe(false);
+      expect(investigation_id).toBeNull();
       return {
         id: "20260227-100000-abcd1234",
         created_at: "2026-02-27T10:00:00Z",
@@ -197,9 +202,10 @@ describe("invoke wrappers", () => {
   });
 
   it("openSession with id and resume", async () => {
-    __setHandler("open_session", ({ id, resume }: any) => {
+    __setHandler("open_session", ({ id, resume, investigation_id }: any) => {
       expect(id).toBe("session-123");
       expect(resume).toBe(true);
+      expect(investigation_id).toBeNull();
       return {
         id: "session-123",
         created_at: "2026-02-27T10:00:00Z",
@@ -211,11 +217,67 @@ describe("invoke wrappers", () => {
     expect(session.last_objective).toBe("prior task");
   });
 
+  it("openSession with investigationId", async () => {
+    __setHandler("open_session", ({ id, resume, investigation_id }: any) => {
+      expect(id).toBeNull();
+      expect(resume).toBe(false);
+      expect(investigation_id).toBe("investigation-456");
+      return {
+        id: "20260227-100000-abcd1234",
+        created_at: "2026-02-27T10:00:00Z",
+        turn_count: 0,
+        last_objective: null,
+        investigation_id: "investigation-456",
+      };
+    });
+    const session = await openSession(undefined, false, "investigation-456");
+    expect(session.id).toBe("20260227-100000-abcd1234");
+    expect(session.investigation_id).toBe("investigation-456");
+  });
+
   it("deleteSession sends id", async () => {
     __setHandler("delete_session", ({ id }: any) => {
       expect(id).toBe("session-to-delete");
     });
     await deleteSession("session-to-delete");
+  });
+
+  it("getSessionDirectory sends session id", async () => {
+    __setHandler("get_session_directory", ({ sessionId }: any) => {
+      expect(sessionId).toBe("session-123");
+      return "/tmp/session-123";
+    });
+    const path = await getSessionDirectory("session-123");
+    expect(path).toBe("/tmp/session-123");
+  });
+
+  it("writeSessionArtifact sends session artifact payload", async () => {
+    __setHandler("write_session_artifact", ({ sessionDir, filename, content }: any) => {
+      expect(sessionDir).toBe("/tmp/session-123");
+      expect(filename).toBe("artifacts/patches/example.patch");
+      expect(content).toBe("patch body");
+    });
+    await writeSessionArtifact("/tmp/session-123", "artifacts/patches/example.patch", "patch body");
+  });
+
+  it("readSessionArtifact returns nullable content", async () => {
+    __setHandler("read_session_artifact", ({ sessionDir, filename }: any) => {
+      expect(sessionDir).toBe("/tmp/session-123");
+      expect(filename).toBe("graph_session_change_set.json");
+      return "{\"version\":\"graph-session-change-set/v0\"}";
+    });
+    const content = await readSessionArtifact("/tmp/session-123", "graph_session_change_set.json");
+    expect(content).toContain("graph-session-change-set/v0");
+  });
+
+  it("readSessionEvent sends session and event ids", async () => {
+    __setHandler("read_session_event", ({ sessionId, eventId }: any) => {
+      expect(sessionId).toBe("session-123");
+      expect(eventId).toBe("evt:session-123:000001");
+      return { event_id: eventId, event_type: "turn.completed" };
+    });
+    const event = await readSessionEvent("session-123", "evt:session-123:000001");
+    expect(event?.event_id).toBe("evt:session-123:000001");
   });
 
   it("getGraphData returns graph structure", async () => {

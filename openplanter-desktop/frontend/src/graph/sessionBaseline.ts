@@ -1,6 +1,12 @@
-import { getGraphData } from "../api/invoke";
+import {
+  getGraphData,
+  readSessionArtifact,
+  writeSessionArtifact,
+} from "../api/invoke";
 
 export type GraphSessionChangeSetVersion = "graph-session-change-set/v0";
+
+const CHANGE_SET_FILENAME = "graph_session_change_set.json";
 
 /**
  * Frontend-only scaffolding for future durable session change sets.
@@ -99,6 +105,79 @@ export function captureGraphSessionBaseline(nodeIds: Iterable<string>): void {
   baselineNodeIds = new Set(nodeIds);
   baselineCaptured = true;
   latestChangeSet = buildGraphSessionChangeSet(baselineNodeIds);
+}
+
+/**
+ * Persist the current change set to the session directory.
+ */
+export async function saveGraphSessionChangeSet(sessionDir: string): Promise<void> {
+  if (!latestChangeSet) return;
+
+  try {
+    const payload = JSON.stringify(latestChangeSet, null, 2);
+    await writeSessionArtifact(sessionDir, CHANGE_SET_FILENAME, payload);
+  } catch (err) {
+    console.warn("[sessionBaseline] failed to save change set:", err);
+  }
+}
+
+/**
+ * Load a persisted change set from the session directory.
+ * Returns true if a change set was loaded successfully.
+ */
+export async function loadGraphSessionChangeSet(sessionDir: string): Promise<boolean> {
+  try {
+    const content = await readSessionArtifact(sessionDir, CHANGE_SET_FILENAME);
+
+    if (!content) return false;
+
+    const parsed = JSON.parse(content) as GraphSessionChangeSet;
+    if (parsed.version !== "graph-session-change-set/v0") return false;
+
+    // Restore state from persisted change set
+    baselineNodeIds = new Set(parsed.baselineNodeIds);
+    baselineCaptured = true;
+    baselineGeneration = parsed.generation;
+    latestChangeSet = parsed;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Capture baseline and persist it to the session directory.
+ * This is an async version that persists the change set.
+ */
+export async function captureAndPersistGraphSessionBaseline(
+  nodeIds: Iterable<string>,
+  sessionDir?: string,
+): Promise<void> {
+  if (baselineCaptured) {
+    return;
+  }
+  baselineNodeIds = new Set(nodeIds);
+  baselineCaptured = true;
+  latestChangeSet = buildGraphSessionChangeSet(baselineNodeIds);
+
+  if (sessionDir) {
+    await saveGraphSessionChangeSet(sessionDir);
+  }
+}
+
+/**
+ * Capture the current change set and optionally persist it.
+ */
+export async function captureAndPersistChangeSet(
+  nodeIds: Iterable<string>,
+  sessionDir?: string,
+): Promise<GraphSessionChangeSet | null> {
+  const changeSet = cacheGraphSessionChangeSet(nodeIds);
+  if (changeSet && sessionDir) {
+    await saveGraphSessionChangeSet(sessionDir);
+  }
+  return changeSet;
 }
 
 export function resetGraphSessionState(isNew: boolean): void {

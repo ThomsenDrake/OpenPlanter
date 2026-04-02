@@ -245,6 +245,14 @@ impl SolveEmitter for TauriEmitter {
     }
 }
 
+/// Active turn context shared with the replay envelope writer.
+#[derive(Debug, Clone)]
+pub struct TurnContext {
+    pub turn_id: String,
+    pub session_id: String,
+    pub event_start_seq: u64,
+}
+
 /// Wraps any SolveEmitter + ReplayLogger to persist events as they stream.
 ///
 /// Collects streaming text and tool calls during a step, then logs
@@ -259,6 +267,11 @@ pub struct LoggingEmitter<E: SolveEmitter> {
     terminal: Mutex<Option<TerminalSnapshot>>,
     observations: Mutex<Vec<String>>,
     last_loop_metrics: Mutex<Option<LoopMetrics>>,
+    turn_context: Arc<std::sync::Mutex<Option<TurnContext>>>,
+    /// Provider name for model attribution in events.
+    provider: Option<String>,
+    /// Model name for model attribution in events.
+    model: Option<String>,
 }
 
 /// A tool call being accumulated during streaming.
@@ -378,7 +391,13 @@ fn first_informative_value(value: &serde_json::Value) -> Option<String> {
 }
 
 impl<E: SolveEmitter> LoggingEmitter<E> {
-    pub fn new(inner: E, replay: ReplayLogger, session_dir: PathBuf) -> Self {
+    pub fn new(
+        inner: E,
+        replay: ReplayLogger,
+        session_dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         Self {
             inner,
             replay: Arc::new(tokio::sync::Mutex::new(replay)),
@@ -387,6 +406,9 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
             terminal: Mutex::new(None),
             observations: Mutex::new(Vec::new()),
             last_loop_metrics: Mutex::new(None),
+            turn_context: Arc::new(std::sync::Mutex::new(None)),
+            provider,
+            model,
         }
     }
 
@@ -420,8 +442,15 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-        options: AppendSessionEventOptions,
+        mut options: AppendSessionEventOptions,
     ) -> Option<AppendedEventMeta> {
+        // Merge provider/model from self if not already set in options
+        if options.provider.is_none() {
+            options.provider = self.provider.clone();
+        }
+        if options.model.is_none() {
+            options.model = self.model.clone();
+        }
         match append_session_event(&self.session_dir, event_type, payload, options) {
             Ok(meta) => Some(meta),
             Err(err) => {
@@ -505,11 +534,103 @@ impl<E: SolveEmitter> LoggingEmitter<E> {
         });
     }
 
-    fn append_replay_entry(&self, entry: ReplayEntry, context: &'static str) {
+    /// Set the active turn context for replay envelope enrichment.
+    pub fn set_turn_context(&self, ctx: TurnContext) {
+        *self.turn_context.lock().unwrap() = Some(ctx);
+    }
+
+    /// Clear the active turn context (called at turn end).
+    pub fn clear_turn_context(&self) {
+        *self.turn_context.lock().unwrap() = None;
+    }
+
+    /// Snapshot the current turn context, if any.
+    fn snapshot_turn_context(&self) -> Option<TurnContext> {
+        self.turn_context.lock().unwrap().clone()
+    }
+
+    /// Wrap a ReplayEntry in a v2 envelope for structured trace logging.
+    fn wrap_replay_v2_envelope(
+        &self,
+        entry: &ReplayEntry,
+        turn_ctx: Option<&TurnContext>,
+        shared_event_id: Option<&str>,
+    ) -> serde_json::Value {
+        let session_id = turn_ctx.map(|c| c.session_id.as_str()).unwrap_or("unknown");
+        let event_id = shared_event_id
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .unwrap_or(serde_json::Value::Null);
+
+        serde_json::json!({
+            "schema_version": 2,
+            "envelope": "openplanter.trace.replay.v2",
+            "event_id": event_id,
+            "session_id": session_id,
+            "turn_id": turn_ctx.as_ref().map(|c| c.turn_id.as_str()),
+            "seq": entry.seq,
+            "recorded_at": &entry.timestamp,
+            "event_type": match entry.role.as_str() {
+                "step-summary" => "step.summary",
+                "assistant" => "assistant.message",
+                "assistant-partial" => "assistant.partial",
+                "assistant-cancelled" => "turn.cancelled",
+                "system" => "system.message",
+                "user" => "user.message",
+                "curator" => "curator.note",
+                _ => "assistant.message",
+            },
+            "channel": "replay",
+            "status": match entry.role.as_str() {
+                "assistant-cancelled" => "cancelled",
+                "assistant-partial" => "partial",
+                _ => "completed",
+            },
+            "actor": {
+                "kind": match entry.role.as_str() {
+                    "user" => "user",
+                    "system" => "runtime",
+                    "curator" => "runtime",
+                    _ => "assistant",
+                },
+                "runtime_family": "desktop",
+            },
+            "payload": {
+                "text": &entry.content,
+                "step_number": entry.step_number,
+                "step_depth": entry.step_depth,
+                "conversation_path": &entry.conversation_path,
+                "step_tokens_in": entry.step_tokens_in,
+                "step_tokens_out": entry.step_tokens_out,
+                "step_elapsed": entry.step_elapsed,
+                "step_model_preview": &entry.step_model_preview,
+                "step_tool_calls": &entry.step_tool_calls,
+            },
+            "provenance": {
+                "record_locator": serde_json::Value::Null,
+                "source_refs": serde_json::json!([]),
+                "evidence_refs": serde_json::json!([]),
+            },
+            "compat": {
+                "legacy_role": &entry.role,
+                "legacy_kind": "replay",
+                "source_schema": "desktop-replay-v1",
+            },
+        })
+    }
+
+    fn append_replay_entry(
+        &self,
+        entry: ReplayEntry,
+        context: &'static str,
+        shared_event_id: Option<&str>,
+    ) {
         let replay = self.replay.clone();
+        let turn_ctx = self.snapshot_turn_context();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                if let Err(err) = replay.lock().await.append(entry).await {
+                let envelope =
+                    self.wrap_replay_v2_envelope(&entry, turn_ctx.as_ref(), shared_event_id);
+                if let Err(err) = replay.lock().await.append_raw(envelope).await {
                     eprintln!("[bridge] failed to log {context}: {err}");
                 }
             });
@@ -556,9 +677,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             .clone()
             .unwrap_or_else(|| ROOT_CONVERSATION_PATH.to_string());
         let mut step_states = self.step_states.lock().unwrap();
-        let state = step_states
-            .entry(conversation_path)
-            .or_default();
+        let state = step_states.entry(conversation_path).or_default();
         match event.kind {
             DeltaKind::Text => {
                 append_with_cap(
@@ -651,8 +770,6 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             },
         };
 
-        self.append_replay_entry(entry, "step");
-
         let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| {
             serde_json::json!({
                 "depth": event.depth,
@@ -686,18 +803,11 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                 .unwrap_or(serde_json::Value::Null),
             );
         }
-        self.append_event_value(
-            "step",
-            payload,
-            AppendSessionEventOptions {
-                status: Some("completed".to_string()),
-                actor_kind: Some("assistant".to_string()),
-                ..AppendSessionEventOptions::default()
-            },
-        );
 
+        // Collect artifact paths first by pre-scanning step_tool_calls and writing patches
+        let mut artifact_refs: Vec<String> = Vec::new();
         let mut patch_index = 0usize;
-        for tc in &state.step_tool_calls {
+        for tc in state.step_tool_calls.iter() {
             if tc.name != "apply_patch" || tc.args_truncated || tc.raw_args.trim().is_empty() {
                 continue;
             }
@@ -713,23 +823,45 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             if let Some(path) =
                 self.write_patch_artifact(event.depth, event.step, patch_index, patch_text)
             {
-                self.append_event_value(
-                    "artifact",
-                    serde_json::json!({
-                        "kind": "patch",
-                        "path": path,
-                        "depth": event.depth,
-                        "step": event.step,
-                        "tool": "apply_patch",
-                    }),
-                    AppendSessionEventOptions {
-                        status: Some("completed".to_string()),
-                        actor_kind: Some("runtime".to_string()),
-                        ..AppendSessionEventOptions::default()
-                    },
-                );
+                artifact_refs.push(format!("artifact:{path}"));
+                patch_index += 1;
             }
-            patch_index += 1;
+        }
+
+        // Write step event with evidence_refs
+        let event_meta = self.append_event_value(
+            "step",
+            payload,
+            AppendSessionEventOptions {
+                status: Some("completed".to_string()),
+                actor_kind: Some("assistant".to_string()),
+                evidence_refs: artifact_refs.clone(),
+                ..AppendSessionEventOptions::default()
+            },
+        );
+        let shared_id = event_meta.as_ref().map(|m| m.event_id.as_str());
+
+        // Write replay entry with shared event_id
+        self.append_replay_entry(entry, "step", shared_id);
+
+        // Write artifact events (patches already written above)
+        for ref_path in &artifact_refs {
+            let path = ref_path.strip_prefix("artifact:").unwrap_or(ref_path);
+            self.append_event_value(
+                "artifact",
+                serde_json::json!({
+                    "kind": "patch",
+                    "path": path,
+                    "depth": event.depth,
+                    "step": event.step,
+                    "tool": "apply_patch",
+                }),
+                AppendSessionEventOptions {
+                    status: Some("completed".to_string()),
+                    actor_kind: Some("runtime".to_string()),
+                    ..AppendSessionEventOptions::default()
+                },
+            );
         }
 
         if let Some(preview) = model_preview.as_ref() {
@@ -770,6 +902,39 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             terminal_status_label(&status),
             preview_text(result, 400)
         ));
+
+        // Collect source_refs from turn context if available
+        let turn_ctx = self.snapshot_turn_context();
+        let source_refs = turn_ctx
+            .as_ref()
+            .map(|ctx| {
+                vec![format!(
+                    "event_span:{}:{}",
+                    ctx.session_id, ctx.event_start_seq
+                )]
+            })
+            .unwrap_or_default();
+
+        // Write event first to get canonical event_id
+        let result_event = self.append_event_value(
+            "result",
+            self.terminal_payload(
+                &status,
+                result,
+                loop_metrics.as_ref(),
+                completion.as_ref(),
+                failure.as_ref(),
+            ),
+            AppendSessionEventOptions {
+                status: Some(terminal_status_label(&status).to_string()),
+                failure: failure.clone(),
+                actor_kind: Some("assistant".to_string()),
+                source_refs,
+                ..AppendSessionEventOptions::default()
+            },
+        );
+        let shared_id = result_event.as_ref().map(|m| m.event_id.as_str());
+
         let entry = ReplayEntry {
             seq: 0,
             timestamp: String::new(),
@@ -787,24 +952,8 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             step_tool_calls: None,
         };
 
-        self.append_replay_entry(entry, "complete");
-
-        let result_event = self.append_event_value(
-            "result",
-            self.terminal_payload(
-                &status,
-                result,
-                loop_metrics.as_ref(),
-                completion.as_ref(),
-                failure.as_ref(),
-            ),
-            AppendSessionEventOptions {
-                status: Some(terminal_status_label(&status).to_string()),
-                failure: failure.clone(),
-                actor_kind: Some("assistant".to_string()),
-                ..AppendSessionEventOptions::default()
-            },
-        );
+        // Write replay entry with shared event_id
+        self.append_replay_entry(entry, "complete", shared_id);
         let snapshot = TerminalSnapshot {
             status: status.clone(),
             result: result.to_string(),
@@ -867,6 +1016,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
                     step_tool_calls: None,
                 },
                 "cancelled",
+                None,
             );
         }
         let result_event = self.append_event_value(
@@ -936,7 +1086,7 @@ impl<E: SolveEmitter> SolveEmitter for LoggingEmitter<E> {
             step_tool_calls: None,
         };
 
-        self.append_replay_entry(entry, "curator update");
+        self.append_replay_entry(entry, "curator update", None);
 
         self.inner.emit_curator_update(summary, files_changed);
     }
@@ -947,6 +1097,7 @@ mod tests {
     use super::*;
     use op_core::engine::demo_solve;
     use op_core::session::replay::ReplayLogger;
+    use std::collections::HashSet;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -965,7 +1116,8 @@ mod tests {
     async fn test_logging_emitter_persists_replay() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
         let token = CancellationToken::new();
 
         demo_solve("Test persistence", &emitter, token).await;
@@ -997,10 +1149,78 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_logging_emitter_writes_turn_context_into_replay_envelopes() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+        emitter.set_turn_context(TurnContext {
+            turn_id: "turn-000123".to_string(),
+            session_id: "session-xyz".to_string(),
+            event_start_seq: 7,
+        });
+
+        let token = CancellationToken::new();
+        demo_solve("Turn context test", &emitter, token).await;
+
+        let raw = std::fs::read_to_string(tmp.path().join("replay.jsonl")).unwrap();
+        let lines = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert!(!lines.is_empty(), "expected replay envelopes to be written");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["session_id"], "session-xyz");
+        assert_eq!(first["turn_id"], "turn-000123");
+        assert_eq!(first["channel"], "replay");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_logging_emitter_fallback_event_ids_use_final_seq() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+        emitter.set_turn_context(TurnContext {
+            turn_id: "turn-000123".to_string(),
+            session_id: "session-xyz".to_string(),
+            event_start_seq: 7,
+        });
+
+        emitter.emit_curator_update("First curator note", 1);
+        emitter.emit_curator_update("Second curator note", 2);
+        emitter.emit_error("Cancelled");
+
+        let raw = std::fs::read_to_string(tmp.path().join("replay.jsonl")).unwrap();
+        let envelopes = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(envelopes.len(), 3);
+
+        let event_ids = envelopes
+            .iter()
+            .map(|value| value["event_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let unique = event_ids.iter().cloned().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), event_ids.len());
+        assert!(!event_ids.iter().any(|id| id.ends_with(":000000")));
+
+        for envelope in &envelopes {
+            let seq = envelope["seq"].as_u64().unwrap();
+            assert_eq!(envelope["session_id"], "session-xyz");
+            assert_eq!(envelope["event_id"], format!("evt:session-xyz:{seq:06}"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_logging_emitter_cancel_no_crash() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
         let token = CancellationToken::new();
         token.cancel();
 
@@ -1037,7 +1257,8 @@ mod tests {
             .unwrap();
 
         // 2. Run demo_solve through LoggingEmitter
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
         let token = CancellationToken::new();
         demo_solve("Roundtrip test", &emitter, token).await;
 
@@ -1086,7 +1307,7 @@ mod tests {
         let replay = ReplayLogger::new(tmp.path());
         let inner = CapturingEmitter::default();
         let deltas = inner.deltas.clone();
-        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf());
+        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf(), None, None);
         let big_text = "x".repeat(MAX_STEP_MODEL_PREVIEW_CHARS + 256);
 
         emitter.emit_delta(DeltaEvent {
@@ -1126,7 +1347,7 @@ mod tests {
         let replay = ReplayLogger::new(tmp.path());
         let inner = CapturingEmitter::default();
         let deltas = inner.deltas.clone();
-        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf());
+        let emitter = LoggingEmitter::new(inner, replay, tmp.path().to_path_buf(), None, None);
         let filler = "x".repeat(MAX_TOOL_ARGS_CAPTURE_CHARS + 512);
 
         emitter.emit_delta(DeltaEvent {
@@ -1180,7 +1401,8 @@ mod tests {
     async fn test_logging_emitter_keeps_root_buffers_when_child_step_arrives() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
@@ -1260,10 +1482,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_step_keeps_patch_artifact_indices_contiguous() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "read_file".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: r#"{"path":"notes.txt"}"#.into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "apply_patch".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: notes.txt\n@@\n-old\n+new\n*** End Patch\n"
+            })
+            .to_string(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallStart,
+            text: "apply_patch".into(),
+            conversation_path: Some("0".into()),
+        });
+        emitter.emit_delta(DeltaEvent {
+            kind: DeltaKind::ToolCallArgs,
+            text: serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: todo.txt\n@@\n-old\n+newer\n*** End Patch\n"
+            })
+            .to_string(),
+            conversation_path: Some("0".into()),
+        });
+
+        emitter.emit_step(StepEvent {
+            depth: 0,
+            step: 1,
+            conversation_path: Some("0".into()),
+            tool_name: None,
+            tokens: Default::default(),
+            elapsed_ms: 1,
+            is_final: false,
+            loop_phase: None,
+            loop_metrics: None,
+        });
+
+        let patch_one = tmp.path().join("artifacts/patches/patch-d0-s1-1.patch");
+        let patch_two = tmp.path().join("artifacts/patches/patch-d0-s1-2.patch");
+        let patch_three = tmp.path().join("artifacts/patches/patch-d0-s1-3.patch");
+        assert!(patch_one.exists());
+        assert!(patch_two.exists());
+        assert!(!patch_three.exists());
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("artifact:artifacts/patches/patch-d0-s1-1.patch"));
+        assert!(events.contains("artifact:artifacts/patches/patch-d0-s1-2.patch"));
+        assert!(!events.contains("artifact:artifacts/patches/patch-d0-s1-3.patch"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_emit_complete_records_terminal_snapshot_and_result_event() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_complete(
             "final text",
@@ -1304,7 +1596,8 @@ mod tests {
     async fn test_emit_error_cancelled_flushes_partial_replay_and_result_event() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
@@ -1367,7 +1660,8 @@ mod tests {
     async fn test_emit_error_cancelled_flushes_child_partial_replay_by_path() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_delta(DeltaEvent {
             kind: DeltaKind::Text,
@@ -1405,7 +1699,8 @@ mod tests {
     async fn test_emit_complete_partial_marks_degraded_failure() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_complete(
             "partial text",
@@ -1446,7 +1741,8 @@ mod tests {
     async fn test_emit_error_classifies_rate_limit_failures() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
-        let emitter = LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
 
         emitter.emit_error("Provider returned HTTP 429: too many requests");
 

@@ -436,6 +436,7 @@ class REPLPromptTests(unittest.TestCase):
         self.assertIn("Supported Findings", prompt)
         self.assertIn("candidate_actions", prompt)
         self.assertIn("machine-readable, read-only", prompt)
+        self.assertIn("retrieval_packet.hits.ontology_objects", prompt)
 
     def test_prompt_includes_ephemeral_output_persistence_rule(self) -> None:
         prompt = _build_system_prompt(recursive=False)

@@ -146,7 +146,8 @@ export function createInputBar(): HTMLElement {
     // Create session lazily on first message
     if (!appState.get().sessionId) {
       try {
-        const session = await openSession();
+        const investigationId = appState.get().activeInvestigationId;
+        const session = await openSession(undefined, false, investigationId);
         appState.update((s) => ({ ...s, sessionId: session.id }));
         window.dispatchEvent(new CustomEvent("session-changed", { detail: { isNew: true } }));
       } catch (e) {

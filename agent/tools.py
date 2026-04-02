@@ -2636,6 +2636,16 @@ class WorkspaceTools:
                 pass
         return report.render()
 
+    def defrag_workspace(self, mode: str = "full", dry_run: bool = False) -> str:
+        from .defrag import WorkspaceDefrag
+        defrag = WorkspaceDefrag(
+            workspace=self.root,
+            wiki_dir=self.root / ".openplanter" / "wiki",
+            sessions_dir=self.root / ".openplanter" / "sessions",
+        )
+        report = defrag.run(mode=mode, dry_run=dry_run)
+        return report.to_summary()
+
     def _exa_request(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not (self.exa_api_key and self.exa_api_key.strip()):
             raise ToolError("EXA_API_KEY not configured")

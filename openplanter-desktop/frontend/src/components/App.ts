@@ -3,6 +3,7 @@ import { createStatusBar } from "./StatusBar";
 import { createChatPane } from "./ChatPane";
 import { createInvestigationPane } from "./InvestigationPane";
 import { createWorkspaceInitGate } from "./WorkspaceInitGate";
+import { mountEventInspector } from "./EventInspector";
 import { appState } from "../state/store";
 import {
   listSessions,
@@ -110,6 +111,9 @@ export function createApp(root: HTMLElement): void {
   const workspaceInitGate = createWorkspaceInitGate();
   root.appendChild(workspaceInitGate);
 
+  // Event inspector (slide-out panel for viewing raw event envelopes)
+  const cleanupEventInspector = mountEventInspector();
+
   // Reactive settings display
   function renderSettings() {
     const s = appState.get();
@@ -118,7 +122,7 @@ export function createApp(root: HTMLElement): void {
       `<div><span class="label">model:</span> <span class="value">${s.model || "\u2014"}</span></div>`,
       `<div><span class="label">z.ai plan:</span> <span class="value">${s.zaiPlan || "paygo"}</span></div>`,
       `<div><span class="label">web search:</span> <span class="value">${s.webSearchProvider || "exa"}</span></div>`,
-      `<div><span class="label">retrieval:</span> <span class="value">${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})</span></div>`,
+      `<div><span class="label">retrieval:</span> <span class="value">${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"}, ${s.embeddingsMode || "documents+ontology"} ${s.embeddingsPacketVersion || "retrieval-v3"})</span></div>`,
       `<div><span class="label">vectorization:</span> <span class="value">${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}</span></div>`,
       `<div><span class="label">continuity:</span> <span class="value">${s.continuityMode || "auto"}</span></div>`,
       `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,
@@ -147,7 +151,8 @@ export function createApp(root: HTMLElement): void {
 /** Switch to a new session, clearing chat state. */
 async function switchToNewSession(sessionList: HTMLElement): Promise<void> {
   try {
-    const session = await openSession();
+    const investigationId = appState.get().activeInvestigationId;
+    const session = await openSession(undefined, false, investigationId);
     appState.update((s) => ({
       ...s,
       sessionId: session.id,

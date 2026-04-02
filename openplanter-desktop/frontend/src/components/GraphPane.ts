@@ -18,17 +18,21 @@ import {
   getNodeIds,
 } from "../graph/cytoGraph";
 import {
+  captureAndPersistGraphSessionBaseline,
   captureGraphSessionBaseline,
   getGraphSessionBaselineIds,
   hasGraphSessionBaseline,
   isGraphSessionFilterActive,
+  loadGraphSessionChangeSet,
   resetGraphSessionState,
   setGraphSessionFilterActive,
 } from "../graph/sessionBaseline";
+import { getSessionDirectory } from "../api/invoke";
 import { bindInteractions } from "../graph/interaction";
 import { getCategoryColor } from "../graph/colors";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
+import { appState } from "../state/store";
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 
@@ -468,7 +472,7 @@ export function createGraphPane(): HTMLElement {
   // --- Initialize graph ---
   let interactionsBound = false;
 
-  function initializeWithData(data: GraphData): void {
+  async function initializeWithData(data: GraphData): Promise<void> {
     currentGraphData = data;
     // Remove placeholder if present
     const placeholder = pane.querySelector(".graph-placeholder");
@@ -487,9 +491,25 @@ export function createGraphPane(): HTMLElement {
       interactionsBound = true;
     }
 
-    // Capture baseline node IDs on first load
+    // Capture baseline node IDs on first load (with persistence if session available)
     if (!hasGraphSessionBaseline()) {
-      captureGraphSessionBaseline(getNodeIds());
+      const sessionId = appState.get().sessionId;
+      if (sessionId) {
+        try {
+          const sessionDir = await getSessionDirectory(sessionId);
+          // Try to load existing change set first
+          const loaded = await loadGraphSessionChangeSet(sessionDir);
+          if (!loaded) {
+            // No persisted change set, capture and persist new baseline
+            await captureAndPersistGraphSessionBaseline(getNodeIds(), sessionDir);
+          }
+        } catch {
+          // Fallback to in-memory only if persistence fails
+          captureGraphSessionBaseline(getNodeIds());
+        }
+      } else {
+        captureGraphSessionBaseline(getNodeIds());
+      }
     }
 
     // Apply session filter if active (e.g. auto-activated for new sessions)
@@ -545,17 +565,33 @@ export function createGraphPane(): HTMLElement {
   }) as EventListener);
 
   // Listen for session changes — reset baseline
-  window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean }>) => {
+  window.addEventListener("session-changed", ((e: CustomEvent<{ isNew: boolean; sessionId?: string }>) => {
     const isNew = e.detail?.isNew ?? false;
+    const sessionId = e.detail?.sessionId ?? appState.get().sessionId;
     resetGraphSessionState(isNew);
     syncSessionToggle();
     sessionHint.classList.remove("visible");
 
     // Re-fetch graph for new session
-    getGraphData().then((data) => {
-      captureGraphSessionBaseline(data.nodes.map((node) => node.id));
+    getGraphData().then(async (data) => {
+      if (sessionId) {
+        try {
+          const sessionDir = await getSessionDirectory(sessionId);
+          // Try to load existing change set first
+          const loaded = await loadGraphSessionChangeSet(sessionDir);
+          if (!loaded) {
+            // No persisted change set, capture and persist new baseline
+            await captureAndPersistGraphSessionBaseline(data.nodes.map((node) => node.id), sessionDir);
+          }
+        } catch {
+          // Fallback to in-memory only if persistence fails
+          captureGraphSessionBaseline(data.nodes.map((node) => node.id));
+        }
+      } else {
+        captureGraphSessionBaseline(data.nodes.map((node) => node.id));
+      }
       if (data.nodes.length > 0) {
-        initializeWithData(data);
+        await initializeWithData(data);
       }
     }).catch((e) => {
       console.error("Failed to load graph data on session change:", e);

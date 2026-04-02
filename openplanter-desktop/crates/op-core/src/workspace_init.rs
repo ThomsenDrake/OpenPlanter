@@ -993,6 +993,7 @@ mod tests {
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     turn_count: 1,
                     last_objective: Some("Investigate".to_string()),
+                    investigation_id: None,
                 })
                 .unwrap(),
             )

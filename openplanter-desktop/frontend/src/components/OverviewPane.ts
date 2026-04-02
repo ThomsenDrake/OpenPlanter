@@ -645,6 +645,28 @@ export function createOverviewPane(): HTMLElement {
       );
     }
 
+    if (locator.value.startsWith("artifact:")) {
+      const artifactPath = locator.value.slice("artifact:".length);
+      window.dispatchEvent(
+        new CustomEvent("open-artifact", {
+          detail: { path: artifactPath, source: "evidence-drilldown" },
+        })
+      );
+      return true;
+    }
+
+    if (locator.value.startsWith("event:") || locator.value.startsWith("evt:")) {
+      const eventId = locator.value.startsWith("event:")
+        ? locator.value.slice("event:".length)
+        : locator.value;
+      window.dispatchEvent(
+        new CustomEvent("show-event-detail", {
+          detail: { eventId, source: "evidence-drilldown" },
+        })
+      );
+      return true;
+    }
+
     const replayEntrySeq = findReplaySeqForLocator(locator);
     if (replayEntrySeq != null) {
       return focusReplay(replayEntrySeq);
@@ -673,6 +695,9 @@ export function createOverviewPane(): HTMLElement {
         if (locator.value.startsWith("gap:")) {
           return truncate(locator.value.slice("gap:".length), 24);
         }
+        if (locator.value.startsWith("artifact:")) {
+          return truncate(locator.value.slice("artifact:".length), 24);
+        }
         return truncate(locator.value, 24);
       default:
         return truncate(locator.value, 24);
@@ -682,6 +707,8 @@ export function createOverviewPane(): HTMLElement {
   function isActionableLocator(locator: EvidenceLocator): boolean {
     if (extractWikiPath(locator.value)) return true;
     if (locator.value.startsWith("gap:") || locator.value.startsWith("action:")) return true;
+    if (locator.value.startsWith("artifact:")) return true;
+    if (locator.value.startsWith("event:") || locator.value.startsWith("evt:")) return true;
     return findReplaySeqForLocator(locator) != null;
   }
 
