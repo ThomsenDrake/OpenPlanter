@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="openplanter-agent",
         description="OpenPlanter coding agent with terminal UI.",
     )
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    parser.set_defaults(command=None)
 
     # Main agent command (default behavior)
     parser.add_argument("--workspace", default=".", help="Workspace root directory.")
@@ -231,30 +231,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Censor entity names and workspace path segments in output (UI-only).",
     )
 
-    # Defrag subcommand
-    defrag_parser = subparsers.add_parser(
-        "defrag",
-        help="Workspace defragmentation: deduplicate files, sync wiki, merge ontologies.",
+    return parser
+
+
+def build_defrag_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="openplanter-agent defrag",
+        description="Workspace defragmentation: deduplicate files, sync wiki, merge ontologies.",
     )
-    defrag_parser.add_argument(
+    parser.set_defaults(command="defrag")
+    parser.add_argument(
         "workspace_path",
         nargs="?",
         default=".",
         help="Workspace root directory (default: current directory).",
     )
-    defrag_parser.add_argument(
+    parser.add_argument(
         "--mode",
         default="full",
         choices=["full", "scan_only", "dedup", "ingest", "cleanup"],
         help="Operation mode (default: full).",
     )
-    defrag_parser.add_argument(
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be done without making changes.",
     )
-
     return parser
+
+
+def _should_use_defrag_parser(argv: list[str]) -> bool:
+    return bool(argv) and argv[0] == "defrag" and "--resume" not in argv
+
+
+def _parse_cli_args(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+    if _should_use_defrag_parser(argv):
+        parser = build_defrag_parser()
+        return parser, parser.parse_args(argv[1:])
+
+    parser = build_parser()
+    return parser, parser.parse_args(argv)
 
 
 def _format_ts(ts: int) -> str:
@@ -740,8 +756,7 @@ def _workspace_flag_explicit(argv: list[str]) -> bool:
 
 def main() -> None:
     argv = sys.argv[1:]
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    parser, args = _parse_cli_args(argv)
     workspace_flag_explicit = _workspace_flag_explicit(argv)
 
     # Handle defrag subcommand

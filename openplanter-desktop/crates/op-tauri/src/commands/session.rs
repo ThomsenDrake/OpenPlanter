@@ -54,10 +54,8 @@ pub async fn read_session_event(
     event_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<Value>, String> {
-    if !is_safe_session_id(&session_id) {
-        return Err("Invalid session id".to_string());
-    }
-    let session_dir = sessions_dir(&state).await.join(&session_id);
+    let sessions_root = sessions_dir(&state).await;
+    let session_dir = resolve_session_directory(&sessions_root, &session_id)?;
     read_session_event_by_path(&session_dir, &event_id)
         .await
         .map_err(|e| format!("Failed to read session event: {e}"))
@@ -160,7 +158,8 @@ pub async fn get_session_directory(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let dir = sessions_dir(&state).await.join(&session_id);
+    let sessions_root = sessions_dir(&state).await;
+    let dir = resolve_session_directory(&sessions_root, &session_id)?;
     Ok(dir.to_string_lossy().to_string())
 }
 
@@ -178,6 +177,13 @@ pub(crate) fn is_safe_session_id(session_id: &str) -> bool {
             (components.next(), components.next()),
             (Some(std::path::Component::Normal(_)), None)
         )
+}
+
+fn resolve_session_directory(sessions_root: &Path, session_id: &str) -> Result<PathBuf, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("Invalid session id".to_string());
+    }
+    Ok(sessions_root.join(session_id))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1604,6 +1610,24 @@ mod tests {
             assert!(
                 normalize_session_artifact_path(&session_dir_str, invalid).is_err(),
                 "expected invalid artifact path to fail: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_session_directory_rejects_unsafe_ids() {
+        let tmp = tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        fs::create_dir_all(&sessions_root).unwrap();
+
+        assert_eq!(
+            resolve_session_directory(&sessions_root, "session-123").unwrap(),
+            sessions_root.join("session-123")
+        );
+        for invalid in ["", "../oops", "nested/path", "/abs", "with\\slash"] {
+            assert!(
+                resolve_session_directory(&sessions_root, invalid).is_err(),
+                "expected invalid session id to fail: {invalid}"
             );
         }
     }
