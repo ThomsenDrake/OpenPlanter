@@ -10,12 +10,13 @@ pub mod judge;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
 use chrono::Utc;
 use futures::future::join_all;
+use regex::Regex;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -634,17 +635,12 @@ fn classify_final_answer_text(text: &str, objective: &str) -> FinalAnswerDisposi
     FinalAnswerDisposition::Accept
 }
 
-const INVESTIGATION_STRATEGY_CUES: &[&str] = &[
-    "weakness",
-    "capitalize",
-    "opposition",
-    "vulnerability",
-    "pressure point",
-    "risk",
-    "contrast",
-    "recommendation",
-    "line of attack",
-];
+static INVESTIGATION_STRATEGY_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(weakness|capitalize|opposition|vulnerability|pressure point|risk|contrast|recommendation|line of attack)\b",
+    )
+    .unwrap()
+});
 const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
     "key_judgments",
     "supported_findings",
@@ -653,10 +649,7 @@ const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
 ];
 
 fn objective_requires_strategic_implications(objective: &str) -> bool {
-    let lower = objective.to_ascii_lowercase();
-    INVESTIGATION_STRATEGY_CUES
-        .iter()
-        .any(|cue| lower.contains(cue))
+    INVESTIGATION_STRATEGY_CUE_RE.is_match(objective)
 }
 
 fn investigation_required_markdown_sections(objective: &str) -> Vec<&'static str> {
@@ -749,7 +742,11 @@ fn investigation_deliverable_issue(text: &str, objective: &str) -> Option<String
     let required_sections = investigation_required_markdown_sections(objective);
     let (sections, order) = parse_investigation_markdown_sections(stripped);
     for section in &required_sections {
-        let Some(body) = sections.get(*section) else {
+        let Some(body) = sections
+            .iter()
+            .find(|(heading, _)| heading.eq_ignore_ascii_case(section))
+            .map(|(_, body)| body)
+        else {
             return Some(format!("Markdown deliverable is missing `## {section}`"));
         };
         if body.trim().is_empty() {
@@ -3986,6 +3983,32 @@ mod tests {
                 &payload.to_string(),
                 "Run opposition research and recommend weaknesses to capitalize on",
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_objective_requires_strategic_implications_uses_word_boundaries() {
+        assert!(!objective_requires_strategic_implications(
+            "Investigate the brisket fundraiser write-up"
+        ));
+        assert!(!objective_requires_strategic_implications(
+            "Help me decapitalize this slogan"
+        ));
+        assert!(objective_requires_strategic_implications(
+            "Find weaknesses the campaign can capitalize on"
+        ));
+        assert!(objective_requires_strategic_implications(
+            "Assess the biggest risk for the incumbent"
+        ));
+    }
+
+    #[test]
+    fn test_investigation_markdown_validation_is_case_insensitive() {
+        let deliverable = "## key judgments\n- Judgment.\n## supported findings\n- Support.\n## contested findings\n- None.\n## unresolved findings\n- None.";
+
+        assert_eq!(
+            investigation_deliverable_issue(deliverable, "Investigate this candidate"),
             None
         );
     }

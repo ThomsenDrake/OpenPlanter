@@ -126,12 +126,6 @@ _BUDGET_EXTENSION_WINDOW = 12
 _MIN_EXTENSION_PROGRESS_SIGNALS = 2
 _MIN_MEANINGFUL_RESULT_CHARS = 24
 _NON_PROGRESS_TOOL_NAMES = _RECON_TOOL_NAMES | {"think"}
-_INVESTIGATION_REQUIRED_MARKDOWN_SECTIONS = (
-    "Key Judgments",
-    "Supported Findings",
-    "Contested Findings",
-    "Unresolved Findings",
-)
 _INVESTIGATION_REQUIRED_JSON_KEYS = (
     "key_judgments",
     "supported_findings",
@@ -1952,13 +1946,13 @@ class RLMEngine:
 
             model.append_tool_results(conversation, results)
 
+            has_successful_artifact = any(
+                tc.name in _ARTIFACT_TOOL_NAMES and not _looks_like_failed_tool_result(tc.name, result)
+                for tc, result in zip(turn.tool_calls, results)
+            )
             if (
                 depth == 0
-                and has_artifact
-                and any(
-                    not _looks_like_failed_tool_result(tc.name, result)
-                    for tc, result in zip(turn.tool_calls, results)
-                )
+                and has_successful_artifact
             ):
                 (
                     current_question_reasoning_packet,
