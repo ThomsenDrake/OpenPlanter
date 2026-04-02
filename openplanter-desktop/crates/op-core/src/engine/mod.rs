@@ -667,11 +667,27 @@ fn investigation_required_markdown_sections(objective: &str) -> Vec<&'static str
 
 fn json_sequence_has_content(value: Option<&Value>) -> bool {
     match value {
-        Some(Value::Array(items)) => items.iter().any(|item| !item.is_null()),
+        Some(Value::Array(items)) => items.iter().any(json_value_is_truthy),
         Some(Value::String(text)) => !text.trim().is_empty(),
         Some(Value::Object(obj)) => !obj.is_empty(),
         Some(Value::Null) | None => false,
         Some(_) => true,
+    }
+}
+
+fn json_value_is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| number.as_u64().map(|value| value != 0))
+            .or_else(|| number.as_f64().map(|value| value != 0.0))
+            .unwrap_or(true),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(obj) => !obj.is_empty(),
     }
 }
 

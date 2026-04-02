@@ -839,7 +839,24 @@ class RLMEngine:
         return self._classify_final_answer_text(text, objective) == "reject_meta"
 
     def _append_user_message(self, conversation: Any, content: str) -> None:
-        conversation._provider_messages.append({"role": "user", "content": content})
+        messages = getattr(conversation, "_provider_messages", None)
+        if not isinstance(messages, list) or not messages:
+            conversation._provider_messages.append({"role": "user", "content": content})
+            return
+
+        last = messages[-1]
+        if not isinstance(last, dict) or last.get("role") != "user":
+            messages.append({"role": "user", "content": content})
+            return
+
+        existing = last.get("content")
+        if isinstance(existing, str):
+            last["content"] = f"{existing}\n\n{content}" if existing else content
+            return
+        if isinstance(existing, list):
+            existing.append({"type": "text", "text": content})
+            return
+        last["content"] = content
 
     def _investigation_required_sections(self, objective: str) -> list[str]:
         sections = ["Key Judgments"]

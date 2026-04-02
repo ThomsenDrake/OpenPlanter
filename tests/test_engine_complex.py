@@ -15,7 +15,7 @@ from agent.engine import (
     _FINALIZER_RESCUE_SYSTEM_PROMPT,
     _evaluate_budget_extension,
 )
-from agent.model import Conversation, ModelTurn, RateLimitError, ScriptedModel, ToolResult
+from agent.model import AnthropicModel, Conversation, ModelTurn, RateLimitError, ScriptedModel, ToolResult
 from agent.retrieval import RetrievalBuildResult
 from agent.tools import WorkspaceTools
 
@@ -602,6 +602,33 @@ class EngineComplexTests(unittest.TestCase):
             self.assertIsNotNone(mtime_ns)
             self.assertFalse(refreshed)
             self.assertEqual(conversation.get_messages(), [{"role": "user", "content": "initial"}])
+
+    def test_append_user_message_merges_into_anthropic_tool_result_user_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=2)
+            tools = WorkspaceTools(root=root)
+            engine = RLMEngine(
+                model=ScriptedModel(scripted_turns=[]),
+                tools=tools,
+                config=cfg,
+            )
+            anthropic = AnthropicModel(model="claude-sonnet-4-5", api_key="test-key")
+            conversation = anthropic.create_conversation("system", "initial")
+            anthropic.append_tool_results(
+                conversation,
+                [ToolResult(tool_call_id="toolu_1", name="read_file", content="file contents")],
+            )
+
+            engine._append_user_message(conversation, "Mandatory synthesis checkpoint")
+
+            messages = conversation.get_messages()
+            self.assertEqual(len(messages), 2)
+            self.assertEqual(messages[-1]["role"], "user")
+            self.assertIsInstance(messages[-1]["content"], list)
+            self.assertEqual(messages[-1]["content"][0]["type"], "tool_result")
+            self.assertEqual(messages[-1]["content"][1]["type"], "text")
+            self.assertEqual(messages[-1]["content"][1]["text"], "Mandatory synthesis checkpoint")
 
     def test_budget_extension_eval_blocks_finalization_churn(self) -> None:
         evaluation = _evaluate_budget_extension(

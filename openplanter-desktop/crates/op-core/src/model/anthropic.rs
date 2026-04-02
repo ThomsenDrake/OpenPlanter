@@ -67,6 +67,29 @@ impl AnthropicModel {
             match msg {
                 Message::System { .. } => {}
                 Message::User { content } => {
+                    if let Some(last) = result.last_mut() {
+                        if last.get("role").and_then(|role| role.as_str()) == Some("user") {
+                            match last.get_mut("content") {
+                                Some(serde_json::Value::String(existing)) => {
+                                    if existing.is_empty() {
+                                        *existing = content.clone();
+                                    } else {
+                                        existing.push_str("\n\n");
+                                        existing.push_str(content);
+                                    }
+                                    continue;
+                                }
+                                Some(serde_json::Value::Array(items)) => {
+                                    items.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": content,
+                                    }));
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     result.push(serde_json::json!({
                         "role": "user",
                         "content": content,
@@ -600,6 +623,35 @@ mod tests {
         );
         assert_eq!(user_content[0]["tool_use_id"], "t1");
         assert_eq!(user_content[1]["tool_use_id"], "t2");
+    }
+
+    #[test]
+    fn test_convert_merges_user_text_into_previous_tool_result_user_message() {
+        let msgs = vec![
+            Message::Assistant {
+                content: "Using tools.".to_string(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+            },
+            Message::Tool {
+                tool_call_id: "t1".into(),
+                content: "file1 contents".into(),
+            },
+            Message::User {
+                content: "Mandatory synthesis checkpoint".into(),
+            },
+        ];
+
+        let converted = AnthropicModel::convert_messages(&msgs);
+        assert_eq!(converted.len(), 2);
+        let user_content = converted[1]["content"].as_array().unwrap();
+        assert_eq!(user_content.len(), 2);
+        assert_eq!(user_content[0]["type"], "tool_result");
+        assert_eq!(user_content[1]["type"], "text");
+        assert_eq!(user_content[1]["text"], "Mandatory synthesis checkpoint");
     }
 
     // ── build_payload ──
