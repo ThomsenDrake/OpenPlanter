@@ -683,15 +683,19 @@ fn parse_investigation_markdown_sections(text: &str) -> (HashMap<String, String>
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            if let Some(previous) = current_heading.take() {
-                sections.insert(previous, body.trim().to_string());
-                body.clear();
+        if let Some(rest) = trimmed.strip_prefix("##") {
+            if rest.chars().next().is_some_and(char::is_whitespace) {
+                if let Some(previous) = current_heading.take() {
+                    sections.insert(previous, body.trim().to_string());
+                    body.clear();
+                }
+                let heading = rest.trim().to_string();
+                if !heading.is_empty() {
+                    order.push(heading.clone());
+                    current_heading = Some(heading);
+                    continue;
+                }
             }
-            let heading = rest.trim().to_string();
-            order.push(heading.clone());
-            current_heading = Some(heading);
-            continue;
         }
 
         if current_heading.is_some() {
@@ -917,14 +921,19 @@ fn build_refreshed_reasoning_user_message(
         return None;
     }
 
-    Some(
-        serde_json::json!({
-            "reasoning_context_refresh": { "reason": reason },
-            "question_reasoning_packet": question_reasoning_packet.cloned().unwrap_or(Value::Null),
-            "retrieval_packet": retrieval_packet.cloned().unwrap_or(Value::Null),
-        })
-        .to_string(),
-    )
+    let mut payload = Map::new();
+    payload.insert(
+        "reasoning_context_refresh".to_string(),
+        serde_json::json!({ "reason": reason }),
+    );
+    if let Some(packet) = question_reasoning_packet {
+        payload.insert("question_reasoning_packet".to_string(), packet.clone());
+    }
+    if let Some(packet) = retrieval_packet {
+        payload.insert("retrieval_packet".to_string(), packet.clone());
+    }
+
+    Some(Value::Object(payload).to_string())
 }
 
 fn session_state_mtime(session_dir: &Path) -> Option<u128> {
@@ -4010,6 +4019,34 @@ mod tests {
         assert_eq!(
             investigation_deliverable_issue(deliverable, "Investigate this candidate"),
             None
+        );
+    }
+
+    #[test]
+    fn test_investigation_markdown_validation_accepts_extra_heading_whitespace() {
+        let deliverable = "##  Key Judgments\n- Judgment.\n##\tSupported Findings\n- Support.\n##  Contested Findings\n- None.\n##\tUnresolved Findings\n- None.";
+
+        assert_eq!(
+            investigation_deliverable_issue(deliverable, "Investigate this candidate"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_build_refreshed_reasoning_user_message_omits_absent_keys() {
+        let message = build_refreshed_reasoning_user_message(
+            "investigation_state_changed",
+            None,
+            Some(&serde_json::json!({"hits": []})),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&message).unwrap();
+
+        assert!(parsed.get("question_reasoning_packet").is_none());
+        assert_eq!(parsed["retrieval_packet"], serde_json::json!({"hits": []}));
+        assert_eq!(
+            parsed["reasoning_context_refresh"]["reason"],
+            serde_json::json!("investigation_state_changed")
         );
     }
 

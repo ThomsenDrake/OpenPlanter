@@ -1048,7 +1048,7 @@ class RLMEngine:
 
         try:
             typed_state = load_investigation_state(investigation_state_path)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, OSError) as exc:
             self._emit(
                 f"[reasoning-refresh] skipped typed-state refresh after state change: {exc}",
                 on_event,

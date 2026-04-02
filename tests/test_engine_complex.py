@@ -571,6 +571,38 @@ class EngineComplexTests(unittest.TestCase):
             )
             self.assertTrue(any('"q_2"' in content for content in refresh_messages))
 
+    def test_reasoning_refresh_ignores_oserror_when_state_read_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=2)
+            tools = WorkspaceTools(root=root)
+            engine = RLMEngine(model=ScriptedModel(scripted_turns=[]), tools=tools, config=cfg)
+            session_dir = root / ".openplanter" / "sessions" / "session-refresh-error"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            state_path = session_dir / "investigation_state.json"
+            state_path.write_text("{}", encoding="utf-8")
+            engine.session_dir = session_dir
+            conversation = Conversation(
+                _provider_messages=[{"role": "user", "content": "initial"}],
+                system_prompt="test",
+            )
+
+            with patch("agent.engine.load_investigation_state", side_effect=OSError("boom")):
+                packet, retrieval, mtime_ns, refreshed = engine._maybe_refresh_reasoning_context_if_needed(
+                    conversation=conversation,
+                    objective="Investigate the subject",
+                    question_reasoning_packet={"focus_question_ids": ["q_1"]},
+                    retrieval_packet=None,
+                    last_state_mtime_ns=None,
+                    on_event=None,
+                )
+
+            self.assertEqual(packet, {"focus_question_ids": ["q_1"]})
+            self.assertIsNone(retrieval)
+            self.assertIsNotNone(mtime_ns)
+            self.assertFalse(refreshed)
+            self.assertEqual(conversation.get_messages(), [{"role": "user", "content": "initial"}])
+
     def test_budget_extension_eval_blocks_finalization_churn(self) -> None:
         evaluation = _evaluate_budget_extension(
             [
