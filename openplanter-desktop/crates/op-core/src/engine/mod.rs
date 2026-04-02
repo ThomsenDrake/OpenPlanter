@@ -9,7 +9,7 @@ pub mod investigation_state;
 pub mod judge;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,13 +26,15 @@ use crate::events::{
 };
 use crate::model::{BaseModel, Message, ModelTurn, RateLimitError, ToolCall};
 use crate::prompts::build_system_prompt;
+use crate::retrieval::build_retrieval_packet;
 use crate::tools::defs::build_tool_defs;
 use crate::tools::{ParallelWriteScope, ToolResult, WorkspaceTools};
 
-use self::context::TurnSummary;
+use self::context::{TurnSummary, load_or_migrate_investigation_state};
 use self::curator::{
     CuratorCheckpoint, CuratorStateDelta, build_state_delta, run_curator_checkpoint,
 };
+use self::investigation_state::{build_question_reasoning_packet, has_reasoning_content};
 use self::judge::{AcceptanceCriteriaJudge, JudgeVerdict};
 
 #[derive(Debug, Clone, Default)]
@@ -632,6 +634,311 @@ fn classify_final_answer_text(text: &str, objective: &str) -> FinalAnswerDisposi
     FinalAnswerDisposition::Accept
 }
 
+const INVESTIGATION_STRATEGY_CUES: &[&str] = &[
+    "weakness",
+    "capitalize",
+    "opposition",
+    "vulnerability",
+    "pressure point",
+    "risk",
+    "contrast",
+    "recommendation",
+    "line of attack",
+];
+const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
+    "key_judgments",
+    "supported_findings",
+    "contested_findings",
+    "unresolved_findings",
+];
+
+fn objective_requires_strategic_implications(objective: &str) -> bool {
+    let lower = objective.to_ascii_lowercase();
+    INVESTIGATION_STRATEGY_CUES
+        .iter()
+        .any(|cue| lower.contains(cue))
+}
+
+fn investigation_required_markdown_sections(objective: &str) -> Vec<&'static str> {
+    let mut sections = vec!["Key Judgments"];
+    if objective_requires_strategic_implications(objective) {
+        sections.push("Strategic Implications");
+    }
+    sections.extend([
+        "Supported Findings",
+        "Contested Findings",
+        "Unresolved Findings",
+    ]);
+    sections
+}
+
+fn json_sequence_has_content(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Array(items)) => items.iter().any(|item| !item.is_null()),
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Object(obj)) => !obj.is_empty(),
+        Some(Value::Null) | None => false,
+        Some(_) => true,
+    }
+}
+
+fn parse_investigation_markdown_sections(text: &str) -> (HashMap<String, String>, Vec<String>) {
+    let mut sections = HashMap::new();
+    let mut order = Vec::new();
+    let mut current_heading: Option<String> = None;
+    let mut body = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            if let Some(previous) = current_heading.take() {
+                sections.insert(previous, body.trim().to_string());
+                body.clear();
+            }
+            let heading = rest.trim().to_string();
+            order.push(heading.clone());
+            current_heading = Some(heading);
+            continue;
+        }
+
+        if current_heading.is_some() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+
+    if let Some(previous) = current_heading.take() {
+        sections.insert(previous, body.trim().to_string());
+    }
+
+    (sections, order)
+}
+
+fn investigation_deliverable_issue(text: &str, objective: &str) -> Option<String> {
+    let stripped = text.trim();
+    if stripped.is_empty() {
+        return Some("deliverable is empty".to_string());
+    }
+
+    if stripped.starts_with('{') {
+        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(stripped) {
+            for key in INVESTIGATION_REQUIRED_JSON_KEYS {
+                if !obj.contains_key(*key) {
+                    return Some(format!("JSON deliverable is missing `{key}`"));
+                }
+            }
+            if !json_sequence_has_content(obj.get("key_judgments")) {
+                return Some("JSON deliverable has an empty `key_judgments` field".to_string());
+            }
+            if objective_requires_strategic_implications(objective) {
+                if !obj.contains_key("strategic_implications") {
+                    return Some(
+                        "JSON deliverable is missing `strategic_implications`".to_string(),
+                    );
+                }
+                if !json_sequence_has_content(obj.get("strategic_implications")) {
+                    return Some(
+                        "JSON deliverable has an empty `strategic_implications` field".to_string(),
+                    );
+                }
+            }
+            return None;
+        }
+    }
+
+    let required_sections = investigation_required_markdown_sections(objective);
+    let (sections, order) = parse_investigation_markdown_sections(stripped);
+    for section in &required_sections {
+        let Some(body) = sections.get(*section) else {
+            return Some(format!("Markdown deliverable is missing `## {section}`"));
+        };
+        if body.trim().is_empty() {
+            return Some(format!(
+                "Markdown deliverable has an empty `## {section}` section"
+            ));
+        }
+    }
+
+    let mut previous_position = None;
+    for section in &required_sections {
+        let Some(position) = order
+            .iter()
+            .position(|item| item.eq_ignore_ascii_case(section))
+        else {
+            return Some(format!("Markdown deliverable is missing `## {section}`"));
+        };
+        if let Some(previous) = previous_position {
+            if position <= previous {
+                return Some(format!(
+                    "Markdown deliverable sections are out of order: `## {section}` is misplaced"
+                ));
+            }
+        }
+        previous_position = Some(position);
+    }
+
+    None
+}
+
+fn summarize_question_reasoning_packet(packet: Option<&Value>) -> String {
+    let Some(Value::Object(obj)) = packet else {
+        return "(none)".to_string();
+    };
+
+    let unresolved_questions = obj
+        .get("unresolved_questions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(3)
+                .filter_map(Value::as_object)
+                .map(|item| {
+                    serde_json::json!({
+                        "id": item.get("id").cloned().unwrap_or(Value::Null),
+                        "question": item
+                            .get("question")
+                            .cloned()
+                            .or_else(|| item.get("question_text").cloned())
+                            .unwrap_or(Value::Null),
+                        "priority": item.get("priority").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let candidate_actions = obj
+        .get("candidate_actions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter()
+                .take(3)
+                .filter_map(Value::as_object)
+                .map(|item| {
+                    serde_json::json!({
+                        "id": item.get("id").cloned().unwrap_or(Value::Null),
+                        "priority": item.get("priority").cloned().unwrap_or(Value::Null),
+                        "title": item.get("title").cloned().unwrap_or(Value::Null),
+                        "reason_codes": item.get("reason_codes").cloned().unwrap_or(Value::Array(Vec::new())),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "focus_question_ids": obj.get("focus_question_ids").cloned().unwrap_or(Value::Array(Vec::new())),
+        "unresolved_questions": unresolved_questions,
+        "findings": obj.get("findings").cloned().unwrap_or(Value::Null),
+        "candidate_actions": candidate_actions,
+    }))
+    .unwrap_or_else(|_| "(unserializable question reasoning packet)".to_string())
+}
+
+fn summarize_retrieval_packet(packet: Option<&Value>) -> String {
+    let Some(Value::Object(obj)) = packet else {
+        return "(none)".to_string();
+    };
+    let hits = obj.get("hits").and_then(Value::as_object);
+    let top_hits = |key: &str| -> Vec<Value> {
+        hits.and_then(|hits| hits.get(key))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .take(3)
+                    .filter_map(Value::as_object)
+                    .map(|item| {
+                        item.get("title")
+                            .cloned()
+                            .or_else(|| item.get("label").cloned())
+                            .or_else(|| item.get("path").cloned())
+                            .or_else(|| item.get("source_path").cloned())
+                            .or_else(|| item.get("object_id").cloned())
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "status": obj.get("status").cloned().unwrap_or(Value::Null),
+        "provider": obj.get("provider").cloned().unwrap_or(Value::Null),
+        "model": obj.get("model").cloned().unwrap_or(Value::Null),
+        "query": obj.get("query").cloned().unwrap_or(Value::Null),
+        "coverage": obj.get("coverage").cloned().unwrap_or(Value::Null),
+        "top_document_hits": top_hits("documents"),
+        "top_ontology_hits": top_hits("ontology_objects"),
+        "top_graph_expansions": top_hits("graph_expansions"),
+    }))
+    .unwrap_or_else(|_| "(unserializable retrieval packet)".to_string())
+}
+
+fn build_synthesis_checkpoint_message(objective: &str, packet: &Value) -> String {
+    let focus_questions = packet
+        .get("unresolved_questions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(3)
+                .filter_map(Value::as_object)
+                .filter_map(|item| {
+                    item.get("question")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("question_text").and_then(Value::as_str))
+                        .map(|question| format!("- {question}"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "- Use the highest-priority unresolved question from the reasoning packet."
+                    .to_string(),
+            ]
+        });
+    let sections = investigation_required_markdown_sections(objective)
+        .into_iter()
+        .map(|section| format!("- ## {section}"))
+        .collect::<Vec<_>>();
+
+    format!(
+        "Mandatory synthesis checkpoint: stop broadening the search unless a missing source is decisive. Use the evidence already gathered to answer the objective directly.\n\nResolve these focus questions now:\n{}\n\nRequired deliverable structure:\n{}\n\nTranslate major connections into objective-facing judgments. If the evidence is still insufficient, say that explicitly inside Key Judgments or Strategic Implications.",
+        focus_questions.join("\n"),
+        sections.join("\n"),
+    )
+}
+
+fn build_refreshed_reasoning_user_message(
+    reason: &str,
+    question_reasoning_packet: Option<&Value>,
+    retrieval_packet: Option<&Value>,
+) -> Option<String> {
+    if question_reasoning_packet.is_none() && retrieval_packet.is_none() {
+        return None;
+    }
+
+    Some(
+        serde_json::json!({
+            "reasoning_context_refresh": { "reason": reason },
+            "question_reasoning_packet": question_reasoning_packet.cloned().unwrap_or(Value::Null),
+            "retrieval_packet": retrieval_packet.cloned().unwrap_or(Value::Null),
+        })
+        .to_string(),
+    )
+}
+
+fn session_state_mtime(session_dir: &Path) -> Option<u128> {
+    let path = session_dir.join("investigation_state.json");
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
 fn model_tier(model_name: &str, reasoning_effort: Option<&str>) -> i32 {
     let lower = model_name.to_ascii_lowercase();
     if lower.contains("opus") {
@@ -922,7 +1229,7 @@ fn should_emit_recon_guardrail(recon_streak: u32, last_guardrail_streak: u32) ->
 const BUDGET_EXTENSION_WINDOW: usize = 12;
 const MIN_MEANINGFUL_RESULT_CHARS: usize = 24;
 const MIN_EXTENSION_PROGRESS_SIGNALS: usize = 2;
-const FINALIZER_RESCUE_SYSTEM_PROMPT: &str = "You are finishing already-completed work.\nReturn only the direct final deliverable as plain text.\nUse only the supplied objective, rejected candidate, and completed-work notes.\nPrefer minimally editing the rejected candidate when it already contains the deliverable.\nRemove process commentary, future-tense promises, and next-step language.\nDo not call tools, create or verify files, claim new verification, or invent new work.";
+const FINALIZER_RESCUE_SYSTEM_PROMPT: &str = "You are finishing already-completed work.\nReturn only the direct final deliverable as plain text.\nUse only the supplied objective, reasoning packet, retrieval summary, rejected candidate, and completed-work notes.\nPrefer minimally editing the rejected candidate when it already contains the deliverable.\nWhen the objective is an investigation, preserve the required report sections or JSON keys.\nRemove process commentary, future-tense promises, and next-step language.\nDo not call tools, create or verify files, claim new verification, or invent new work.";
 
 #[derive(Debug, Clone)]
 struct StepProgressRecord {
@@ -1237,6 +1544,8 @@ fn build_finalizer_rescue_user_message(
     failure_label: &str,
     rejected_candidate: &str,
     previews: &[String],
+    question_reasoning_packet: Option<&Value>,
+    retrieval_packet: Option<&Value>,
 ) -> String {
     let completed_work = if previews.is_empty() {
         "- (no completed-work notes recorded)".to_string()
@@ -1247,10 +1556,21 @@ fn build_finalizer_rescue_user_message(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let deliverable_contract = if objective_requires_strategic_implications(objective) {
+        "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Strategic Implications\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+    } else {
+        "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+    };
 
     format!(
-        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not add new claims, new verification, or new work.",
-        rejected_candidate.trim()
+        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nLatest question reasoning packet:\n{}\n\nLatest retrieval summary:\n{}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nDeliverable contract:\n{deliverable_contract}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not add new claims, new verification, or new work.",
+        summarize_question_reasoning_packet(question_reasoning_packet),
+        summarize_retrieval_packet(retrieval_packet),
+        if rejected_candidate.trim().is_empty() {
+            "(none captured)"
+        } else {
+            rejected_candidate.trim()
+        },
     )
 }
 
@@ -1360,19 +1680,14 @@ async fn attempt_finalizer_rescue(
     failure_label: &str,
     rejected_candidate: Option<&str>,
     step_records: &[StepProgressRecord],
+    question_reasoning_packet: Option<&Value>,
+    retrieval_packet: Option<&Value>,
     loop_metrics: &mut LoopMetrics,
     cancel: &CancellationToken,
     config: &AgentConfig,
     emitter: &dyn SolveEmitter,
     trace_prefix: &str,
 ) -> Option<ModelTurn> {
-    let candidate = rejected_candidate.unwrap_or("").trim();
-    if candidate.is_empty() {
-        emitter.emit_trace(&format!(
-            "{trace_prefix} finalizer rescue skipped: no rejected final-answer candidate available"
-        ));
-        return None;
-    }
     if cancel.is_cancelled() {
         emitter.emit_trace(&format!(
             "{trace_prefix} finalizer rescue skipped: solve already cancelled"
@@ -1389,8 +1704,10 @@ async fn attempt_finalizer_rescue(
             content: build_finalizer_rescue_user_message(
                 objective,
                 failure_label,
-                candidate,
+                rejected_candidate.unwrap_or(""),
                 &previews,
+                question_reasoning_packet,
+                retrieval_packet,
             ),
         },
     ];
@@ -1444,11 +1761,90 @@ async fn attempt_finalizer_rescue(
         ));
         return None;
     }
+    if question_reasoning_packet.is_some() {
+        if let Some(issue) = investigation_deliverable_issue(&turn.text, objective) {
+            emitter.emit_trace(&format!(
+                "{trace_prefix} finalizer rescue rejected: rescue output still missed the investigation deliverable contract ({issue})"
+            ));
+            return None;
+        }
+    }
 
     emitter.emit_trace(&format!(
         "{trace_prefix} finalizer rescue accepted concrete final answer"
     ));
     Some(turn)
+}
+
+async fn maybe_refresh_reasoning_context_if_needed(
+    config: &AgentConfig,
+    session_dir: &Path,
+    objective: &str,
+    question_reasoning_packet: &mut Option<Value>,
+    retrieval_packet: &mut Option<Value>,
+    last_state_mtime_ns: &mut Option<u128>,
+    cancel: &CancellationToken,
+    emitter: &dyn SolveEmitter,
+    messages: &mut Vec<Message>,
+) -> bool {
+    let Some(current_mtime_ns) = session_state_mtime(session_dir) else {
+        return false;
+    };
+    if last_state_mtime_ns.is_some_and(|previous| previous == current_mtime_ns) {
+        return false;
+    }
+    *last_state_mtime_ns = Some(current_mtime_ns);
+
+    let state = match load_or_migrate_investigation_state(session_dir).await {
+        Ok(state) => state,
+        Err(err) => {
+            emitter.emit_trace(&format!(
+                "[reasoning-refresh] skipped typed-state refresh after state change: {err}"
+            ));
+            return false;
+        }
+    };
+
+    let packet = build_question_reasoning_packet(&state, 8, 6);
+    *question_reasoning_packet = if has_reasoning_content(&packet) {
+        Some(packet)
+    } else {
+        None
+    };
+
+    match build_retrieval_packet(
+        config,
+        Some(session_dir),
+        objective,
+        question_reasoning_packet.as_ref(),
+        Some(cancel),
+        |message| emitter.emit_trace(&message),
+    )
+    .await
+    {
+        Ok(result) => {
+            *retrieval_packet = result.packet;
+            emitter.emit_trace(&format!("[retrieval] {}", result.status.detail));
+        }
+        Err(err) => {
+            emitter.emit_trace(&format!(
+                "[retrieval] failed to build refreshed retrieval packet; continuing without semantic context: {err}"
+            ));
+            *retrieval_packet = None;
+        }
+    }
+
+    if let Some(message) = build_refreshed_reasoning_user_message(
+        "investigation_state_changed",
+        question_reasoning_packet.as_ref(),
+        retrieval_packet.as_ref(),
+    ) {
+        messages.push(Message::User { content: message });
+        emitter.emit_trace("[reasoning-refresh] appended updated reasoning context");
+        return true;
+    }
+
+    false
 }
 
 async fn finalize_partial_outcome(
@@ -1728,6 +2124,19 @@ async fn solve_frame(
             content: initial_user_message,
         },
     ];
+    let mut current_question_reasoning_packet = initial_context
+        .and_then(|ctx| ctx.question_reasoning_packet.clone())
+        .filter(has_reasoning_content);
+    let mut current_retrieval_packet = initial_context.and_then(|ctx| ctx.retrieval_packet.clone());
+    let session_dir_path = if depth == 0 {
+        initial_context
+            .and_then(|ctx| ctx.session_dir.as_ref())
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+    let mut last_reasoning_state_mtime_ns =
+        session_dir_path.as_deref().and_then(session_state_mtime);
 
     let mut loop_metrics = LoopMetrics::default();
     let mut last_guardrail_streak = 0u32;
@@ -1738,6 +2147,7 @@ async fn solve_frame(
     let mut final_rejection_streak = 0u32;
     let mut rewrite_only_violations = 0u32;
     let mut last_rejected_final_candidate: Option<String> = None;
+    let mut synthesis_checkpoint_sent = false;
     let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
     let max_total_steps = active_step_budget
         + if config.budget_extension_enabled {
@@ -1909,6 +2319,8 @@ async fn solve_frame(
                     "rewrite_only_violation_stall",
                     last_rejected_final_candidate.as_deref(),
                     &step_records,
+                    current_question_reasoning_packet.as_ref(),
+                    current_retrieval_packet.as_ref(),
                     &mut loop_metrics,
                     &cancel,
                     config,
@@ -1963,10 +2375,26 @@ async fn solve_frame(
                 });
                 continue;
             }
+            let mut rejection_message: Option<String> = None;
+            let mut rescue_failure_label = "final_rejection_stall";
             if matches!(
                 classify_final_answer_text(&turn.text, objective),
                 FinalAnswerDisposition::RejectMeta
             ) {
+                rejection_message = Some(
+                    "Your previous response was process/meta commentary rather than a concrete final answer. Rewrite it from the completed work only: do not call tools, do not create or verify files, and return the direct final deliverable as plain text."
+                        .to_string(),
+                );
+                rescue_failure_label = "meta_rejection_stall";
+            } else if current_question_reasoning_packet.is_some() {
+                if let Some(issue) = investigation_deliverable_issue(&turn.text, objective) {
+                    rejection_message = Some(format!(
+                        "Your previous response missed the required investigation deliverable contract ({issue}). Rewrite it from the completed work only with the required report sections or JSON keys, and do not call tools or create new evidence."
+                    ));
+                    rescue_failure_label = "insufficient_synthesis_stall";
+                }
+            }
+            if let Some(rejection_message) = rejection_message {
                 loop_metrics.final_rejections += 1;
                 final_rejection_streak += 1;
                 pending_final_rewrite = true;
@@ -1982,18 +2410,20 @@ async fn solve_frame(
                     false,
                 ));
                 emitter.emit_trace(&format!(
-                    "{step_prefix} rejected meta final answer; requesting rewrite-only plain-text completion"
+                    "{step_prefix} rejected final-answer candidate; requesting rewrite-only plain-text completion"
                 ));
                 messages.push(Message::User {
-                    content: "Your previous response was process/meta commentary rather than a concrete final answer. Rewrite it from the completed work only: do not call tools, do not create or verify files, and return the direct final deliverable as plain text.".to_string(),
+                    content: rejection_message,
                 });
                 if final_rejection_streak >= 2 {
                     if let Some(rescue_turn) = attempt_finalizer_rescue(
                         model.as_ref(),
                         objective,
-                        "meta_rejection_stall",
+                        rescue_failure_label,
                         last_rejected_final_candidate.as_deref(),
                         &step_records,
+                        current_question_reasoning_packet.as_ref(),
+                        current_retrieval_packet.as_ref(),
                         &mut loop_metrics,
                         &cancel,
                         config,
@@ -2229,6 +2659,44 @@ async fn solve_frame(
             loop_metrics: Some(loop_metrics.clone()),
         });
 
+        let has_successful_artifact = turn.tool_calls.iter().zip(tool_observations.iter()).any(
+            |(tool_call, (_, _, _, _, is_error))| is_artifact_tool(&tool_call.name) && !*is_error,
+        );
+        if depth == 0 && has_successful_artifact {
+            if let Some(session_dir) = session_dir_path.as_deref() {
+                maybe_refresh_reasoning_context_if_needed(
+                    config,
+                    session_dir,
+                    objective,
+                    &mut current_question_reasoning_packet,
+                    &mut current_retrieval_packet,
+                    &mut last_reasoning_state_mtime_ns,
+                    &cancel,
+                    emitter,
+                    &mut messages,
+                )
+                .await;
+            }
+        }
+
+        let should_trigger_synthesis_checkpoint = depth == 0
+            && !synthesis_checkpoint_sent
+            && current_question_reasoning_packet.is_some()
+            && (loop_metrics.recon_streak >= 3
+                || step >= std::cmp::max(1, active_step_budget / 2)
+                || (active_step_budget > 1 && step == active_step_budget - 1));
+        if should_trigger_synthesis_checkpoint {
+            synthesis_checkpoint_sent = true;
+            if let Some(packet) = current_question_reasoning_packet.as_ref() {
+                messages.push(Message::User {
+                    content: build_synthesis_checkpoint_message(objective, packet),
+                });
+                emitter.emit_trace(&format!(
+                    "{step_prefix} injected mandatory synthesis checkpoint"
+                ));
+            }
+        }
+
         let remaining = active_step_budget.saturating_sub(step);
         if remaining == active_step_budget / 2 {
             emitter.emit_trace(&format!(
@@ -2267,6 +2735,42 @@ async fn solve_frame(
             } else {
                 loop_metrics.extension_denials_no_progress += 1;
                 loop_metrics.termination_reason = "budget_no_progress".into();
+            }
+            if current_question_reasoning_packet.is_some() {
+                let failure_label = format!("{}_synthesis_rescue", loop_metrics.termination_reason);
+                if let Some(rescue_turn) = attempt_finalizer_rescue(
+                    model.as_ref(),
+                    objective,
+                    &failure_label,
+                    last_rejected_final_candidate.as_deref(),
+                    &step_records,
+                    current_question_reasoning_packet.as_ref(),
+                    current_retrieval_packet.as_ref(),
+                    &mut loop_metrics,
+                    &cancel,
+                    config,
+                    emitter,
+                    &step_prefix,
+                )
+                .await
+                {
+                    return finalize_success_outcome(
+                        rescue_turn.text,
+                        rescue_turn.input_tokens,
+                        rescue_turn.output_tokens,
+                        depth,
+                        step as u32,
+                        &conversation_path,
+                        step_start.elapsed().as_millis() as u64,
+                        &mut loop_metrics,
+                        &mut tools,
+                        &mut pending_curator_deltas,
+                        config,
+                        &cancel,
+                        emitter,
+                    )
+                    .await;
+                }
             }
             return finalize_partial_outcome(
                 objective,
@@ -3439,5 +3943,64 @@ mod tests {
     #[test]
     fn test_document_ocr_is_artifact_tool() {
         assert!(is_artifact_tool("document_ocr"));
+    }
+
+    #[test]
+    fn test_investigation_deliverable_requires_key_judgments() {
+        let issue = investigation_deliverable_issue(
+            "## Supported Findings\n- Evidence only.",
+            "Investigate this candidate",
+        );
+
+        assert_eq!(
+            issue,
+            Some("Markdown deliverable is missing `## Key Judgments`".to_string())
+        );
+    }
+
+    #[test]
+    fn test_investigation_deliverable_requires_strategic_implications_for_tactical_objectives() {
+        let issue = investigation_deliverable_issue(
+            "## Key Judgments\n- Judgment.\n## Supported Findings\n- Support.\n## Contested Findings\n- None.\n## Unresolved Findings\n- None.",
+            "Find weaknesses the opponent can capitalize on",
+        );
+
+        assert_eq!(
+            issue,
+            Some("Markdown deliverable is missing `## Strategic Implications`".to_string())
+        );
+    }
+
+    #[test]
+    fn test_investigation_json_deliverable_accepts_required_keys() {
+        let payload = serde_json::json!({
+            "key_judgments": [{"summary": "Main judgment"}],
+            "strategic_implications": [{"summary": "Use contrast messaging", "confidence": "medium"}],
+            "supported_findings": [],
+            "contested_findings": [],
+            "unresolved_findings": []
+        });
+
+        assert_eq!(
+            investigation_deliverable_issue(
+                &payload.to_string(),
+                "Run opposition research and recommend weaknesses to capitalize on",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_build_synthesis_checkpoint_message_mentions_required_sections() {
+        let packet = serde_json::json!({
+            "unresolved_questions": [{"id": "q_1", "question": "What is the strongest defensible judgment?"}]
+        });
+        let message =
+            build_synthesis_checkpoint_message("Find weakness and recommendations", &packet);
+
+        assert!(message.contains("Mandatory synthesis checkpoint"));
+        assert!(message.contains("## Key Judgments"));
+        assert!(message.contains("## Strategic Implications"));
+        assert!(message.contains("What is the strongest defensible judgment?"));
     }
 }

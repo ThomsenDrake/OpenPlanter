@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,36 @@ from agent.engine import (
     _evaluate_budget_extension,
 )
 from agent.model import Conversation, ModelTurn, RateLimitError, ScriptedModel, ToolResult
+from agent.retrieval import RetrievalBuildResult
 from agent.tools import WorkspaceTools
+
+
+def _investigation_packet() -> dict[str, object]:
+    return {
+        "reasoning_mode": "question_centric",
+        "focus_question_ids": ["q_1"],
+        "unresolved_questions": [{"id": "q_1", "question": "What is the strongest defensible judgment?"}],
+        "findings": {"supported": [], "contested": [], "unresolved": [{"id": "cl_1"}]},
+        "contradictions": [],
+        "evidence_index": {},
+        "candidate_actions": [{"id": "ca_q_q_1", "action_type": "search", "status": "proposed"}],
+    }
+
+
+def _investigation_report(*, strategic: bool = False) -> str:
+    sections = [
+        "## Key Judgments\n- The objective is answered directly with the strongest defensible judgment.",
+    ]
+    if strategic:
+        sections.append(
+            "## Strategic Implications\n- Press this contrast in campaign messaging. Confidence: medium. Linked findings: supported-1."
+        )
+    sections.extend([
+        "## Supported Findings\n- supported-1: Evidence-backed finding.",
+        "## Contested Findings\n- None.",
+        "## Unresolved Findings\n- None.",
+    ])
+    return "\n\n".join(sections)
 
 
 class EngineComplexTests(unittest.TestCase):
@@ -269,6 +299,277 @@ class EngineComplexTests(unittest.TestCase):
             self.assertEqual(engine.last_loop_metrics.get("finalization_stalls"), 0)
             self.assertFalse((root / "blocked-a.txt").exists())
             self.assertFalse((root / "blocked-b.txt").exists())
+
+    def test_investigation_final_requires_key_judgments_before_accepting_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=3)
+            tools = WorkspaceTools(root=root)
+            invalid = (
+                "## Supported Findings\n- supported-1: Evidence-backed finding.\n\n"
+                "## Contested Findings\n- None.\n\n"
+                "## Unresolved Findings\n- None."
+            )
+            clean_final = _investigation_report()
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(text=invalid, stop_reason="end_turn"),
+                    ModelTurn(text=clean_final, stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, _ = engine.solve_with_context(
+                "Investigate the subject",
+                question_reasoning_packet=_investigation_packet(),
+            )
+
+            self.assertEqual(result, clean_final)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 1)
+
+    def test_investigation_rescue_salvages_missing_key_judgments_stall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            invalid = (
+                "## Supported Findings\n- supported-1: Evidence-backed finding.\n\n"
+                "## Contested Findings\n- None.\n\n"
+                "## Unresolved Findings\n- None."
+            )
+            clean_final = _investigation_report()
+
+            class CapturingRescueModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.system_prompts: list[str] = []
+                    self.initial_messages: list[str] = []
+
+                def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
+                    self.system_prompts.append(system_prompt)
+                    self.initial_messages.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingRescueModel(
+                scripted_turns=[
+                    ModelTurn(text=invalid, stop_reason="end_turn"),
+                    ModelTurn(text=invalid, stop_reason="end_turn"),
+                    ModelTurn(text=clean_final, stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, _ = engine.solve_with_context(
+                "Investigate the subject",
+                question_reasoning_packet=_investigation_packet(),
+            )
+
+            self.assertEqual(result, clean_final)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 2)
+            self.assertEqual(model.system_prompts[1], _FINALIZER_RESCUE_SYSTEM_PROMPT)
+            self.assertIn("Failure label: insufficient_synthesis_stall", model.initial_messages[1])
+            self.assertIn("Latest question reasoning packet:", model.initial_messages[1])
+
+    def test_budget_exhaustion_uses_investigation_synthesis_rescue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=1)
+            tools = WorkspaceTools(root=root)
+            clean_final = _investigation_report(strategic=True)
+
+            class CapturingBudgetRescueModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.system_prompts: list[str] = []
+                    self.initial_messages: list[str] = []
+
+                def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
+                    self.system_prompts.append(system_prompt)
+                    self.initial_messages.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingBudgetRescueModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("think", note="inventory evidence only")]),
+                    ModelTurn(text=clean_final, stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, _ = engine.solve_with_context(
+                "Run opposition research and find weaknesses Jasmine can capitalize on",
+                question_reasoning_packet=_investigation_packet(),
+            )
+
+            self.assertEqual(result, clean_final)
+            self.assertEqual(engine.last_loop_metrics.get("termination_reason"), "success")
+            self.assertEqual(model.system_prompts[1], _FINALIZER_RESCUE_SYSTEM_PROMPT)
+            self.assertIn(
+                "Failure label: budget_no_progress_synthesis_rescue",
+                model.initial_messages[1],
+            )
+
+    def test_synthesis_checkpoint_injected_after_recon_streak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for name in ("a.txt", "b.txt", "c.txt"):
+                (root / name).write_text(f"{name}\n", encoding="utf-8")
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=5)
+            tools = WorkspaceTools(root=root)
+
+            class SnapshotModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.snapshots: list[list[object]] = []
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.snapshots.append(conversation.get_messages())
+                    return super().complete(conversation)
+
+            model = SnapshotModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("read_file", path="a.txt")]),
+                    ModelTurn(tool_calls=[_tc("read_file", path="b.txt")]),
+                    ModelTurn(tool_calls=[_tc("read_file", path="c.txt")]),
+                    ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, _ = engine.solve_with_context(
+                "Investigate the subject",
+                question_reasoning_packet=_investigation_packet(),
+            )
+
+            self.assertEqual(result, _investigation_report())
+            checkpoint_messages = [
+                msg.get("content", "")
+                for msg in model.snapshots[-1]
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            ]
+            self.assertTrue(
+                any("Mandatory synthesis checkpoint" in content for content in checkpoint_messages)
+            )
+            self.assertTrue(any("## Key Judgments" in content for content in checkpoint_messages))
+
+    def test_synthesis_checkpoint_injected_before_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=2)
+            tools = WorkspaceTools(root=root)
+
+            class SnapshotModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.snapshots: list[list[object]] = []
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.snapshots.append(conversation.get_messages())
+                    return super().complete(conversation)
+
+            model = SnapshotModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("think", note="inventory evidence")]),
+                    ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, _ = engine.solve_with_context(
+                "Investigate the subject",
+                question_reasoning_packet=_investigation_packet(),
+            )
+
+            self.assertEqual(result, _investigation_report())
+            checkpoint_messages = [
+                msg.get("content", "")
+                for msg in model.snapshots[-1]
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            ]
+            self.assertTrue(
+                any("Mandatory synthesis checkpoint" in content for content in checkpoint_messages)
+            )
+
+    def test_reasoning_refresh_appends_updated_packet_after_state_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            tools = WorkspaceTools(root=root)
+            session_dir = root / ".openplanter" / "sessions" / "session-refresh"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            state_path = session_dir / "investigation_state.json"
+            initial_state = {
+                "questions": {
+                    "q_1": {
+                        "id": "q_1",
+                        "question_text": "Original question",
+                        "status": "open",
+                        "priority": "high",
+                        "claim_ids": [],
+                    }
+                },
+                "claims": {},
+                "evidence": {},
+            }
+            state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+            state_path.touch()
+
+            updated_state = {
+                "questions": {
+                    "q_2": {
+                        "id": "q_2",
+                        "question_text": "Updated question",
+                        "status": "open",
+                        "priority": "high",
+                        "claim_ids": [],
+                    }
+                },
+                "claims": {},
+                "evidence": {},
+            }
+            state_relpath = ".openplanter/sessions/session-refresh/investigation_state.json"
+
+            class SnapshotModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.snapshots: list[list[object]] = []
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.snapshots.append(conversation.get_messages())
+                    return super().complete(conversation)
+
+            model = SnapshotModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("read_file", path=state_relpath)]),
+                    ModelTurn(tool_calls=[_tc("write_file", path=state_relpath, content=json.dumps(updated_state))]),
+                    ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            engine.session_dir = session_dir
+
+            with patch(
+                "agent.engine.build_retrieval_packet",
+                return_value=RetrievalBuildResult(
+                    packet={"hits": []},
+                    provider="disabled",
+                    model="disabled",
+                    status="disabled",
+                    detail="retrieval skipped for test",
+                ),
+            ):
+                result, _ = engine.solve_with_context(
+                    "Investigate the subject",
+                    question_reasoning_packet=_investigation_packet(),
+                )
+
+            self.assertEqual(result, _investigation_report())
+            refresh_messages = [
+                msg.get("content", "")
+                for msg in model.snapshots[-1]
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            ]
+            self.assertTrue(
+                any("reasoning_context_refresh" in content for content in refresh_messages)
+            )
+            self.assertTrue(any('"q_2"' in content for content in refresh_messages))
 
     def test_budget_extension_eval_blocks_finalization_churn(self) -> None:
         evaluation = _evaluate_budget_extension(

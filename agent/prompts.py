@@ -426,11 +426,31 @@ Rules:
 - Do not mark a claim supported without support evidence IDs.
 - Do not resolve a question without explicit claim/evidence linkage.
 - Prefer provenance-backed evidence over uncited notes.
+- Treat raw "connections" as incomplete until you translate them into a direct
+  objective-facing judgment or explicitly state that the evidence is still insufficient.
 
-Final deliverables MUST separate findings into three sections:
+Conclusion-driven investigation deliverables MUST start by answering the objective
+directly, not just inventorying facts.
+
+Markdown deliverables for investigations MUST include these sections in order:
+- Key Judgments
 - Supported Findings
 - Contested Findings
 - Unresolved Findings
+
+If the objective asks for tactics or leverage using cues such as weakness,
+capitalize, opposition, vulnerability, pressure point, risk, contrast,
+recommendation, or line of attack, also include:
+- Strategic Implications
+
+JSON deliverables for investigations MUST include:
+- key_judgments
+- supported_findings
+- contested_findings
+- unresolved_findings
+
+If the objective is tactic-oriented, JSON deliverables must also include:
+- strategic_implications
 
 Each item should cite the relevant evidence/provenance IDs.
 """

@@ -17,6 +17,22 @@ from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel, Tool
 from agent.tools import WorkspaceTools
 
 
+def _investigation_report(*, strategic: bool = False) -> str:
+    sections = [
+        "## Key Judgments\n- The strongest supported judgment is stated directly.",
+    ]
+    if strategic:
+        sections.append(
+            "## Strategic Implications\n- Contrast this weakness in voter messaging. Confidence: medium. Linked findings: supported-1."
+        )
+    sections.extend([
+        "## Supported Findings\n- supported-1: Evidence-backed finding.",
+        "## Contested Findings\n- None.",
+        "## Unresolved Findings\n- None.",
+    ])
+    return "\n\n".join(sections)
+
+
 class EngineTests(unittest.TestCase):
     def test_dynamic_tool_defs_are_merged_for_main_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -433,7 +449,10 @@ class REPLPromptTests(unittest.TestCase):
         prompt = _build_system_prompt(recursive=False)
         self.assertIn("QUESTION-CENTRIC REASONING", prompt)
         self.assertIn("supported / contested / unresolved", prompt)
+        self.assertIn("Key Judgments", prompt)
+        self.assertIn("Strategic Implications", prompt)
         self.assertIn("Supported Findings", prompt)
+        self.assertIn("key_judgments", prompt)
         self.assertIn("candidate_actions", prompt)
         self.assertIn("machine-readable, read-only", prompt)
         self.assertIn("retrieval_packet.hits.ontology_objects", prompt)
@@ -515,7 +534,7 @@ class REPLPromptTests(unittest.TestCase):
                     return super().create_conversation(system_prompt, initial_user_message)
 
             model = CapturingModel(scripted_turns=[
-                ModelTurn(text="done", stop_reason="end_turn"),
+                ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
             ])
             engine = RLMEngine(model=model, tools=tools, config=cfg)
             packet = {

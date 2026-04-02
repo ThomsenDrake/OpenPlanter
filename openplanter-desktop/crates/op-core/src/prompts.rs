@@ -283,11 +283,31 @@ Rules:
 - Keep any use of `candidate_actions` structured: preserve rationale,
   required_sources, expected_payoff, evidence_gap_refs, and ontology_object_refs
   instead of turning them into prose recommendations.
+- Treat raw "connections" as incomplete until you translate them into a direct
+  objective-facing judgment or explicitly state that the evidence is still insufficient.
 
-Final deliverables MUST separate findings into three sections:
+Conclusion-driven investigation deliverables MUST start by answering the objective
+directly, not just inventorying facts.
+
+Markdown deliverables for investigations MUST include these sections in order:
+- Key Judgments
 - Supported Findings
 - Contested Findings
 - Unresolved Findings
+
+If the objective asks for tactics or leverage using cues such as weakness,
+capitalize, opposition, vulnerability, pressure point, risk, contrast,
+recommendation, or line of attack, also include:
+- Strategic Implications
+
+JSON deliverables for investigations MUST include:
+- key_judgments
+- supported_findings
+- contested_findings
+- unresolved_findings
+
+If the objective is tactic-oriented, JSON deliverables must also include:
+- strategic_implications
 
 Each item should cite the relevant evidence/provenance IDs."#;
 
@@ -495,6 +515,9 @@ mod tests {
         assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
         assert!(prompt.contains("candidate_actions"));
         assert!(prompt.contains("retrieval_packet.hits.ontology_objects"));
+        assert!(prompt.contains("Key Judgments"));
+        assert!(prompt.contains("Strategic Implications"));
+        assert!(prompt.contains("key_judgments"));
         assert!(prompt.contains("DATA SOURCES WIKI"));
         assert!(prompt.contains("High-volume tool outputs are ephemeral"));
         assert!(!prompt.contains("REPL STRUCTURE"));
