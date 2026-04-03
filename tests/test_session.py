@@ -13,6 +13,19 @@ from agent.runtime import SessionRuntime, SessionStore, _has_reasoning_content
 from agent.tools import WorkspaceTools
 
 
+def _investigation_report() -> str:
+    return (
+        "## Key Judgments\n"
+        "- The main judgment is explicit.\n\n"
+        "## Supported Findings\n"
+        "- supported-1: Evidence-backed finding.\n\n"
+        "## Contested Findings\n"
+        "- None.\n\n"
+        "## Unresolved Findings\n"
+        "- None."
+    )
+
+
 class SessionRuntimeTests(unittest.TestCase):
     def test_session_persist_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -79,7 +92,9 @@ class SessionRuntimeTests(unittest.TestCase):
                     captured.append(initial_user_message)
                     return super().create_conversation(system_prompt, initial_user_message)
 
-            model = CapturingModel(scripted_turns=[ModelTurn(text="ok", stop_reason="end_turn")])
+            model = CapturingModel(
+                scripted_turns=[ModelTurn(text=_investigation_report(), stop_reason="end_turn")]
+            )
             engine = RLMEngine(model=model, tools=WorkspaceTools(root=root), config=cfg)
             runtime = SessionRuntime.bootstrap(
                 engine=engine,
@@ -120,7 +135,7 @@ class SessionRuntimeTests(unittest.TestCase):
 
             result = runtime.solve("continue")
 
-            self.assertEqual(result, "ok")
+            self.assertEqual(result, _investigation_report())
             self.assertEqual(len(captured), 1)
             parsed = json.loads(captured[0])
             packet = parsed["question_reasoning_packet"]
