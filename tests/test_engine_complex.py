@@ -571,6 +571,69 @@ class EngineComplexTests(unittest.TestCase):
             )
             self.assertTrue(any('"q_2"' in content for content in refresh_messages))
 
+    def test_non_investigation_objective_does_not_refresh_reasoning_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=3)
+            tools = WorkspaceTools(root=root)
+            session_dir = root / ".openplanter" / "sessions" / "session-non-investigation-refresh"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            state_path = session_dir / "investigation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "questions": {
+                            "q_1": {
+                                "id": "q_1",
+                                "question_text": "Original investigation question",
+                                "status": "open",
+                                "priority": "high",
+                                "claim_ids": [],
+                            }
+                        },
+                        "claims": {},
+                        "evidence": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.touch()
+
+            class SnapshotModel(ScriptedModel):
+                def __init__(self, scripted_turns: list[ModelTurn]) -> None:
+                    super().__init__(scripted_turns=scripted_turns)
+                    self.snapshots: list[list[object]] = []
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.snapshots.append(conversation.get_messages())
+                    return super().complete(conversation)
+
+            model = SnapshotModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("write_file", path="notes.txt", content="updated parser notes")]),
+                    ModelTurn(text="Parser bug fixed.", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            engine.session_dir = session_dir
+
+            with patch("agent.engine.build_retrieval_packet") as mocked_retrieval:
+                result, _ = engine.solve_with_context(
+                    "Fix the parser bug",
+                    question_reasoning_packet=_investigation_packet(),
+                )
+
+            self.assertEqual(result, "Parser bug fixed.")
+            mocked_retrieval.assert_not_called()
+            latest_user_messages = [
+                msg.get("content", "")
+                for msg in model.snapshots[-1]
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            ]
+            self.assertFalse(
+                any("reasoning_context_refresh" in content for content in latest_user_messages)
+            )
+
     def test_reasoning_refresh_ignores_oserror_when_state_read_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

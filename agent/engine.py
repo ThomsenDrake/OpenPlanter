@@ -2028,6 +2028,7 @@ class RLMEngine:
             )
             if (
                 depth == 0
+                and investigation_context_active
                 and has_successful_artifact
             ):
                 (
