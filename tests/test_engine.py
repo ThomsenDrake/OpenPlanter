@@ -11,7 +11,7 @@ from unittest.mock import patch
 from conftest import _tc
 from agent.chrome_mcp import ChromeMcpCallResult
 from agent.config import AgentConfig
-from agent.engine import RLMEngine
+from agent.engine import RLMEngine, TurnSummary
 from agent.prompts import build_system_prompt as _build_system_prompt
 from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel, ToolResult
 from agent.tools import WorkspaceTools
@@ -520,7 +520,7 @@ class REPLPromptTests(unittest.TestCase):
             parsed = json.loads(captured[0])
             self.assertNotIn("repl_hint", parsed)
 
-    def test_initial_message_includes_question_reasoning_packet(self) -> None:
+    def test_initial_message_includes_question_reasoning_packet_for_investigation_objective(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=3, recursive=False)
@@ -554,7 +554,93 @@ class REPLPromptTests(unittest.TestCase):
                 ],
             }
 
-            engine.solve_with_context("test objective", question_reasoning_packet=packet)
+            engine.solve_with_context("Investigate the subject", question_reasoning_packet=packet)
+
+            self.assertEqual(len(captured), 1)
+            parsed = json.loads(captured[0])
+            self.assertEqual(parsed["question_reasoning_packet"], packet)
+
+    def test_initial_message_omits_stale_reasoning_packet_for_non_investigation_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=3, recursive=False)
+            tools = WorkspaceTools(root=root)
+
+            captured: list[str] = []
+
+            class CapturingModel(ScriptedModel):
+                def create_conversation(self, system_prompt: str, initial_user_message: str):
+                    captured.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingModel(scripted_turns=[
+                ModelTurn(text="Updated the parser and added regression coverage.", stop_reason="end_turn"),
+            ])
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            packet = {
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "unresolved_questions": [{"id": "q_1", "question": "Open question"}],
+                "findings": {"supported": [], "contested": [], "unresolved": []},
+                "contradictions": [],
+                "evidence_index": {},
+                "candidate_actions": [{"id": "ca_q_q_1", "action_type": "search", "status": "proposed"}],
+            }
+
+            result, _ = engine.solve_with_context("Fix the parser bug", question_reasoning_packet=packet)
+
+            self.assertEqual(result, "Updated the parser and added regression coverage.")
+            self.assertEqual(len(captured), 1)
+            parsed = json.loads(captured[0])
+            self.assertNotIn("question_reasoning_packet", parsed)
+            self.assertEqual(engine.last_loop_metrics.get("final_rejections"), 0)
+
+    def test_follow_up_objective_inherits_investigation_scope_from_last_explicit_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=3, recursive=False)
+            tools = WorkspaceTools(root=root)
+
+            captured: list[str] = []
+
+            class CapturingModel(ScriptedModel):
+                def create_conversation(self, system_prompt: str, initial_user_message: str):
+                    captured.append(initial_user_message)
+                    return super().create_conversation(system_prompt, initial_user_message)
+
+            model = CapturingModel(scripted_turns=[
+                ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
+            ])
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            packet = {
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "unresolved_questions": [{"id": "q_1", "question": "Open question"}],
+                "findings": {"supported": [], "contested": [], "unresolved": []},
+                "contradictions": [],
+                "evidence_index": {},
+                "candidate_actions": [{"id": "ca_q_q_1", "action_type": "search", "status": "proposed"}],
+            }
+            turn_history = [
+                TurnSummary(
+                    turn_number=1,
+                    objective="Investigate the subject",
+                    result_preview="Initial findings",
+                    timestamp="2026-04-02T00:00:00Z",
+                ),
+                TurnSummary(
+                    turn_number=2,
+                    objective="continue",
+                    result_preview="More investigation work",
+                    timestamp="2026-04-02T00:05:00Z",
+                ),
+            ]
+
+            engine.solve_with_context(
+                "continue",
+                turn_history=turn_history,
+                question_reasoning_packet=packet,
+            )
 
             self.assertEqual(len(captured), 1)
             parsed = json.loads(captured[0])

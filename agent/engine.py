@@ -63,6 +63,14 @@ _INVESTIGATION_STRATEGY_CUE_PATTERN = re.compile(
     r"\b(weakness|capitalize|opposition|vulnerability|pressure point|risk|contrast|recommendation|line of attack)\b",
     re.I,
 )
+_INVESTIGATION_OBJECTIVE_PATTERN = re.compile(
+    r"\b(investigat(?:e|ion|ive)|research|opposition(?: research)?|oppo|dossier|findings?|evidence|background|profile|due diligence|vet(?:ting)?)\b",
+    re.I,
+)
+_FOLLOW_UP_OBJECTIVE_PATTERN = re.compile(
+    r"^\s*(continue|resume|finish|keep going|go on|wrap up|complete)\b",
+    re.I,
+)
 _MULTI_PHASE_PATTERNS = (
     re.compile(r"\b(and then|after|before|first|then|finally)\b", re.I),
     re.compile(r"\b(compare|cross-reference|cross reference|end-to-end|end to end)\b", re.I),
@@ -160,6 +168,38 @@ def _has_reasoning_packet_content(packet: dict[str, Any] | None) -> bool:
 
 def _objective_requires_strategic_implications(objective: str) -> bool:
     return bool(_INVESTIGATION_STRATEGY_CUE_PATTERN.search(objective))
+
+
+def _most_recent_explicit_objective(
+    turn_history: list[TurnSummary] | None,
+    current_objective: str,
+) -> str | None:
+    current = current_objective.strip()
+    if not turn_history:
+        return None
+    for summary in reversed(turn_history):
+        objective = summary.objective.strip()
+        if not objective or objective == current:
+            continue
+        if _FOLLOW_UP_OBJECTIVE_PATTERN.match(objective):
+            continue
+        return objective
+    return None
+
+
+def _objective_is_investigation_scoped(
+    objective: str,
+    previous_objective: str | None = None,
+) -> bool:
+    if _objective_requires_strategic_implications(objective):
+        return True
+    if _INVESTIGATION_OBJECTIVE_PATTERN.search(objective):
+        return True
+    if _FOLLOW_UP_OBJECTIVE_PATTERN.match(objective):
+        if previous_objective and previous_objective.strip() != objective.strip():
+            return _objective_is_investigation_scoped(previous_objective)
+        return False
+    return False
 
 
 def _find_markdown_section(text: str, heading: str) -> re.Match[str] | None:
@@ -1112,30 +1152,37 @@ class RLMEngine:
         previews: list[str],
         question_reasoning_packet: dict[str, Any] | None,
         retrieval_packet: dict[str, Any] | None,
+        investigation_context_active: bool,
     ) -> str:
         completed_work = (
             "\n".join(f"- {item}" for item in previews)
             if previews
             else "- (no completed-work notes recorded)"
         )
-        if _objective_requires_strategic_implications(objective):
-            deliverable_contract = (
-                "Return an investigation deliverable with these Markdown sections in order:\n"
-                "- ## Key Judgments\n"
-                "- ## Strategic Implications\n"
-                "- ## Supported Findings\n"
-                "- ## Contested Findings\n"
-                "- ## Unresolved Findings\n"
-                "If you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
-            )
+        if investigation_context_active and _has_reasoning_packet_content(question_reasoning_packet):
+            if _objective_requires_strategic_implications(objective):
+                deliverable_contract = (
+                    "Return an investigation deliverable with these Markdown sections in order:\n"
+                    "- ## Key Judgments\n"
+                    "- ## Strategic Implications\n"
+                    "- ## Supported Findings\n"
+                    "- ## Contested Findings\n"
+                    "- ## Unresolved Findings\n"
+                    "If you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+                )
+            else:
+                deliverable_contract = (
+                    "Return an investigation deliverable with these Markdown sections in order:\n"
+                    "- ## Key Judgments\n"
+                    "- ## Supported Findings\n"
+                    "- ## Contested Findings\n"
+                    "- ## Unresolved Findings\n"
+                    "If you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+                )
         else:
             deliverable_contract = (
-                "Return an investigation deliverable with these Markdown sections in order:\n"
-                "- ## Key Judgments\n"
-                "- ## Supported Findings\n"
-                "- ## Contested Findings\n"
-                "- ## Unresolved Findings\n"
-                "If you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+                "Return the direct final deliverable that best satisfies the objective. "
+                "Do not add investigation-only report sections unless the objective explicitly calls for them."
             )
         return (
             f"Objective:\n{objective}\n\n"
@@ -1168,6 +1215,7 @@ class RLMEngine:
         deadline: float = 0,
         question_reasoning_packet: dict[str, Any] | None = None,
         retrieval_packet: dict[str, Any] | None = None,
+        investigation_context_active: bool = False,
     ) -> str | None:
         if self._cancel.is_set():
             self._emit("[finalizer-rescue] skipped: solve already cancelled", on_event)
@@ -1184,6 +1232,7 @@ class RLMEngine:
             previews,
             question_reasoning_packet,
             retrieval_packet,
+            investigation_context_active,
         )
         self._emit(f"[finalizer-rescue] starting separate-context finalizer rescue ({failure_label})", on_event)
 
@@ -1214,7 +1263,7 @@ class RLMEngine:
         if self._classify_final_answer_text(rescue_text, objective) == "reject_meta":
             self._emit("[finalizer-rescue] rejected: rescue output still looked meta", on_event)
             return None
-        if _has_reasoning_packet_content(question_reasoning_packet):
+        if investigation_context_active and _has_reasoning_packet_content(question_reasoning_packet):
             issue = self._investigation_deliverable_issue(rescue_text, objective)
             if issue is not None:
                 self._emit(
@@ -1283,6 +1332,12 @@ class RLMEngine:
         model = model_override or self.model
 
         self._emit(f"[depth {depth}] objective: {objective}", on_event)
+        previous_objective = _most_recent_explicit_objective(turn_history, objective)
+        investigation_context_active = (
+            depth == 0
+            and _has_reasoning_packet_content(question_reasoning_packet)
+            and _objective_is_investigation_scoped(objective, previous_objective)
+        )
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if depth == 0 and not self.config.recursive:
@@ -1321,20 +1376,22 @@ class RLMEngine:
                 f"{len(turn_history)} prior turn(s). "
                 f"Read replay.jsonl/events.jsonl in session_dir for full details."
             )
-        if depth == 0 and question_reasoning_packet is not None:
+        if depth == 0 and investigation_context_active and question_reasoning_packet is not None:
             initial_msg_dict["question_reasoning_packet"] = question_reasoning_packet
-        if depth == 0 and retrieval_packet is not None:
+        if depth == 0 and investigation_context_active and retrieval_packet is not None:
             initial_msg_dict["retrieval_packet"] = retrieval_packet
         initial_message = json.dumps(initial_msg_dict, ensure_ascii=True)
 
         conversation = model.create_conversation(self.system_prompt, initial_message)
         current_question_reasoning_packet = (
-            question_reasoning_packet if _has_reasoning_packet_content(question_reasoning_packet) else None
+            question_reasoning_packet if investigation_context_active else None
         )
-        current_retrieval_packet = retrieval_packet if isinstance(retrieval_packet, dict) else None
+        current_retrieval_packet = (
+            retrieval_packet if investigation_context_active and isinstance(retrieval_packet, dict) else None
+        )
         investigation_state_path = (
             self.session_dir / "investigation_state.json"
-            if depth == 0 and self.session_dir is not None
+            if depth == 0 and investigation_context_active and self.session_dir is not None
             else None
         )
         last_reasoning_state_mtime_ns: int | None = None
@@ -1550,7 +1607,7 @@ class RLMEngine:
                         "Provide a concrete completion summary instead of describing what you will do next."
                     )
                     rescue_failure_label = "meta_rejection_stall"
-                elif depth == 0 and _has_reasoning_packet_content(current_question_reasoning_packet):
+                elif investigation_context_active and _has_reasoning_packet_content(current_question_reasoning_packet):
                     investigation_issue = self._investigation_deliverable_issue(turn.text, objective)
                     if investigation_issue is not None:
                         rejection_message = (
@@ -1595,6 +1652,7 @@ class RLMEngine:
                                 deadline=deadline,
                                 question_reasoning_packet=current_question_reasoning_packet,
                                 retrieval_packet=current_retrieval_packet,
+                                investigation_context_active=investigation_context_active,
                             )
                             if rescue_text is not None:
                                 pending_final_rewrite = False
@@ -1701,6 +1759,7 @@ class RLMEngine:
                             deadline=deadline,
                             question_reasoning_packet=current_question_reasoning_packet,
                             retrieval_packet=current_retrieval_packet,
+                            investigation_context_active=investigation_context_active,
                         )
                         if rescue_text is not None:
                             pending_final_rewrite = False
@@ -1988,6 +2047,7 @@ class RLMEngine:
             should_trigger_synthesis_checkpoint = (
                 depth == 0
                 and not synthesis_checkpoint_sent
+                and investigation_context_active
                 and _has_reasoning_packet_content(current_question_reasoning_packet)
                 and (
                     int(loop_metrics.get("recon_streak", 0)) >= 3
@@ -2054,7 +2114,7 @@ class RLMEngine:
                         loop_metrics.get("extension_denials_no_progress", 0)
                     ) + 1
                     loop_metrics["termination_reason"] = "budget_no_progress"
-                if depth == 0 and _has_reasoning_packet_content(current_question_reasoning_packet):
+                if investigation_context_active and _has_reasoning_packet_content(current_question_reasoning_packet):
                     rescue_text = self._attempt_finalizer_rescue(
                         model=model,
                         objective=objective,
@@ -2066,6 +2126,7 @@ class RLMEngine:
                         deadline=deadline,
                         question_reasoning_packet=current_question_reasoning_packet,
                         retrieval_packet=current_retrieval_packet,
+                        investigation_context_active=investigation_context_active,
                     )
                     if rescue_text is not None:
                         pending_final_rewrite = False

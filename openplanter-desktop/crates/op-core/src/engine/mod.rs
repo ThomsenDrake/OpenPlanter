@@ -641,6 +641,15 @@ static INVESTIGATION_STRATEGY_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static INVESTIGATION_OBJECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(investigat(?:e|ion|ive)|research|opposition(?: research)?|oppo|dossier|findings?|evidence|background|profile|due diligence|vet(?:ting)?)\b",
+    )
+    .unwrap()
+});
+static FOLLOW_UP_OBJECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(continue|resume|finish|keep going|go on|wrap up|complete)\b").unwrap()
+});
 const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
     "key_judgments",
     "supported_findings",
@@ -650,6 +659,67 @@ const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
 
 fn objective_requires_strategic_implications(objective: &str) -> bool {
     INVESTIGATION_STRATEGY_CUE_RE.is_match(objective)
+}
+
+fn most_recent_explicit_objective<'a>(
+    turn_history: Option<&'a [TurnSummary]>,
+    current_objective: &str,
+) -> Option<&'a str> {
+    let current = current_objective.trim();
+    turn_history.and_then(|history| {
+        history.iter().rev().find_map(|summary| {
+            let objective = summary.objective.trim();
+            if objective.is_empty()
+                || objective == current
+                || FOLLOW_UP_OBJECTIVE_RE.is_match(objective)
+            {
+                return None;
+            }
+            Some(objective)
+        })
+    })
+}
+
+fn objective_is_investigation_scoped(objective: &str, previous_objective: Option<&str>) -> bool {
+    if objective_requires_strategic_implications(objective) {
+        return true;
+    }
+    if INVESTIGATION_OBJECTIVE_RE.is_match(objective) {
+        return true;
+    }
+    if FOLLOW_UP_OBJECTIVE_RE.is_match(objective) {
+        if let Some(previous) = previous_objective {
+            if previous.trim() != objective.trim() {
+                return objective_is_investigation_scoped(previous, None);
+            }
+        }
+        return false;
+    }
+    false
+}
+
+fn sanitize_investigation_context_for_turn(
+    depth: u32,
+    objective: &str,
+    initial_context: Option<&SolveInitialContext>,
+) -> (bool, Option<SolveInitialContext>) {
+    let previous_objective = initial_context
+        .and_then(|ctx| most_recent_explicit_objective(ctx.turn_history.as_deref(), objective));
+    let investigation_context_active = depth == 0
+        && initial_context
+            .and_then(|ctx| ctx.question_reasoning_packet.as_ref())
+            .is_some_and(has_reasoning_content)
+        && objective_is_investigation_scoped(objective, previous_objective);
+
+    let mut effective_initial_context = initial_context.cloned();
+    if !investigation_context_active {
+        if let Some(context) = effective_initial_context.as_mut() {
+            context.question_reasoning_packet = None;
+            context.retrieval_packet = None;
+        }
+    }
+
+    (investigation_context_active, effective_initial_context)
 }
 
 fn investigation_required_markdown_sections(objective: &str) -> Vec<&'static str> {
@@ -1568,6 +1638,7 @@ fn build_finalizer_rescue_user_message(
     previews: &[String],
     question_reasoning_packet: Option<&Value>,
     retrieval_packet: Option<&Value>,
+    investigation_context_active: bool,
 ) -> String {
     let completed_work = if previews.is_empty() {
         "- (no completed-work notes recorded)".to_string()
@@ -1578,10 +1649,16 @@ fn build_finalizer_rescue_user_message(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let deliverable_contract = if objective_requires_strategic_implications(objective) {
-        "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Strategic Implications\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+    let deliverable_contract = if investigation_context_active
+        && question_reasoning_packet.is_some()
+    {
+        if objective_requires_strategic_implications(objective) {
+            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Strategic Implications\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+        } else {
+            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+        }
     } else {
-        "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+        "Return the direct final deliverable that best satisfies the objective. Do not add investigation-only report sections unless the objective explicitly calls for them."
     };
 
     format!(
@@ -1704,6 +1781,7 @@ async fn attempt_finalizer_rescue(
     step_records: &[StepProgressRecord],
     question_reasoning_packet: Option<&Value>,
     retrieval_packet: Option<&Value>,
+    investigation_context_active: bool,
     loop_metrics: &mut LoopMetrics,
     cancel: &CancellationToken,
     config: &AgentConfig,
@@ -1730,6 +1808,7 @@ async fn attempt_finalizer_rescue(
                 &previews,
                 question_reasoning_packet,
                 retrieval_packet,
+                investigation_context_active,
             ),
         },
     ];
@@ -1783,7 +1862,7 @@ async fn attempt_finalizer_rescue(
         ));
         return None;
     }
-    if question_reasoning_packet.is_some() {
+    if investigation_context_active && question_reasoning_packet.is_some() {
         if let Some(issue) = investigation_deliverable_issue(&turn.text, objective) {
             emitter.emit_trace(&format!(
                 "{trace_prefix} finalizer rescue rejected: rescue output still missed the investigation deliverable contract ({issue})"
@@ -2098,6 +2177,8 @@ async fn solve_frame(
         "[d{depth}/{conversation_path}] solving with {}/{}",
         provider, current_model_name
     ));
+    let (investigation_context_active, effective_initial_context) =
+        sanitize_investigation_context_for_turn(depth, objective, initial_context);
 
     let dynamic_tool_defs = if let Some(manager) = chrome_mcp.as_ref() {
         match manager.list_tools(false).await {
@@ -2123,7 +2204,7 @@ async fn solve_frame(
     let initial_user_message = match build_initial_user_message(
         objective,
         config,
-        initial_context,
+        effective_initial_context.as_ref(),
         depth,
         &conversation_path,
         required_depth,
@@ -2146,12 +2227,24 @@ async fn solve_frame(
             content: initial_user_message,
         },
     ];
-    let mut current_question_reasoning_packet = initial_context
-        .and_then(|ctx| ctx.question_reasoning_packet.clone())
-        .filter(has_reasoning_content);
-    let mut current_retrieval_packet = initial_context.and_then(|ctx| ctx.retrieval_packet.clone());
-    let session_dir_path = if depth == 0 {
-        initial_context
+    let mut current_question_reasoning_packet = if investigation_context_active {
+        effective_initial_context
+            .as_ref()
+            .and_then(|ctx| ctx.question_reasoning_packet.clone())
+            .filter(has_reasoning_content)
+    } else {
+        None
+    };
+    let mut current_retrieval_packet = if investigation_context_active {
+        effective_initial_context
+            .as_ref()
+            .and_then(|ctx| ctx.retrieval_packet.clone())
+    } else {
+        None
+    };
+    let session_dir_path = if depth == 0 && investigation_context_active {
+        effective_initial_context
+            .as_ref()
             .and_then(|ctx| ctx.session_dir.as_ref())
             .map(PathBuf::from)
     } else {
@@ -2343,6 +2436,7 @@ async fn solve_frame(
                     &step_records,
                     current_question_reasoning_packet.as_ref(),
                     current_retrieval_packet.as_ref(),
+                    investigation_context_active,
                     &mut loop_metrics,
                     &cancel,
                     config,
@@ -2408,7 +2502,7 @@ async fn solve_frame(
                         .to_string(),
                 );
                 rescue_failure_label = "meta_rejection_stall";
-            } else if current_question_reasoning_packet.is_some() {
+            } else if investigation_context_active && current_question_reasoning_packet.is_some() {
                 if let Some(issue) = investigation_deliverable_issue(&turn.text, objective) {
                     rejection_message = Some(format!(
                         "Your previous response missed the required investigation deliverable contract ({issue}). Rewrite it from the completed work only with the required report sections or JSON keys, and do not call tools or create new evidence."
@@ -2446,6 +2540,7 @@ async fn solve_frame(
                         &step_records,
                         current_question_reasoning_packet.as_ref(),
                         current_retrieval_packet.as_ref(),
+                        investigation_context_active,
                         &mut loop_metrics,
                         &cancel,
                         config,
@@ -2703,6 +2798,7 @@ async fn solve_frame(
 
         let should_trigger_synthesis_checkpoint = depth == 0
             && !synthesis_checkpoint_sent
+            && investigation_context_active
             && current_question_reasoning_packet.is_some()
             && (loop_metrics.recon_streak >= 3
                 || step >= std::cmp::max(1, active_step_budget / 2)
@@ -2758,7 +2854,7 @@ async fn solve_frame(
                 loop_metrics.extension_denials_no_progress += 1;
                 loop_metrics.termination_reason = "budget_no_progress".into();
             }
-            if current_question_reasoning_packet.is_some() {
+            if investigation_context_active && current_question_reasoning_packet.is_some() {
                 let failure_label = format!("{}_synthesis_rescue", loop_metrics.termination_reason);
                 if let Some(rescue_turn) = attempt_finalizer_rescue(
                     model.as_ref(),
@@ -2768,6 +2864,7 @@ async fn solve_frame(
                     &step_records,
                     current_question_reasoning_packet.as_ref(),
                     current_retrieval_packet.as_ref(),
+                    investigation_context_active,
                     &mut loop_metrics,
                     &cancel,
                     config,
@@ -3424,6 +3521,115 @@ mod tests {
         assert_eq!(parsed["objective"], "just objective");
         assert_eq!(parsed["depth"], 0);
         assert_eq!(parsed["conversation_path"], "0");
+    }
+
+    #[test]
+    fn test_objective_is_investigation_scoped_follow_up_requires_explicit_history() {
+        assert!(!objective_is_investigation_scoped("continue", None));
+        assert!(objective_is_investigation_scoped(
+            "continue",
+            Some("Investigate the subject")
+        ));
+    }
+
+    #[test]
+    fn test_sanitize_investigation_context_drops_stale_packets_for_non_investigation_objective() {
+        let initial_context = SolveInitialContext {
+            session_id: Some("session-1".to_string()),
+            session_dir: Some("/tmp/session-1".to_string()),
+            turn_history: Some(vec![TurnSummary {
+                turn_number: 1,
+                objective: "Investigate the subject".into(),
+                result_preview: "Initial findings".into(),
+                timestamp: "2026-04-02T00:00:00Z".into(),
+                steps_used: 2,
+                replay_seq_start: 1,
+            }]),
+            continuity_mode: None,
+            continuity_reason: None,
+            question_reasoning_packet: Some(serde_json::json!({
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "candidate_actions": [{
+                    "id": "ca_q_q_1",
+                    "action_type": "search",
+                    "status": "proposed",
+                }],
+                "findings": {
+                    "supported": [],
+                    "contested": [],
+                    "unresolved": [],
+                },
+                "contradictions": [],
+                "evidence_index": {},
+            })),
+            retrieval_packet: Some(serde_json::json!({"hits": []})),
+        };
+
+        let (active, effective) = sanitize_investigation_context_for_turn(
+            0,
+            "Fix the parser bug",
+            Some(&initial_context),
+        );
+
+        assert!(!active);
+        let effective = effective.expect("effective context");
+        assert!(effective.question_reasoning_packet.is_none());
+        assert!(effective.retrieval_packet.is_none());
+        assert_eq!(effective.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn test_sanitize_investigation_context_keeps_packets_for_follow_up_after_investigation() {
+        let initial_context = SolveInitialContext {
+            session_id: Some("session-1".to_string()),
+            session_dir: Some("/tmp/session-1".to_string()),
+            turn_history: Some(vec![
+                TurnSummary {
+                    turn_number: 1,
+                    objective: "Investigate the subject".into(),
+                    result_preview: "Initial findings".into(),
+                    timestamp: "2026-04-02T00:00:00Z".into(),
+                    steps_used: 2,
+                    replay_seq_start: 1,
+                },
+                TurnSummary {
+                    turn_number: 2,
+                    objective: "continue".into(),
+                    result_preview: "More investigation work".into(),
+                    timestamp: "2026-04-02T00:05:00Z".into(),
+                    steps_used: 1,
+                    replay_seq_start: 3,
+                },
+            ]),
+            continuity_mode: Some("continue".to_string()),
+            continuity_reason: Some("follow_up_cue".to_string()),
+            question_reasoning_packet: Some(serde_json::json!({
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "candidate_actions": [{
+                    "id": "ca_q_q_1",
+                    "action_type": "search",
+                    "status": "proposed",
+                }],
+                "findings": {
+                    "supported": [],
+                    "contested": [],
+                    "unresolved": [],
+                },
+                "contradictions": [],
+                "evidence_index": {},
+            })),
+            retrieval_packet: Some(serde_json::json!({"hits": []})),
+        };
+
+        let (active, effective) =
+            sanitize_investigation_context_for_turn(0, "continue", Some(&initial_context));
+
+        assert!(active);
+        let effective = effective.expect("effective context");
+        assert!(effective.question_reasoning_packet.is_some());
+        assert!(effective.retrieval_packet.is_some());
     }
 
     #[test]
