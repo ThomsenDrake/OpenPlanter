@@ -444,6 +444,8 @@ class WorkspaceTools:
                 for fn in filenames:
                     full = Path(dirpath) / fn
                     rel = full.relative_to(self.root).as_posix()
+                    if glob and not fnmatch.fnmatch(rel, glob):
+                        continue
                     all_paths.append(rel)
             lines = sorted(all_paths)
 
@@ -493,13 +495,15 @@ class WorkspaceTools:
                 break
             for fn in filenames:
                 full = Path(dirpath) / fn
+                rel = full.relative_to(self.root).as_posix()
+                if glob and not fnmatch.fnmatch(rel, glob):
+                    continue
                 try:
                     text = full.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 for idx, line in enumerate(text.splitlines(), start=1):
                     if lower_query in line.lower():
-                        rel = full.relative_to(self.root).as_posix()
                         matches.append(f"{rel}:{idx}:{line}")
                         if len(matches) >= self.max_search_hits:
                             return "\n".join(matches) + "\n...[match limit reached]..."
