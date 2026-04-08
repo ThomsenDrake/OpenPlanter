@@ -47,12 +47,12 @@ class TestFecFetch(unittest.TestCase):
             return func(*args, **kwargs)
         except TimeoutError as e:
             self.skipTest(f"FEC API timed out: {e}")
-        except urllib.error.URLError as e:
-            self.skipTest(f"FEC API unavailable: {e}")
         except urllib.error.HTTPError as e:
             if e.code in {403, 429, 500, 502, 503, 504}:
                 self.skipTest(f"FEC API unavailable or rate-limited: HTTP {e.code}")
             raise
+        except urllib.error.URLError as e:
+            self.skipTest(f"FEC API unavailable: {e}")
 
     @skipIf(not NETWORK_AVAILABLE, "Network or FEC API unavailable")
     def test_get_candidates_basic(self):
