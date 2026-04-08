@@ -40,6 +40,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: openplanter-desktop/frontend/package-lock.json
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -66,12 +68,20 @@ jobs:
         working-directory: openplanter-desktop
         run: cargo tauri build --target ${{ matrix.target }}
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find openplanter-desktop/target/${{ matrix.target }}/release/bundle \
+            -type f \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.msi" \) \
+            -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum ./* > checksums-${{ matrix.target }}.txt 2>/dev/null || { rm -f checksums-${{ matrix.target }}.txt && shasum -a 256 ./* > checksums-${{ matrix.target }}.txt; }
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            openplanter-desktop/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            openplanter-desktop/target/${{ matrix.target }}/release/bundle/**/*.AppImage
-            openplanter-desktop/target/${{ matrix.target }}/release/bundle/**/*.msi
+            release-assets/*
           draft: false
           generate_release_notes: true

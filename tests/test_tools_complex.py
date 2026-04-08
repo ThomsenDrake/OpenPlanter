@@ -78,6 +78,17 @@ class ToolsComplexTests(unittest.TestCase):
             self.assertIn("omitted", result)
 
     # 7
+    def test_list_files_glob_without_rg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "match.py").write_text("print('hi')", encoding="utf-8")
+            (root / "ignore.txt").write_text("skip", encoding="utf-8")
+            tools = WorkspaceTools(root=root)
+            with patch("agent.tools.shutil.which", return_value=None):
+                result = tools.list_files("*.py")
+            self.assertIn("match.py", result)
+            self.assertNotIn("ignore.txt", result)
+
     def test_search_files_empty_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tools = WorkspaceTools(root=Path(tmpdir))
@@ -85,6 +96,22 @@ class ToolsComplexTests(unittest.TestCase):
             self.assertIn("query cannot be empty", result)
 
     # 8
+    def test_search_files_glob_without_rg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "match.txt").write_text("SECRET_KEY=abc123\n", encoding="utf-8")
+            session_dir = root / ".openplanter" / "sessions" / "fallback-search"
+            session_dir.mkdir(parents=True)
+            (session_dir / "events.jsonl").write_text(
+                "SECRET_KEY=abc123\n",
+                encoding="utf-8",
+            )
+            tools = WorkspaceTools(root=root)
+            with patch("agent.tools.shutil.which", return_value=None):
+                result = tools.search_files("SECRET_KEY", glob="*.txt")
+            self.assertIn("match.txt:1:SECRET_KEY=abc123", result)
+            self.assertNotIn("events.jsonl", result)
+
     def test_search_files_no_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

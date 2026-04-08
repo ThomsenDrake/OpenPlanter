@@ -10,6 +10,7 @@ import unittest
 import sys
 import os
 import json
+import urllib.error
 from unittest import skipIf
 
 # Add scripts directory to path to import fetch_fec
@@ -40,10 +41,23 @@ class TestFecFetch(unittest.TestCase):
         """Set up test client."""
         self.client = fetch_fec.FECAPIClient(api_key='DEMO_KEY')
 
+    def _call_api_or_skip(self, func, *args, **kwargs):
+        """Skip live smoke tests when the public FEC API is unavailable or throttled."""
+        try:
+            return func(*args, **kwargs)
+        except TimeoutError as e:
+            self.skipTest(f"FEC API timed out: {e}")
+        except urllib.error.HTTPError as e:
+            if e.code in {403, 429, 500, 502, 503, 504}:
+                self.skipTest(f"FEC API unavailable or rate-limited: HTTP {e.code}")
+            raise
+        except urllib.error.URLError as e:
+            self.skipTest(f"FEC API unavailable: {e}")
+
     @skipIf(not NETWORK_AVAILABLE, "Network or FEC API unavailable")
     def test_get_candidates_basic(self):
         """Test basic candidates endpoint with minimal parameters."""
-        response = self.client.get_candidates(per_page=5)
+        response = self._call_api_or_skip(self.client.get_candidates, per_page=5)
 
         # Check response structure
         self.assertIn('results', response)
@@ -71,10 +85,11 @@ class TestFecFetch(unittest.TestCase):
     @skipIf(not NETWORK_AVAILABLE, "Network or FEC API unavailable")
     def test_get_candidates_with_filters(self):
         """Test candidates endpoint with cycle and office filters."""
-        response = self.client.get_candidates(
+        response = self._call_api_or_skip(
+            self.client.get_candidates,
             cycle=2024,
             office='P',  # Presidential
-            per_page=10
+            per_page=10,
         )
 
         self.assertIn('results', response)
@@ -94,7 +109,7 @@ class TestFecFetch(unittest.TestCase):
     @skipIf(not NETWORK_AVAILABLE, "Network or FEC API unavailable")
     def test_get_committees_basic(self):
         """Test basic committees endpoint."""
-        response = self.client.get_committees(per_page=5)
+        response = self._call_api_or_skip(self.client.get_committees, per_page=5)
 
         self.assertIn('results', response)
         self.assertIn('pagination', response)
@@ -114,9 +129,10 @@ class TestFecFetch(unittest.TestCase):
     @skipIf(not NETWORK_AVAILABLE, "Network or FEC API unavailable")
     def test_get_schedule_a_basic(self):
         """Test Schedule A (contributions) endpoint."""
-        response = self.client.get_schedule_a(
+        response = self._call_api_or_skip(
+            self.client.get_schedule_a,
             cycle=2024,
-            per_page=5
+            per_page=1,
         )
 
         self.assertIn('results', response)
@@ -170,11 +186,11 @@ class TestFecFetch(unittest.TestCase):
     def test_pagination(self):
         """Test that pagination works across multiple pages."""
         # Fetch first page
-        page1 = self.client.get_candidates(page=1, per_page=5)
+        page1 = self._call_api_or_skip(self.client.get_candidates, page=1, per_page=5)
         results1 = page1['results']
 
         # Fetch second page
-        page2 = self.client.get_candidates(page=2, per_page=5)
+        page2 = self._call_api_or_skip(self.client.get_candidates, page=2, per_page=5)
         results2 = page2['results']
 
         # Results should be different

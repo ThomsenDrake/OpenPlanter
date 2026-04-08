@@ -79,9 +79,9 @@ export async function listSessions(limit?: number): Promise<SessionInfo[]> {
 }
 
 export async function openSession(
-  id?: string,
+  id?: string | null,
   resume: boolean = false,
-  investigationId?: string,
+  investigationId?: string | null,
 ): Promise<SessionInfo> {
   return invoke("open_session", {
     id: id ?? null,
