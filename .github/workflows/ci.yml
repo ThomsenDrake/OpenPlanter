@@ -26,15 +26,18 @@ jobs:
   python-lint:
     name: Python Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check agent/ tests/
-      - run: ruff format --check agent/ tests/
+      - name: Ruff check
+        continue-on-error: true
+        run: ruff check agent/ tests/
+      - name: Ruff format check
+        continue-on-error: true
+        run: ruff format --check agent/ tests/
 
   python-tests:
     name: Python Tests
@@ -57,7 +60,6 @@ jobs:
   rust-lint:
     name: Rust Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
@@ -71,9 +73,11 @@ jobs:
         with:
           workspaces: openplanter-desktop
       - name: Check formatting
+        continue-on-error: true
         working-directory: openplanter-desktop
         run: cargo fmt --all -- --check
       - name: Clippy
+        continue-on-error: true
         working-directory: openplanter-desktop
         run: cargo clippy --workspace -- -D warnings
 
@@ -101,7 +105,6 @@ jobs:
   frontend-lint:
     name: Frontend Typecheck
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

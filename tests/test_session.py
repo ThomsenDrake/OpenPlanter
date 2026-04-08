@@ -133,7 +133,7 @@ class SessionRuntimeTests(unittest.TestCase):
             }
             typed_state_path.write_text(json.dumps(typed), encoding="utf-8")
 
-            result = runtime.solve("continue")
+            result = runtime.solve("Investigate the subject")
 
             self.assertEqual(result, _investigation_report())
             self.assertEqual(len(captured), 1)
