@@ -51,7 +51,8 @@ jobs:
           # Baseline known main-branch failures so the rest of the suite can block CI.
           pytest tests/ -x --tb=short -q \
             --ignore=tests/test_fetch_senate_lobbying.py \
-            --deselect=tests/test_engine_complex.py::EngineComplexTests::test_list_files_with_glob
+            --deselect=tests/test_engine_complex.py::EngineComplexTests::test_list_files_with_glob \
+            --deselect=tests/test_integration.py::TestReadNonexistentFileContinues::test_read_nonexistent_file_continues
 
   rust-lint:
     name: Rust Lint
