@@ -62,9 +62,7 @@ jobs:
         run: npm run build
 
       - name: Install Tauri CLI
-        uses: tauri-apps/tauri-action/setup@v0
-        with:
-          tauri-version: "^2"
+        run: cargo install tauri-cli --version "^2"
 
       - name: Build Tauri app
         working-directory: openplanter-desktop
@@ -78,7 +76,7 @@ jobs:
             -type f \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.msi" \) \
             -exec cp {} release-assets/ \;
           cd release-assets
-          sha256sum * > checksums-${{ matrix.target }}.txt 2>/dev/null || shasum -a 256 * > checksums-${{ matrix.target }}.txt
+          sha256sum ./* > checksums-${{ matrix.target }}.txt 2>/dev/null || shasum -a 256 ./* > checksums-${{ matrix.target }}.txt
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

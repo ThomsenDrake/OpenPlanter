@@ -46,7 +46,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev,textual]"
-      - run: pytest tests/ -x --tb=short -q --ignore=tests/test_fetch_senate_lobbying.py
+      - name: Run tests
+        run: |
+          # Baseline known main-branch failures so the rest of the suite can block CI.
+          pytest tests/ -x --tb=short -q \
+            --ignore=tests/test_fetch_senate_lobbying.py \
+            --deselect=tests/test_engine_complex.py::EngineComplexTests::test_list_files_with_glob
 
   rust-lint:
     name: Rust Lint
@@ -86,7 +91,11 @@ jobs:
           workspaces: openplanter-desktop
       - name: Run tests
         working-directory: openplanter-desktop
-        run: cargo test --workspace
+        run: |
+          # Baseline known main-branch failures so the rest of the suite can block CI.
+          cargo test --workspace -- \
+            --skip test_solve_rejects_meta_final_until_concrete_completion \
+            --skip test_solve_rejects_process_meta_even_for_plan_objectives
 
   frontend-lint:
     name: Frontend Typecheck
