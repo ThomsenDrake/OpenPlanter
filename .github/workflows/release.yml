@@ -76,7 +76,7 @@ jobs:
             -type f \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.msi" \) \
             -exec cp {} release-assets/ \;
           cd release-assets
-          sha256sum ./* > checksums-${{ matrix.target }}.txt 2>/dev/null || shasum -a 256 ./* > checksums-${{ matrix.target }}.txt
+          sha256sum ./* > checksums-${{ matrix.target }}.txt 2>/dev/null || { rm -f checksums-${{ matrix.target }}.txt && shasum -a 256 ./* > checksums-${{ matrix.target }}.txt; }
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
