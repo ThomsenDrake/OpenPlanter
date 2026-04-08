@@ -142,6 +142,9 @@ class TestEngineCancellation:
         config.recursive = False
         config.acceptance_criteria = False
         config.demo = False
+        config.budget_extension_enabled = False
+        config.budget_extension_block_steps = 0
+        config.budget_extension_max_blocks = 0
 
         engine = RLMEngine(
             model=model,
