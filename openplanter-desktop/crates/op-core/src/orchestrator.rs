@@ -38,6 +38,14 @@ impl OrchestratorRuntime {
         emitter: Arc<dyn OrchestratorEmitter>,
     ) -> Result<Self, WorkflowSpecError> {
         let initial_spec = WorkflowSpec::load_from_path_async(&config.workflow_path).await?;
+        Ok(Self::start_with_spec(config, initial_spec, emitter))
+    }
+
+    pub fn start_with_spec(
+        config: OrchestratorConfig,
+        initial_spec: WorkflowSpec,
+        emitter: Arc<dyn OrchestratorEmitter>,
+    ) -> Self {
         let initial_snapshot =
             build_snapshot(&config.workflow_path, &initial_spec, &[], "idle", Some(0));
         emitter.emit_snapshot(initial_snapshot.clone());
@@ -52,12 +60,12 @@ impl OrchestratorRuntime {
             emitter.clone(),
         ));
 
-        Ok(Self {
+        Self {
             cancel,
             snapshot,
             emitter,
             task: Some(task),
-        })
+        }
     }
 
     pub async fn snapshot(&self) -> OrchestratorSnapshotEvent {
@@ -80,6 +88,15 @@ impl OrchestratorRuntime {
         snapshot.updated_at = Utc::now().to_rfc3339();
         self.emitter.emit_snapshot(snapshot.clone());
         snapshot
+    }
+}
+
+impl Drop for OrchestratorRuntime {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 

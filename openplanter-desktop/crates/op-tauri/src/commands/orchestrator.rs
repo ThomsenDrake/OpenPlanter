@@ -2,6 +2,7 @@ use crate::bridge::TauriOrchestratorEmitter;
 use crate::state::AppState;
 use op_core::events::OrchestratorSnapshotEvent;
 use op_core::orchestrator::{OrchestratorConfig, OrchestratorRuntime};
+use op_core::workflow_spec::WorkflowSpec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -52,23 +53,24 @@ pub async fn orchestrator_start(
 ) -> Result<OrchestratorSnapshotEvent, String> {
     let workspace = state.config.lock().await.workspace.clone();
     let workflow_path = resolve_workflow_path(&workspace, workflow_path)?;
-    let existing = {
-        let mut slot = state.orchestrator.lock().await;
-        slot.take()
-    };
+    let mut slot = state.orchestrator.lock().await;
+    let initial_spec = WorkflowSpec::load_from_path_async(&workflow_path)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let existing = slot.take();
     if let Some(existing) = existing {
         let _ = existing.stop().await;
     }
 
     let emitter = Arc::new(TauriOrchestratorEmitter::new(app));
-    let runtime = OrchestratorRuntime::start(OrchestratorConfig::new(workflow_path), emitter)
-        .await
-        .map_err(|err| err.to_string())?;
+    let runtime = OrchestratorRuntime::start_with_spec(
+        OrchestratorConfig::new(workflow_path),
+        initial_spec,
+        emitter,
+    );
     let snapshot = runtime.snapshot().await;
-    {
-        let mut slot = state.orchestrator.lock().await;
-        *slot = Some(runtime);
-    }
+    *slot = Some(runtime);
 
     Ok(snapshot)
 }
