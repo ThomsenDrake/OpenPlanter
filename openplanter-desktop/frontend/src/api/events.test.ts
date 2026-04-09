@@ -20,6 +20,7 @@ import {
   onAgentError,
   onLoopHealth,
   onMigrationProgress,
+  onOrchestratorSnapshot,
   onWikiUpdated,
 } from "./events";
 
@@ -113,6 +114,33 @@ describe("event listeners", () => {
     expect(callback).toHaveBeenCalledWith(payload);
   });
 
+  it("onOrchestratorSnapshot registers listener and forwards payload", async () => {
+    const callback = vi.fn();
+    await onOrchestratorSnapshot(callback);
+
+    const handler = listeners.get("orchestrator:snapshot")!;
+    const payload = {
+      status: "idle",
+      workflow_path: "/tmp/WORKFLOW.md",
+      poll_interval_ms: 30000,
+      max_concurrent: 2,
+      updated_at: "2026-04-08T18:00:00Z",
+      next_poll_at: "2026-04-08T18:00:30Z",
+      running: [],
+      retrying: [],
+      totals: {
+        queued: 0,
+        running: 0,
+        retrying: 0,
+        succeeded: 0,
+        failed: 0,
+      },
+      warnings: [],
+    };
+    handler({ payload });
+    expect(callback).toHaveBeenCalledWith(payload);
+  });
+
   it("onAgentError registers listener and extracts message", async () => {
     const callback = vi.fn();
     await onAgentError(callback);
@@ -191,6 +219,7 @@ describe("event listeners", () => {
       onAgentDelta(noop),
       onAgentComplete(noop),
       onAgentCompleteEvent(noop),
+      onOrchestratorSnapshot(noop),
       onAgentError(noop),
       onLoopHealth(noop),
       onMigrationProgress(noop),

@@ -320,6 +320,53 @@ pub struct InvestigationOverviewView {
     pub warnings: Vec<String>,
 }
 
+/// Per-task summary shown in orchestrator dashboards.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestratorTaskView {
+    pub task_id: String,
+    pub status: String,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event: Option<String>,
+    pub runtime_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Aggregate orchestrator counters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestratorTotalsView {
+    pub queued: u32,
+    pub running: u32,
+    pub retrying: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+}
+
+/// Snapshot of unattended orchestration state for the frontend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestratorSnapshotEvent {
+    pub status: String,
+    pub workflow_path: String,
+    pub poll_interval_ms: u64,
+    pub max_concurrent: u32,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_poll_at: Option<String>,
+    #[serde(default)]
+    pub running: Vec<OrchestratorTaskView>,
+    #[serde(default)]
+    pub retrying: Vec<OrchestratorTaskView>,
+    #[serde(default)]
+    pub totals: OrchestratorTotalsView,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// All events the engine can emit to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

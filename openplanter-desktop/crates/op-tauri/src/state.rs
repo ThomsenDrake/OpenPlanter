@@ -4,6 +4,7 @@ use op_core::credentials::CredentialBundle;
 use op_core::credentials::{
     credentials_from_env, discover_env_candidates, parse_env_assignments, parse_env_file,
 };
+use op_core::orchestrator::OrchestratorRuntime;
 #[cfg(test)]
 use op_core::settings::PersistentSettings;
 use op_core::settings::SettingsStore;
@@ -368,6 +369,7 @@ pub struct AppState {
     pub session_id: Arc<Mutex<Option<String>>>,
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     pub agent_running: Arc<Mutex<bool>>,
+    pub orchestrator: Arc<Mutex<Option<OrchestratorRuntime>>>,
     pub init_lock: Arc<Mutex<()>>,
     pub chrome_mcp: Arc<Mutex<ChromeMcpRuntime>>,
     startup_trace: String,
@@ -413,6 +415,7 @@ impl AppState {
             session_id: Arc::new(Mutex::new(None)),
             cancel_token: Arc::new(Mutex::new(CancellationToken::new())),
             agent_running: Arc::new(Mutex::new(false)),
+            orchestrator: Arc::new(Mutex::new(None)),
             init_lock: Arc::new(Mutex::new(())),
             chrome_mcp: Arc::new(Mutex::new(ChromeMcpRuntime::default())),
             startup_trace: format_startup_trace(&current_dir, &resolved_workspace, &migration),

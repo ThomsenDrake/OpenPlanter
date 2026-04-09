@@ -10,6 +10,7 @@ import {
   solve,
   cancel,
   exportSessionHandoff,
+  getOrchestratorSnapshot,
   getConfig,
   updateConfig,
   importSessionHandoff,
@@ -31,6 +32,8 @@ import {
   debugLog,
   runMigrationInit,
   runStandardInit,
+  startOrchestrator,
+  stopOrchestrator,
 } from "./invoke";
 
 describe("invoke wrappers", () => {
@@ -156,6 +159,82 @@ describe("invoke wrappers", () => {
     expect(status.tavily).toBe(true);
     expect(status.voyage).toBe(true);
     expect(status.mistral_transcription).toBe(true);
+  });
+
+  it("startOrchestrator sends optional workflow path", async () => {
+    __setHandler("orchestrator_start", ({ workflowPath }: any) => {
+      expect(workflowPath).toBe("WORKFLOW.md");
+      return {
+        status: "idle",
+        workflow_path: "/repo/WORKFLOW.md",
+        poll_interval_ms: 30000,
+        max_concurrent: 1,
+        updated_at: "2026-04-08T18:00:00Z",
+        next_poll_at: "2026-04-08T18:00:30Z",
+        running: [],
+        retrying: [],
+        totals: {
+          queued: 0,
+          running: 0,
+          retrying: 0,
+          succeeded: 0,
+          failed: 0,
+        },
+        warnings: [],
+      };
+    });
+
+    const snapshot = await startOrchestrator("WORKFLOW.md");
+    expect(snapshot.status).toBe("idle");
+    expect(snapshot.workflow_path).toBe("/repo/WORKFLOW.md");
+  });
+
+  it("stopOrchestrator invokes stop command", async () => {
+    __setHandler("orchestrator_stop", () => ({
+      status: "stopped",
+      workflow_path: "/repo/WORKFLOW.md",
+      poll_interval_ms: 30000,
+      max_concurrent: 1,
+      updated_at: "2026-04-08T18:02:00Z",
+      next_poll_at: null,
+      running: [],
+      retrying: [],
+      totals: {
+        queued: 0,
+        running: 0,
+        retrying: 0,
+        succeeded: 0,
+        failed: 0,
+      },
+      warnings: [],
+    }));
+
+    const snapshot = await stopOrchestrator();
+    expect(snapshot.status).toBe("stopped");
+  });
+
+  it("getOrchestratorSnapshot invokes snapshot command", async () => {
+    __setHandler("orchestrator_snapshot", () => ({
+      status: "idle",
+      workflow_path: "/repo/WORKFLOW.md",
+      poll_interval_ms: 30000,
+      max_concurrent: 1,
+      updated_at: "2026-04-08T18:01:00Z",
+      next_poll_at: "2026-04-08T18:01:30Z",
+      running: [],
+      retrying: [],
+      totals: {
+        queued: 0,
+        running: 0,
+        retrying: 0,
+        succeeded: 0,
+        failed: 0,
+      },
+      warnings: [],
+    }));
+
+    const snapshot = await getOrchestratorSnapshot();
+    expect(snapshot.poll_interval_ms).toBe(30000);
   });
 
   it("saveCredential sends service and value", async () => {
