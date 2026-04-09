@@ -14,6 +14,7 @@ import type {
   MigrationInitResultView,
   MigrationSourceInspection,
   ModelInfo,
+  OrchestratorSnapshotEvent,
   PartialConfig,
   PersistentSettings,
   ReplayEntry,
@@ -118,6 +119,20 @@ export async function readSessionEvent(
   eventId: string,
 ): Promise<Record<string, unknown> | null> {
   return invoke("read_session_event", { sessionId, eventId });
+}
+
+export async function startOrchestrator(
+  workflowPath?: string | null
+): Promise<OrchestratorSnapshotEvent> {
+  return invoke("orchestrator_start", { workflowPath: workflowPath ?? null });
+}
+
+export async function stopOrchestrator(): Promise<OrchestratorSnapshotEvent> {
+  return invoke("orchestrator_stop");
+}
+
+export async function getOrchestratorSnapshot(): Promise<OrchestratorSnapshotEvent> {
+  return invoke("orchestrator_snapshot");
 }
 
 export async function getGraphData(): Promise<GraphData> {

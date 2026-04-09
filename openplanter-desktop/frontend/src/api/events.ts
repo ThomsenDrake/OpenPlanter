@@ -7,6 +7,7 @@ import type {
   GraphData,
   LoopHealthEvent,
   MigrationProgressEvent,
+  OrchestratorSnapshotEvent,
   StepEvent,
 } from "./types";
 
@@ -34,6 +35,14 @@ export function onAgentCompleteEvent(
   callback: (event: CompleteEvent) => void
 ): Promise<UnlistenFn> {
   return listen<CompleteEvent>("agent:complete", (e) => callback(e.payload));
+}
+
+export function onOrchestratorSnapshot(
+  callback: (event: OrchestratorSnapshotEvent) => void
+): Promise<UnlistenFn> {
+  return listen<OrchestratorSnapshotEvent>("orchestrator:snapshot", (e) =>
+    callback(e.payload)
+  );
 }
 
 export function onAgentComplete(

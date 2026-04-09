@@ -18,8 +18,9 @@ use crate::commands::session::{
 use op_core::engine::SolveEmitter;
 use op_core::events::{
     CompleteEvent, CompletionMeta, CuratorUpdateEvent, DeltaEvent, DeltaKind, ErrorEvent,
-    LoopHealthEvent, LoopMetrics, LoopPhase, StepEvent, TraceEvent,
+    LoopHealthEvent, LoopMetrics, LoopPhase, OrchestratorSnapshotEvent, StepEvent, TraceEvent,
 };
+use op_core::orchestrator::OrchestratorEmitter;
 use op_core::session::replay::{ReplayEntry, ReplayLogger, StepToolCallEntry};
 
 const MAX_STEP_MODEL_PREVIEW_CHARS: usize = 4 * 1024;
@@ -137,6 +138,26 @@ pub struct TauriEmitter {
 impl TauriEmitter {
     pub fn new(handle: AppHandle) -> Self {
         Self { handle }
+    }
+}
+
+pub struct TauriOrchestratorEmitter {
+    handle: AppHandle,
+}
+
+impl TauriOrchestratorEmitter {
+    pub fn new(handle: AppHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl OrchestratorEmitter for TauriOrchestratorEmitter {
+    fn emit_snapshot(&self, snapshot: OrchestratorSnapshotEvent) {
+        eprintln!(
+            "[bridge] orchestrator snapshot: status={} workflow={}",
+            snapshot.status, snapshot.workflow_path
+        );
+        let _ = self.handle.emit("orchestrator:snapshot", snapshot);
     }
 }
 

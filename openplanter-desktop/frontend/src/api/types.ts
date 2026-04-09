@@ -66,6 +66,39 @@ export interface CompleteEvent {
   completion?: CompletionMeta;
 }
 
+export interface OrchestratorTaskView {
+  task_id: string;
+  status: string;
+  attempt: number;
+  worker?: string;
+  workspace_path?: string;
+  last_event?: string;
+  runtime_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface OrchestratorTotalsView {
+  queued: number;
+  running: number;
+  retrying: number;
+  succeeded: number;
+  failed: number;
+}
+
+export interface OrchestratorSnapshotEvent {
+  status: string;
+  workflow_path: string;
+  poll_interval_ms: number;
+  max_concurrent: number;
+  updated_at: string;
+  next_poll_at?: string;
+  running: OrchestratorTaskView[];
+  retrying: OrchestratorTaskView[];
+  totals: OrchestratorTotalsView;
+  warnings: string[];
+}
+
 export interface LoopHealthEvent {
   depth: number;
   step: number;

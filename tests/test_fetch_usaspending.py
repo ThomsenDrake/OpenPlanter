@@ -21,6 +21,14 @@ import fetch_usaspending
 class TestUsaspendingFetch(unittest.TestCase):
     """Test suite for USASpending.gov data acquisition."""
 
+    NETWORK_TESTS = {
+        "test_make_api_request_get",
+        "test_make_api_request_post",
+        "test_search_awards_minimal",
+        "test_api_error_handling",
+        "test_search_with_recipient_filter",
+    }
+
     @classmethod
     def setUpClass(cls):
         """Check if the API is reachable before running tests."""
@@ -37,19 +45,37 @@ class TestUsaspendingFetch(unittest.TestCase):
                 print(f"\nUSASpending.gov API is reachable ({len(response.get('results', []))} agencies found)", file=sys.stderr)
             else:
                 print(f"\nSkipping USASpending tests: Unexpected API response format", file=sys.stderr)
-        except (urllib.error.URLError, urllib.error.HTTPError, Exception) as e:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, Exception) as e:
             print(f"\nSkipping USASpending tests: API not reachable ({e})", file=sys.stderr)
             cls.api_available = False
 
     def setUp(self):
         """Skip tests if API is not available."""
-        if not self.api_available:
+        if not self.api_available and self._testMethodName in self.NETWORK_TESTS:
             self.skipTest("USASpending.gov API not available")
+
+    def _call_or_skip(self, description, func, *args, **kwargs):
+        """Skip live endpoint tests when the external API times out mid-run."""
+        try:
+            return func(*args, **kwargs)
+        except TimeoutError as e:
+            self.skipTest(f"USASpending.gov {description} timed out: {e}")
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                self.skipTest(f"USASpending.gov {description} returned HTTP {e.code}")
+            raise
+        except urllib.error.URLError as e:
+            self.skipTest(f"USASpending.gov {description} unavailable: {e}")
 
     def test_make_api_request_get(self):
         """Test basic GET request to the API."""
         # The agencies endpoint should return a list of federal agencies
-        response = fetch_usaspending.make_api_request("/references/toptier_agencies/", method="GET")
+        response = self._call_or_skip(
+            "agencies endpoint",
+            fetch_usaspending.make_api_request,
+            "/references/toptier_agencies/",
+            method="GET",
+        )
 
         self.assertIsInstance(response, dict)
         self.assertIn("results", response)
@@ -68,10 +94,12 @@ class TestUsaspendingFetch(unittest.TestCase):
             "limit": 5
         }
 
-        response = fetch_usaspending.make_api_request(
+        response = self._call_or_skip(
+            "autocomplete endpoint",
+            fetch_usaspending.make_api_request,
             "/autocomplete/awarding_agency/",
             method="POST",
-            data=data
+            data=data,
         )
 
         self.assertIsInstance(response, dict)
@@ -104,11 +132,13 @@ class TestUsaspendingFetch(unittest.TestCase):
             "Awarding Agency"
         ]
 
-        response = fetch_usaspending.search_awards(
+        response = self._call_or_skip(
+            "award search endpoint",
+            fetch_usaspending.search_awards,
             filters=filters,
             fields=fields,
             limit=5,
-            page=1
+            page=1,
         )
 
         # Verify response structure
@@ -236,6 +266,22 @@ class TestUsaspendingFetch(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             fetch_usaspending.make_api_request("/invalid/endpoint/", method="GET")
 
+    def test_call_or_skip_reraises_client_http_errors(self):
+        """Client HTTP errors should still fail the test instead of skipping."""
+        error = urllib.error.HTTPError(
+            url="https://api.usaspending.gov/api/v2/test/",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=None,
+        )
+
+        def raise_http_error():
+            raise error
+
+        with self.assertRaises(urllib.error.HTTPError):
+            self._call_or_skip("client error", raise_http_error)
+
     def test_search_with_recipient_filter(self):
         """Test searching by recipient name (minimal real request)."""
         # Note: API requires award_type_codes to be present
@@ -247,11 +293,13 @@ class TestUsaspendingFetch(unittest.TestCase):
         )
 
         # Note: sort field must be included in fields list
-        response = fetch_usaspending.search_awards(
+        response = self._call_or_skip(
+            "recipient-filtered award search",
+            fetch_usaspending.search_awards,
             filters=filters,
             fields=["Award ID", "Recipient Name", "Award Amount"],
             limit=3,
-            sort="Award Amount"
+            sort="Award Amount",
         )
 
         self.assertIsInstance(response, dict)
