@@ -48,7 +48,11 @@ impl WorkflowSpec {
         let path = path.as_ref();
         let (frontmatter, template) = split_frontmatter(content)?;
         let mut spec = if let Some(frontmatter) = frontmatter {
-            let mut doc: WorkflowSpecDocument = serde_yaml::from_str(frontmatter)?;
+            let mut doc = if frontmatter.trim().is_empty() {
+                WorkflowSpecDocument::default()
+            } else {
+                serde_yaml::from_str(frontmatter)?
+            };
             doc.template = normalize_template(template);
             doc.into_spec(path)
         } else {
@@ -418,6 +422,31 @@ Implement the issue carefully.
         let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
 
         assert_eq!(spec.polling.interval_ms, 750);
+        assert_eq!(
+            spec.template,
+            "# Workflow\n\nImplement the issue carefully."
+        );
+    }
+
+    #[test]
+    fn treats_empty_frontmatter_as_defaults() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        let content = r#"---
+---
+# Workflow
+
+Implement the issue carefully.
+"#;
+
+        let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
+
+        assert_eq!(spec.tracker.kind, "memory");
+        assert_eq!(spec.polling.interval_ms, 30_000);
+        assert_eq!(
+            spec.resolved_workspace_root(),
+            dir.path().join(".openplanter").join("workspaces")
+        );
         assert_eq!(
             spec.template,
             "# Workflow\n\nImplement the issue carefully."
