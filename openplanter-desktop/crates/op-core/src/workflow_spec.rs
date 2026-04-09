@@ -71,19 +71,19 @@ impl WorkflowSpec {
     }
 
     pub fn resolved_workspace_root(&self) -> PathBuf {
-        let base_dir = self
+        let workflow_dir = self
             .source_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
         match self.workspace.root.as_deref().map(str::trim) {
-            Some("") | None => base_dir.join(".openplanter").join("workspaces"),
+            Some("") | None => default_workspace_root(&workflow_dir),
             Some(root) => {
                 let candidate = PathBuf::from(root);
                 if candidate.is_absolute() {
                     candidate
                 } else {
-                    base_dir.join(candidate)
+                    workflow_dir.join(candidate)
                 }
             }
         }
@@ -200,6 +200,17 @@ pub enum WorkflowSpecError {
 
 fn normalize_template(template: &str) -> String {
     template.trim().to_string()
+}
+
+fn default_workspace_root(workflow_dir: &Path) -> PathBuf {
+    if workflow_dir
+        .file_name()
+        .is_some_and(|name| name == ".openplanter")
+    {
+        workflow_dir.join("workspaces")
+    } else {
+        workflow_dir.join(".openplanter").join("workspaces")
+    }
 }
 
 fn split_frontmatter(content: &str) -> Result<(Option<&str>, &str), WorkflowSpecError> {
@@ -329,6 +340,21 @@ Implement the issue carefully.
             dir.path().join(".openplanter").join("workspaces")
         );
         assert_eq!(spec.template, "# Prompt\n\nDo the thing.");
+    }
+
+    #[test]
+    fn defaults_to_sibling_workspaces_for_dot_openplanter_workflow() {
+        let dir = tempdir().unwrap();
+        let dot_openplanter = dir.path().join(".openplanter");
+        let workflow_path = dot_openplanter.join("WORKFLOW.md");
+        let content = "# Prompt\n\nDo the thing.";
+
+        let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
+
+        assert_eq!(
+            spec.resolved_workspace_root(),
+            dot_openplanter.join("workspaces")
+        );
     }
 
     #[test]
