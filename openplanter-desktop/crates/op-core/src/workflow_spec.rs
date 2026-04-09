@@ -234,7 +234,7 @@ fn split_frontmatter(content: &str) -> Result<(Option<&str>, &str), WorkflowSpec
     while cursor <= remainder.len() {
         let line_end = next_line_end(remainder, cursor);
         let line = &remainder[cursor..line_end];
-        if line.trim() == FRONTMATTER_DELIMITER {
+        if line.trim_end() == FRONTMATTER_DELIMITER {
             let body_start = line_end + line_ending_len(remainder, line_end);
             let frontmatter = &remainder[..cursor];
             let body = &remainder[body_start..];
@@ -410,6 +410,31 @@ agent:
 polling:
   interval_ms: 750
 ---   
+# Workflow
+
+Implement the issue carefully.
+"#;
+
+        let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
+
+        assert_eq!(spec.polling.interval_ms, 750);
+        assert_eq!(
+            spec.template,
+            "# Workflow\n\nImplement the issue carefully."
+        );
+    }
+
+    #[test]
+    fn does_not_treat_indented_delimiter_as_frontmatter_close() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        let content = r#"---
+description: |
+  ---
+  more text
+polling:
+  interval_ms: 750
+---
 # Workflow
 
 Implement the issue carefully.
