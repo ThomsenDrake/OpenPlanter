@@ -82,12 +82,14 @@ impl OrchestratorRuntime {
             let _ = task.await;
         }
 
-        let mut snapshot = self.snapshot.lock().await.clone();
+        let mut snapshot = self.snapshot.lock().await;
         snapshot.status = "stopped".to_string();
         snapshot.next_poll_at = None;
         snapshot.updated_at = Utc::now().to_rfc3339();
-        self.emitter.emit_snapshot(snapshot.clone());
-        snapshot
+        let stopped_snapshot = snapshot.clone();
+        drop(snapshot);
+        self.emitter.emit_snapshot(stopped_snapshot.clone());
+        stopped_snapshot
     }
 }
 
@@ -283,5 +285,25 @@ Investigate and implement.
         );
 
         let _ = runtime.stop().await;
+    }
+
+    #[tokio::test]
+    async fn stop_persists_stopped_snapshot_to_shared_state() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 20);
+        let emitter = Arc::new(TestEmitter::default());
+
+        let runtime = OrchestratorRuntime::start(OrchestratorConfig::new(workflow_path), emitter)
+            .await
+            .unwrap();
+        let snapshot_handle = runtime.snapshot_handle();
+
+        let stopped = runtime.stop().await;
+        let shared = snapshot_handle.lock().await.clone();
+
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(shared.status, "stopped");
+        assert!(shared.next_poll_at.is_none());
     }
 }
