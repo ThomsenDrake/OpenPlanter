@@ -234,7 +234,7 @@ fn split_frontmatter(content: &str) -> Result<(Option<&str>, &str), WorkflowSpec
     while cursor <= remainder.len() {
         let line_end = next_line_end(remainder, cursor);
         let line = &remainder[cursor..line_end];
-        if line == FRONTMATTER_DELIMITER {
+        if line.trim() == FRONTMATTER_DELIMITER {
             let body_start = line_end + line_ending_len(remainder, line_end);
             let frontmatter = &remainder[..cursor];
             let body = &remainder[body_start..];
@@ -399,6 +399,28 @@ agent:
         assert_eq!(
             spec.template,
             "# Workflow\r\n\r\nImplement the issue carefully."
+        );
+    }
+
+    #[test]
+    fn parses_closing_frontmatter_delimiter_with_trailing_whitespace() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        let content = r#"---
+polling:
+  interval_ms: 750
+---   
+# Workflow
+
+Implement the issue carefully.
+"#;
+
+        let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
+
+        assert_eq!(spec.polling.interval_ms, 750);
+        assert_eq!(
+            spec.template,
+            "# Workflow\n\nImplement the issue carefully."
         );
     }
 }
