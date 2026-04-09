@@ -8,6 +8,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
+const MIN_POLL_INTERVAL_MS: u64 = 1_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorConfig {
     pub workflow_path: PathBuf,
@@ -31,11 +33,11 @@ pub struct OrchestratorRuntime {
 }
 
 impl OrchestratorRuntime {
-    pub fn start(
+    pub async fn start(
         config: OrchestratorConfig,
         emitter: Arc<dyn OrchestratorEmitter>,
     ) -> Result<Self, WorkflowSpecError> {
-        let initial_spec = WorkflowSpec::load_from_path(&config.workflow_path)?;
+        let initial_spec = WorkflowSpec::load_from_path_async(&config.workflow_path).await?;
         let initial_snapshot =
             build_snapshot(&config.workflow_path, &initial_spec, &[], "idle", Some(0));
         emitter.emit_snapshot(initial_snapshot.clone());
@@ -62,6 +64,10 @@ impl OrchestratorRuntime {
         self.snapshot.lock().await.clone()
     }
 
+    pub fn snapshot_handle(&self) -> Arc<Mutex<OrchestratorSnapshotEvent>> {
+        self.snapshot.clone()
+    }
+
     pub async fn stop(mut self) -> OrchestratorSnapshotEvent {
         self.cancel.cancel();
         if let Some(task) = self.task.take() {
@@ -85,13 +91,13 @@ async fn run_loop(
     emitter: Arc<dyn OrchestratorEmitter>,
 ) {
     loop {
-        let sleep_for = Duration::from_millis(spec.polling.interval_ms.max(1_000));
+        let sleep_for = Duration::from_millis(effective_poll_interval_ms(spec.polling.interval_ms));
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = sleep(sleep_for) => {}
         }
 
-        let warnings = match WorkflowSpec::load_from_path(&config.workflow_path) {
+        let warnings = match WorkflowSpec::load_from_path_async(&config.workflow_path).await {
             Ok(next_spec) => {
                 spec = next_spec;
                 Vec::new()
@@ -116,7 +122,8 @@ fn build_snapshot(
     running_count: Option<u32>,
 ) -> OrchestratorSnapshotEvent {
     let now = Utc::now();
-    let next_poll_at = now + ChronoDuration::milliseconds(spec.polling.interval_ms as i64);
+    let next_poll_at = now
+        + ChronoDuration::milliseconds(effective_poll_interval_ms(spec.polling.interval_ms) as i64);
     OrchestratorSnapshotEvent {
         status: status.to_string(),
         workflow_path: workflow_path.display().to_string(),
@@ -137,9 +144,14 @@ fn build_snapshot(
     }
 }
 
+fn effective_poll_interval_ms(interval_ms: u64) -> u64 {
+    interval_ms.max(MIN_POLL_INTERVAL_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use std::fs;
     use tempfile::tempdir;
 
@@ -185,6 +197,7 @@ Investigate and implement.
             OrchestratorConfig::new(workflow_path.clone()),
             emitter.clone(),
         )
+        .await
         .unwrap();
 
         tokio::time::sleep(Duration::from_millis(1_100)).await;
@@ -212,6 +225,7 @@ Investigate and implement.
             OrchestratorConfig::new(workflow_path.clone()),
             emitter.clone(),
         )
+        .await
         .unwrap();
 
         fs::write(&workflow_path, "---\npolling:\n").unwrap();
@@ -221,6 +235,34 @@ Investigate and implement.
         assert_eq!(snapshot.poll_interval_ms, 20);
         assert_eq!(snapshot.max_concurrent, 2);
         assert_eq!(snapshot.warnings.len(), 1);
+
+        let _ = runtime.stop().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_uses_effective_poll_interval_for_next_poll_at() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 20);
+        let emitter = Arc::new(TestEmitter::default());
+
+        let runtime =
+            OrchestratorRuntime::start(OrchestratorConfig::new(workflow_path.clone()), emitter)
+                .await
+                .unwrap();
+
+        let snapshot = runtime.snapshot().await;
+        let updated_at = DateTime::parse_from_rfc3339(&snapshot.updated_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        let next_poll_at = DateTime::parse_from_rfc3339(snapshot.next_poll_at.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(snapshot.poll_interval_ms, 20);
+        assert!(
+            next_poll_at >= updated_at + ChronoDuration::milliseconds(MIN_POLL_INTERVAL_MS as i64)
+        );
 
         let _ = runtime.stop().await;
     }

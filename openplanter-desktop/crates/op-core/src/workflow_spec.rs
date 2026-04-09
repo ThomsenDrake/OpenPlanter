@@ -38,6 +38,12 @@ impl WorkflowSpec {
         Self::parse(path, &content)
     }
 
+    pub async fn load_from_path_async(path: impl AsRef<Path>) -> Result<Self, WorkflowSpecError> {
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path).await?;
+        Self::parse(path, &content)
+    }
+
     pub fn parse(path: impl AsRef<Path>, content: &str) -> Result<Self, WorkflowSpecError> {
         let path = path.as_ref();
         let (frontmatter, template) = split_frontmatter(content)?;
@@ -210,22 +216,47 @@ fn split_frontmatter(content: &str) -> Result<(Option<&str>, &str), WorkflowSpec
     }
 
     let mut offset = first_line.len();
-    if content.as_bytes().get(offset) == Some(&b'\n') {
-        offset += 1;
-    }
+    offset += line_ending_len(content, offset);
 
     let remainder = &content[offset..];
-    if let Some(end) = remainder.find("\n---\n") {
-        let frontmatter = &remainder[..end];
-        let body = &remainder[(end + 5)..];
-        return Ok((Some(frontmatter), body));
-    }
-
-    if let Some(stripped) = remainder.strip_suffix("\n---") {
-        return Ok((Some(stripped), ""));
+    let mut cursor = 0;
+    while cursor <= remainder.len() {
+        let line_end = next_line_end(remainder, cursor);
+        let line = &remainder[cursor..line_end];
+        if line == FRONTMATTER_DELIMITER {
+            let body_start = line_end + line_ending_len(remainder, line_end);
+            let frontmatter = &remainder[..cursor];
+            let body = &remainder[body_start..];
+            return Ok((Some(frontmatter), body));
+        }
+        if line_end == remainder.len() {
+            break;
+        }
+        cursor = line_end + line_ending_len(remainder, line_end);
     }
 
     Err(WorkflowSpecError::UnterminatedFrontmatter)
+}
+
+fn line_ending_len(content: &str, offset: usize) -> usize {
+    let bytes = content.as_bytes();
+    match (bytes.get(offset), bytes.get(offset + 1)) {
+        (Some(b'\r'), Some(b'\n')) => 2,
+        (Some(b'\n'), _) | (Some(b'\r'), _) => 1,
+        _ => 0,
+    }
+}
+
+fn next_line_end(content: &str, start: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut index = start;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\n' | b'\r') {
+            return index;
+        }
+        index += 1;
+    }
+    bytes.len()
 }
 
 #[cfg(test)]
@@ -327,5 +358,21 @@ agent:
         .unwrap_err();
 
         assert!(matches!(err, WorkflowSpecError::MissingTemplate));
+    }
+
+    #[test]
+    fn parses_frontmatter_with_crlf_line_endings() {
+        let dir = tempdir().unwrap();
+        let workflow_path = dir.path().join("WORKFLOW.md");
+        let content = "---\r\npolling:\r\n  interval_ms: 750\r\nagent:\r\n  max_turns: 2\r\n---\r\n# Workflow\r\n\r\nImplement the issue carefully.\r\n";
+
+        let spec = WorkflowSpec::parse(&workflow_path, content).unwrap();
+
+        assert_eq!(spec.polling.interval_ms, 750);
+        assert_eq!(spec.agent.max_turns, 2);
+        assert_eq!(
+            spec.template,
+            "# Workflow\r\n\r\nImplement the issue carefully."
+        );
     }
 }

@@ -52,17 +52,22 @@ pub async fn orchestrator_start(
 ) -> Result<OrchestratorSnapshotEvent, String> {
     let workspace = state.config.lock().await.workspace.clone();
     let workflow_path = resolve_workflow_path(&workspace, workflow_path)?;
-    let emitter = Arc::new(TauriOrchestratorEmitter::new(app));
-    let runtime = OrchestratorRuntime::start(OrchestratorConfig::new(workflow_path), emitter)
-        .map_err(|err| err.to_string())?;
-    let snapshot = runtime.snapshot().await;
-
     let existing = {
         let mut slot = state.orchestrator.lock().await;
-        slot.replace(runtime)
+        slot.take()
     };
     if let Some(existing) = existing {
         let _ = existing.stop().await;
+    }
+
+    let emitter = Arc::new(TauriOrchestratorEmitter::new(app));
+    let runtime = OrchestratorRuntime::start(OrchestratorConfig::new(workflow_path), emitter)
+        .await
+        .map_err(|err| err.to_string())?;
+    let snapshot = runtime.snapshot().await;
+    {
+        let mut slot = state.orchestrator.lock().await;
+        *slot = Some(runtime);
     }
 
     Ok(snapshot)
@@ -87,12 +92,12 @@ pub async fn orchestrator_stop(
 pub async fn orchestrator_snapshot(
     state: State<'_, AppState>,
 ) -> Result<OrchestratorSnapshotEvent, String> {
-    let snapshot = {
+    let snapshot_handle = {
         let slot = state.orchestrator.lock().await;
         match slot.as_ref() {
-            Some(runtime) => runtime.snapshot().await,
+            Some(runtime) => runtime.snapshot_handle(),
             None => return Err("orchestrator is not running".to_string()),
         }
     };
-    Ok(snapshot)
+    Ok(snapshot_handle.lock().await.clone())
 }
