@@ -139,12 +139,12 @@ fn build_snapshot(
     running_count: Option<u32>,
 ) -> OrchestratorSnapshotEvent {
     let now = Utc::now();
-    let next_poll_at = now
-        + ChronoDuration::milliseconds(effective_poll_interval_ms(spec.polling.interval_ms) as i64);
+    let effective_poll_interval_ms = effective_poll_interval_ms(spec.polling.interval_ms);
+    let next_poll_at = now + ChronoDuration::milliseconds(effective_poll_interval_ms as i64);
     OrchestratorSnapshotEvent {
         status: status.to_string(),
         workflow_path: workflow_path.display().to_string(),
-        poll_interval_ms: spec.polling.interval_ms,
+        poll_interval_ms: effective_poll_interval_ms,
         max_concurrent: spec.agent.max_concurrent_agents,
         updated_at: now.to_rfc3339(),
         next_poll_at: Some(next_poll_at.to_rfc3339()),
@@ -222,6 +222,7 @@ Investigate and implement.
 
         assert_eq!(snapshot.status, "idle");
         assert_eq!(snapshot.workflow_path, workflow_path.display().to_string());
+        assert_eq!(snapshot.poll_interval_ms, MIN_POLL_INTERVAL_MS);
         assert_eq!(snapshot.max_concurrent, 2);
         assert!(snapshot.next_poll_at.is_some());
         assert!(emitter.snapshots.lock().unwrap().len() >= 2);
@@ -249,7 +250,7 @@ Investigate and implement.
         tokio::time::sleep(Duration::from_millis(1_100)).await;
 
         let snapshot = runtime.snapshot().await;
-        assert_eq!(snapshot.poll_interval_ms, 20);
+        assert_eq!(snapshot.poll_interval_ms, MIN_POLL_INTERVAL_MS);
         assert_eq!(snapshot.max_concurrent, 2);
         assert_eq!(snapshot.warnings.len(), 1);
 
@@ -276,7 +277,7 @@ Investigate and implement.
             .unwrap()
             .with_timezone(&Utc);
 
-        assert_eq!(snapshot.poll_interval_ms, 20);
+        assert_eq!(snapshot.poll_interval_ms, MIN_POLL_INTERVAL_MS);
         assert!(
             next_poll_at >= updated_at + ChronoDuration::milliseconds(MIN_POLL_INTERVAL_MS as i64)
         );
