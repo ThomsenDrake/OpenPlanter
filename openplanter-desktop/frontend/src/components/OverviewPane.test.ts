@@ -118,6 +118,10 @@ describe("createOverviewPane", () => {
     document.body.appendChild(pane);
 
     await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Investigation Wiki Homepage");
+      expect(pane.textContent).toContain("Current conclusions and proofs");
+      expect(pane.textContent).toContain("Open questions and needed documents");
+      expect(pane.textContent).toContain("Open to-dos");
       expect(pane.textContent).toContain("Who controls Acme Corp?");
       expect(pane.textContent).toContain("Claim c1 needs more evidence");
       expect(pane.textContent).toContain("Acme and PAC filings overlap");

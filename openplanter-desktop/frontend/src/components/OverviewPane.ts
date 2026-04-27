@@ -71,6 +71,11 @@ interface ReplaySummary {
   activeDetail: string;
 }
 
+interface HomepageDocCandidate {
+  source: WikiNavSourceView;
+  score: number;
+}
+
 const CURATED_REPLAY_LIMIT = 14;
 const CURATED_REPLAY_ROLES = new Set([
   "assistant",
@@ -97,6 +102,7 @@ export function createOverviewPane(): HTMLElement {
   main.className = "overview-main";
 
   const replaySection = createSection("Curated Replay");
+  const homepageSection = createSection("Investigation Wiki Homepage");
   const snapshotSection = createSection("Investigation Snapshot");
   const gapsSection = createSection("Outstanding Gaps");
   const actionsSection = createSection("Candidate Actions");
@@ -138,6 +144,7 @@ export function createOverviewPane(): HTMLElement {
 
   main.append(
     replaySection.section,
+    homepageSection.section,
     snapshotSection.section,
     gapsSection.section,
     actionsSection.section,
@@ -1041,6 +1048,173 @@ export function createOverviewPane(): HTMLElement {
     snapshotSection.body.appendChild(questionBlock);
   }
 
+  function keywordTokens(text: string): string[] {
+    const stopWords = new Set([
+      "a",
+      "an",
+      "and",
+      "are",
+      "be",
+      "by",
+      "for",
+      "from",
+      "how",
+      "in",
+      "is",
+      "it",
+      "of",
+      "on",
+      "or",
+      "that",
+      "the",
+      "to",
+      "what",
+      "which",
+      "who",
+      "would",
+    ]);
+    return text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !stopWords.has(token));
+  }
+
+  function scoreSourceCandidate(
+    source: WikiNavSourceView,
+    keywords: Set<string>,
+  ): number {
+    const haystack = `${source.title} ${source.category} ${source.file_path}`.toLowerCase();
+    let score = 0;
+    for (const token of keywords) {
+      if (haystack.includes(token)) {
+        score += source.title.toLowerCase().includes(token) ? 2 : 1;
+      }
+    }
+    return score;
+  }
+
+  function inferredDocsForQuestion(
+    question: OverviewQuestionView,
+    overview: InvestigationOverviewView,
+  ): WikiNavSourceView[] {
+    const relatedGapTokens = overview.outstanding_gaps
+      .filter((gap) => gap.label.toLowerCase().includes(question.text.toLowerCase()))
+      .flatMap((gap) => keywordTokens(gap.label));
+    const relatedActionTokens = overview.candidate_actions
+      .filter((action) => action.label.toLowerCase().includes(question.text.toLowerCase()))
+      .flatMap((action) => keywordTokens(action.label));
+    const keywords = new Set([
+      ...keywordTokens(question.text),
+      ...relatedGapTokens,
+      ...relatedActionTokens,
+    ]);
+
+    const candidates = overview.wiki_nav.sources
+      .map((source): HomepageDocCandidate => ({
+        source,
+        score: scoreSourceCandidate(source, keywords),
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score || left.source.title.localeCompare(right.source.title))
+      .slice(0, 3)
+      .map((candidate) => candidate.source);
+
+    if (candidates.length > 0) {
+      return candidates;
+    }
+    return overview.wiki_nav.sources.slice(0, 3);
+  }
+
+  function renderHomepage(
+    overview: InvestigationOverviewView | null,
+    gapLookup: Map<string, OverviewGapView>,
+  ): void {
+    homepageSection.body.innerHTML = "";
+    if (!overview) {
+      const empty = document.createElement("div");
+      empty.className = "overview-empty";
+      empty.textContent = "No wiki homepage data available yet.";
+      homepageSection.body.appendChild(empty);
+      return;
+    }
+
+    const statusCard = document.createElement("div");
+    statusCard.className = "overview-card";
+    const statusTitle = document.createElement("div");
+    statusTitle.className = "overview-card-title";
+    statusTitle.textContent = "Current status";
+    const statusBody = document.createElement("div");
+    statusBody.className = "overview-card-body";
+    statusBody.textContent =
+      `${overview.snapshot.supported_count} supported finding${overview.snapshot.supported_count === 1 ? "" : "s"}, ` +
+      `${overview.snapshot.contested_count} contested, ` +
+      `${overview.snapshot.outstanding_gap_count} open gap${overview.snapshot.outstanding_gap_count === 1 ? "" : "s"}.`;
+    const statusMeta = document.createElement("div");
+    statusMeta.className = "overview-card-meta";
+    statusMeta.textContent = `Updated ${formatTimestamp(overview.generated_at)}`;
+    statusCard.append(statusTitle, statusBody, statusMeta);
+    homepageSection.body.appendChild(statusCard);
+
+    const conclusionsBlock = document.createElement("div");
+    conclusionsBlock.className = "overview-subsection";
+    const conclusionsTitle = document.createElement("div");
+    conclusionsTitle.className = "overview-subsection-title";
+    conclusionsTitle.textContent = "Current conclusions and proofs";
+    conclusionsBlock.appendChild(conclusionsTitle);
+    conclusionsBlock.appendChild(
+      createCardList(
+        overview.recent_revelations,
+        (revelation) => renderRevelation(revelation),
+        "No conclusions have been promoted yet.",
+      ),
+    );
+    homepageSection.body.appendChild(conclusionsBlock);
+
+    const questionsBlock = document.createElement("div");
+    questionsBlock.className = "overview-subsection";
+    const questionsTitle = document.createElement("div");
+    questionsTitle.className = "overview-subsection-title";
+    questionsTitle.textContent = "Open questions and needed documents";
+    questionsBlock.appendChild(questionsTitle);
+    questionsBlock.appendChild(
+      createCardList(
+        overview.focus_questions,
+        (question) => {
+          const card = renderQuestion(question);
+          const docs = inferredDocsForQuestion(question, overview);
+          appendChipRow(
+            card,
+            "Needed docs",
+            docs.map((source) => ({
+              label: truncate(source.title, 28),
+              title: source.title,
+              onClick: () => setSelectedPath(source.file_path),
+            })),
+          );
+          return card;
+        },
+        "No open questions right now.",
+      ),
+    );
+    homepageSection.body.appendChild(questionsBlock);
+
+    const todoBlock = document.createElement("div");
+    todoBlock.className = "overview-subsection";
+    const todoTitle = document.createElement("div");
+    todoTitle.className = "overview-subsection-title";
+    todoTitle.textContent = "Open to-dos";
+    todoBlock.appendChild(todoTitle);
+    todoBlock.appendChild(
+      createCardList(
+        overview.candidate_actions,
+        (action) => renderAction(action, gapLookup),
+        "No open to-dos right now.",
+      ),
+    );
+    homepageSection.body.appendChild(todoBlock);
+  }
+
   function renderGap(
     gap: OverviewGapView,
     actionLookup: Map<string, OverviewActionView>,
@@ -1433,6 +1607,7 @@ export function createOverviewPane(): HTMLElement {
 
     renderAlerts();
     renderCuratedReplay(overview);
+    renderHomepage(overview, gapLookup);
     renderSnapshot(overview, overview?.focus_questions ?? []);
 
     gapsSection.body.innerHTML = "";
