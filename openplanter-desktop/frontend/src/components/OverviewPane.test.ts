@@ -118,6 +118,8 @@ describe("createOverviewPane", () => {
     document.body.appendChild(pane);
 
     await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Investigation Home");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
       expect(pane.textContent).toContain("Who controls Acme Corp?");
       expect(pane.textContent).toContain("Claim c1 needs more evidence");
       expect(pane.textContent).toContain("Acme and PAC filings overlap");
@@ -125,6 +127,88 @@ describe("createOverviewPane", () => {
       expect(pane.querySelector(".overview-nav")).toBeNull();
       expect(pane.textContent).toContain("Acme Corp");
     });
+  });
+
+  it("defaults document view to investigation home with open to-dos", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () => makeOverview());
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Current Status");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
+      expect(pane.textContent).toContain("Open Questions");
+      expect(pane.textContent).toContain("Documents / Evidence Needed");
+      expect(pane.textContent).toContain("Open To-dos");
+      expect(pane.textContent).toContain("Verify claim c1");
+    });
+    expect(appState.get().overviewSelectedWikiPath).toBe("openplanter://investigation-home");
+    expect(readPaths).toEqual([]);
+  });
+
+  it("links investigation home entries to overview cards and replay", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-linked",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Linked proof trail",
+            summary: "This proof should link to a gap, action, and replay entry.",
+            provenance: {
+              source: "agent_step",
+              replay_seq: 7,
+              evidence_refs: ["gap:claim:c1:missing_evidence", "action:ca_1"],
+            },
+          },
+        ],
+      }),
+    );
+    __setHandler("get_session_history", () => [
+      {
+        seq: 7,
+        timestamp: "2026-03-17T12:04:00Z",
+        role: "assistant",
+        content: "Replay evidence entry",
+      },
+    ]);
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Linked proof trail");
+      expect(pane.textContent).toContain("Replay evidence entry");
+    });
+
+    const findLink = (prefix: string): HTMLAnchorElement => {
+      const link = Array.from(pane.querySelectorAll("a")).find((anchor) =>
+        anchor.getAttribute("href")?.startsWith(prefix),
+      ) as HTMLAnchorElement | undefined;
+      expect(link).toBeDefined();
+      return link!;
+    };
+
+    findLink("openplanter://overview/action/").click();
+    const actionCard = pane.querySelector('[data-action-id="ca_1"]') as HTMLElement | null;
+    expect(actionCard?.style.outline).toContain("var(--accent)");
+
+    findLink("openplanter://overview/gap/").click();
+    const gapCard = pane.querySelector(
+      '[data-gap-id="gap:claim:c1:missing_evidence"]',
+    ) as HTMLElement | null;
+    expect(gapCard?.style.outline).toContain("var(--accent)");
+
+    findLink("openplanter://overview/replay/").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const replayCard = pane.querySelector('[data-replay-seq="7"]') as HTMLElement | null;
+    expect(replayCard?.style.outline).toContain("var(--accent)");
   });
 
   it("refreshes the overview when curator updates arrive", async () => {
@@ -323,8 +407,8 @@ describe("createOverviewPane", () => {
     ) as HTMLSelectElement;
 
     await vi.waitFor(() => {
-      expect(documentSelect.options.length).toBe(2);
-      expect(readPaths).toEqual(["wiki/acme.md"]);
+      expect(documentSelect.options.length).toBe(3);
+      expect(readPaths).toEqual([]);
     });
 
     documentSelect.value = "wiki/budget.md";
@@ -342,7 +426,7 @@ describe("createOverviewPane", () => {
     });
 
     expect(documentSelect.value).toBe("wiki/budget.md");
-    expect(readPaths).toEqual(["wiki/acme.md", "wiki/budget.md"]);
+    expect(readPaths).toEqual(["wiki/budget.md"]);
   });
 
   it("keeps the wiki viewport mounted across unrelated app state updates", async () => {
@@ -357,7 +441,7 @@ describe("createOverviewPane", () => {
 
     await vi.waitFor(() => {
       expect(viewport).not.toBeNull();
-      expect(pane.textContent).toContain("wiki/acme.md");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
     });
 
     viewport.scrollTop = 64;

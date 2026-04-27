@@ -344,6 +344,15 @@ class SessionStore:
             typed_state["active_investigation_id"] = investigation_id.strip()
             investigation_path = self._investigation_state_path(sid)
             save_investigation_state(investigation_path, typed_state)
+            try:
+                _write_investigation_homepage(
+                    workspace=self.workspace,
+                    session_root_dir=self.session_root_dir,
+                    session_id=sid,
+                    state=typed_state,
+                )
+            except (OSError, TypeError):
+                pass
 
         return sid, state, created_new
 
@@ -464,6 +473,16 @@ class SessionStore:
             )
         except (OSError, TypeError):
             pass  # Non-fatal: projection is optional
+
+        try:
+            _write_investigation_homepage(
+                workspace=self.workspace,
+                session_root_dir=self.session_root_dir,
+                session_id=session_id,
+                state=typed_state,
+            )
+        except (OSError, TypeError):
+            pass  # Non-fatal: homepage generation is optional
 
         self._touch_metadata(session_id)
 
@@ -739,6 +758,396 @@ def _seed_wiki(workspace: Path, session_root_dir: str) -> None:
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+
+_CLOSED_INVESTIGATION_STATUSES = {
+    "cancelled",
+    "canceled",
+    "closed",
+    "completed",
+    "done",
+    "resolved",
+    "wont_fix",
+    "won't_fix",
+}
+
+
+def _status_is_open(status: Any) -> bool:
+    return str(status or "open").strip().lower() not in _CLOSED_INVESTIGATION_STATUSES
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _string_items(value: Any) -> list[str]:
+    return [str(item).strip() for item in _list_value(value) if str(item).strip()]
+
+
+def _markdown_link(label: str, target: str) -> str:
+    safe_label = label.replace("[", "\\[").replace("]", "\\]")
+    safe_target = target.replace(")", "%29")
+    return f"[{safe_label}]({safe_target})"
+
+
+def _evidence_label(evidence_id: str, evidence_record: dict[str, Any]) -> str:
+    for key in ("title", "name", "description", "content", "text", "source_uri", "url"):
+        value = evidence_record.get(key)
+        if isinstance(value, str) and value.strip():
+            label = value.strip().splitlines()[0]
+            return label[:120]
+    return evidence_id
+
+
+def _evidence_citation(evidence_id: str, evidence_record: dict[str, Any]) -> str:
+    label = _evidence_label(evidence_id, evidence_record)
+    for key in ("source_uri", "canonical_source_uri", "url", "artifact_path"):
+        target = evidence_record.get(key)
+        if isinstance(target, str) and target.strip():
+            return _markdown_link(f"{evidence_id}: {label}", target.strip())
+    return f"`{evidence_id}`: {label}"
+
+
+def _record_label(record: dict[str, Any], fallback: str, *keys: str) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+def _document_needs_from_question(question: dict[str, Any]) -> list[str]:
+    docs: list[str] = []
+    for key in (
+        "needed_documents",
+        "required_documents",
+        "documents_needed",
+        "missing_documents",
+        "required_sources",
+        "source_uris",
+        "sources",
+        "urls",
+    ):
+        for item in _list_value(question.get(key)):
+            if isinstance(item, str) and item.strip():
+                docs.append(item.strip())
+            elif isinstance(item, dict):
+                label = _record_label(
+                    item,
+                    "",
+                    "name",
+                    "document",
+                    "title",
+                    "description",
+                    "source_uri",
+                    "url",
+                )
+                if label:
+                    docs.append(label)
+    return _dedupe_preserve_order(docs)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
+
+
+def _candidate_action_label(action: dict[str, Any]) -> str:
+    label = _record_label(action, "", "title", "description", "label")
+    if label:
+        return label
+    action_type = str(action.get("action_type") or "Investigate").replace("_", " ").strip()
+    target_questions = _string_items(action.get("target_question_ids"))
+    target_claims = _string_items(action.get("target_claim_ids"))
+    if target_questions:
+        return f"{action_type.title()} question {target_questions[0]}"
+    if target_claims:
+        return f"{action_type.title()} claim {target_claims[0]}"
+    action_id = str(action.get("id") or action.get("action_id") or "").strip()
+    return action_id or "Investigate evidence gap"
+
+
+def _action_matches_question(action: dict[str, Any], question_id: str) -> bool:
+    if str(action.get("opened_by_question_id") or "") == question_id:
+        return True
+    return question_id in _string_items(action.get("target_question_ids"))
+
+
+def _question_documents(
+    question_id: str,
+    question: dict[str, Any],
+    candidate_actions: list[dict[str, Any]],
+) -> list[str]:
+    docs = _document_needs_from_question(question)
+    for action in candidate_actions:
+        if not _action_matches_question(action, question_id):
+            continue
+        docs.extend(_string_items(action.get("required_sources")))
+        for gap in _list_value(action.get("evidence_gap_refs")):
+            if not isinstance(gap, dict):
+                continue
+            if str(gap.get("scope") or "") == "question":
+                kind = str(gap.get("kind") or "evidence").replace("_", " ")
+                docs.append(f"{kind} for question {question_id}")
+    return _dedupe_preserve_order(docs)
+
+
+def _todo_anchor(todo_id: str) -> str:
+    return f"todo-{_safe_component(todo_id).lower()}"
+
+
+def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> str:
+    packet = build_question_reasoning_packet(state)
+    findings = packet.get("findings") if isinstance(packet.get("findings"), dict) else {}
+    supported = findings.get("supported", []) if isinstance(findings, dict) else []
+    contested = findings.get("contested", []) if isinstance(findings, dict) else []
+    unresolved = findings.get("unresolved", []) if isinstance(findings, dict) else []
+    unresolved_questions = packet.get("unresolved_questions")
+    if not isinstance(unresolved_questions, list):
+        unresolved_questions = []
+    candidate_actions = packet.get("candidate_actions")
+    if not isinstance(candidate_actions, list):
+        candidate_actions = []
+
+    questions = state.get("questions") if isinstance(state.get("questions"), dict) else {}
+    evidence = state.get("evidence") if isinstance(state.get("evidence"), dict) else {}
+    tasks = state.get("tasks") if isinstance(state.get("tasks"), dict) else {}
+    investigation_id = str(state.get("active_investigation_id") or session_id).strip() or session_id
+    objective = str(state.get("objective") or "").strip()
+    updated_at = str(state.get("updated_at") or _utc_now())
+
+    open_tasks: list[tuple[str, dict[str, Any]]] = []
+    for task_id, raw_task in tasks.items():
+        if isinstance(raw_task, dict) and _status_is_open(raw_task.get("status")):
+            open_tasks.append((str(raw_task.get("id") or task_id), raw_task))
+
+    lines = [
+        f"# Investigation Home: {investigation_id}",
+        "",
+        "> Auto-generated from `investigation_state.json`.",
+        "",
+        "## Current Status",
+        f"- **Session ID**: `{session_id}`",
+        f"- **Investigation ID**: `{investigation_id}`",
+        f"- **Last updated**: `{updated_at}`",
+        f"- **Objective**: {objective or 'Not set'}",
+        f"- **Open questions**: {len(unresolved_questions)}",
+        f"- **Supported conclusions**: {len(supported)}",
+        f"- **Contested conclusions**: {len(contested)}",
+        f"- **Open to-dos**: {len(open_tasks) + len(candidate_actions)}",
+        "",
+        "## Current Conclusions and Citations to Proofs",
+        "",
+        "### Supported Conclusions",
+    ]
+
+    if not supported:
+        lines.append("- _No supported conclusions yet._")
+    for index, claim in enumerate(supported, start=1):
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("id") or f"supported-{index}")
+        claim_text = _record_label(claim, "Unnamed supported conclusion", "claim", "claim_text", "text")
+        confidence = claim.get("confidence")
+        suffix = f" (confidence: {confidence})" if confidence is not None else ""
+        lines.append(f"{index}. **{claim_id}**: {claim_text}{suffix}")
+        proof_ids = _string_items(claim.get("support_evidence_ids"))
+        if proof_ids:
+            citations = [
+                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
+                for evidence_id in proof_ids
+                if isinstance(evidence.get(evidence_id, {}), dict)
+            ]
+            lines.append(f"   - Proofs: {', '.join(citations) if citations else '_No supporting evidence linked yet._'}")
+        else:
+            lines.append("   - Proofs: _No supporting evidence linked yet._")
+
+    lines.extend(["", "### Contested Conclusions"])
+    if not contested:
+        lines.append("- _No contested conclusions currently tracked._")
+    for index, claim in enumerate(contested, start=1):
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("id") or f"contested-{index}")
+        claim_text = _record_label(claim, "Unnamed contested conclusion", "claim", "claim_text", "text")
+        lines.append(f"{index}. **{claim_id}**: {claim_text}")
+        support_ids = _string_items(claim.get("support_evidence_ids"))
+        contradiction_ids = _string_items(claim.get("contradiction_evidence_ids"))
+        if support_ids:
+            support_citations = [
+                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
+                for evidence_id in support_ids
+                if isinstance(evidence.get(evidence_id, {}), dict)
+            ]
+            lines.append(f"   - Supporting citations: {', '.join(support_citations)}")
+        if contradiction_ids:
+            contradiction_citations = [
+                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
+                for evidence_id in contradiction_ids
+                if isinstance(evidence.get(evidence_id, {}), dict)
+            ]
+            lines.append(f"   - Contradicting citations: {', '.join(contradiction_citations)}")
+
+    if unresolved:
+        lines.extend(["", "### Unresolved Conclusions"])
+        for index, claim in enumerate(unresolved[:8], start=1):
+            if isinstance(claim, dict):
+                claim_id = str(claim.get("id") or f"unresolved-{index}")
+                claim_text = _record_label(claim, "Unnamed unresolved conclusion", "claim", "claim_text", "text")
+                lines.append(f"{index}. **{claim_id}**: {claim_text}")
+
+    lines.extend(["", "## Open Questions and Needed Documents"])
+    if not unresolved_questions:
+        lines.append("- _No open questions recorded._")
+    for index, question in enumerate(unresolved_questions, start=1):
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or f"q-{index}")
+        text = _record_label(question, "Unspecified open question", "question", "question_text", "text")
+        priority = str(question.get("priority") or "medium")
+        raw_question = questions.get(question_id, {}) if isinstance(questions.get(question_id, {}), dict) else {}
+        docs = _question_documents(question_id, raw_question, candidate_actions)
+        lines.append(f"{index}. **{text}** (`{question_id}`, priority: {priority})")
+        if docs:
+            lines.append("   - Needed documents:")
+            for doc in docs[:8]:
+                lines.append(f"     - {doc}")
+        else:
+            lines.append("   - Needed documents: _Not captured yet._")
+
+    lines.extend(["", "## Open To-Dos"])
+    if not open_tasks and not candidate_actions:
+        lines.append("- _No open to-dos._")
+    for task_id, task in open_tasks:
+        description = _record_label(task, task_id, "description", "label", "text", "title")
+        status = str(task.get("status") or "open")
+        priority = str(task.get("priority") or "unspecified")
+        target = str(task.get("link") or task.get("url") or task.get("artifact_path") or "").strip()
+        link_target = target or f"#{_todo_anchor(task_id)}"
+        lines.append(f"- {_markdown_link(description, link_target)} (`{task_id}`, {status}, priority: {priority})")
+    for action in candidate_actions:
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or action.get("action_id") or "").strip()
+        if not action_id:
+            continue
+        label = _candidate_action_label(action)
+        priority = str(action.get("priority") or "medium")
+        lines.append(f"- {_markdown_link(label, '#' + _todo_anchor(action_id))} (`{action_id}`, candidate action, priority: {priority})")
+
+    lines.extend(["", "## To-Do Details"])
+    if not open_tasks and not candidate_actions:
+        lines.append("- _No to-do details available._")
+    for task_id, task in open_tasks:
+        description = _record_label(task, task_id, "description", "label", "text", "title")
+        lines.extend([
+            f'<a id="{_todo_anchor(task_id)}"></a>',
+            f"### TODO {task_id}",
+            f"- **Status**: `{str(task.get('status') or 'open')}`",
+            f"- **Description**: {description}",
+            "",
+        ])
+    for action in candidate_actions:
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or action.get("action_id") or "").strip()
+        if not action_id:
+            continue
+        lines.extend([
+            f'<a id="{_todo_anchor(action_id)}"></a>',
+            f"### TODO {action_id}",
+            "- **Status**: `candidate_action`",
+            f"- **Description**: {_candidate_action_label(action)}",
+        ])
+        required_sources = _string_items(action.get("required_sources"))
+        if required_sources:
+            lines.append(f"- **Needed sources**: {', '.join(required_sources[:8])}")
+        rationale = action.get("rationale")
+        if isinstance(rationale, dict):
+            reason_codes = _string_items(rationale.get("reason_codes"))
+            if reason_codes:
+                lines.append(f"- **Rationale**: {', '.join(reason_codes)}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _upsert_investigation_index_link(index_path: Path, investigation_id: str, relative_path: str) -> None:
+    if index_path.exists():
+        content = index_path.read_text(encoding="utf-8")
+    else:
+        content = "# Data Sources Wiki\n\n## Sources by Category\n"
+    if relative_path in content:
+        return
+
+    row = f"| {investigation_id} | Active investigation | [{relative_path}]({relative_path}) |"
+    section_header = "### Investigations"
+    lines = content.splitlines()
+    insert_at: int | None = None
+
+    for index, line in enumerate(lines):
+        if line.strip() == section_header:
+            insert_at = index + 1
+            break
+
+    if insert_at is None:
+        contributing_at = next(
+            (index for index, line in enumerate(lines) if line.strip().lower() == "## contributing"),
+            len(lines),
+        )
+        addition = [
+            "",
+            section_header,
+            "",
+            "| Source | Jurisdiction | Link |",
+            "|--------|-------------|------|",
+            row,
+            "",
+        ]
+        lines[contributing_at:contributing_at] = addition
+    else:
+        while insert_at < len(lines) and lines[insert_at].strip() == "":
+            insert_at += 1
+        if insert_at >= len(lines) or not lines[insert_at].strip().startswith("| Source |"):
+            lines.insert(insert_at, "| Source | Jurisdiction | Link |")
+            lines.insert(insert_at + 1, "|--------|-------------|------|")
+            insert_at += 2
+        while insert_at < len(lines) and lines[insert_at].strip().startswith("|"):
+            insert_at += 1
+        lines.insert(insert_at, row)
+
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_investigation_homepage(
+    *,
+    workspace: Path,
+    session_root_dir: str,
+    session_id: str,
+    state: dict[str, Any],
+) -> None:
+    investigation_id = str(state.get("active_investigation_id") or "").strip()
+    if not investigation_id:
+        return
+
+    wiki_root = workspace / session_root_dir / "wiki"
+    relative_path = f"investigations/{_safe_component(investigation_id).lower()}.md"
+    homepage_path = wiki_root / relative_path
+    homepage_path.parent.mkdir(parents=True, exist_ok=True)
+    homepage_path.write_text(
+        _render_investigation_homepage(state, session_id=session_id),
+        encoding="utf-8",
+    )
+    _upsert_investigation_index_link(wiki_root / "index.md", investigation_id, relative_path)
 
 
 @dataclass
