@@ -79,6 +79,8 @@ const CURATED_REPLAY_ROLES = new Set([
   "step-summary",
   "user",
 ]);
+const INVESTIGATION_HOME_PATH = "openplanter://investigation-home";
+const INVESTIGATION_HOME_TITLE = "Investigation Home";
 
 export function createOverviewPane(): HTMLElement {
   const pane = document.createElement("div");
@@ -402,10 +404,111 @@ export function createOverviewPane(): HTMLElement {
     overview: InvestigationOverviewView,
     currentPath: string | null,
   ): string | null {
+    if (currentPath === INVESTIGATION_HOME_PATH) {
+      return currentPath;
+    }
     if (currentPath && findSourceByPath(overview, currentPath)) {
       return currentPath;
     }
-    return overview.wiki_nav.sources[0]?.file_path ?? null;
+    return INVESTIGATION_HOME_PATH;
+  }
+
+  function renderProofLinks(revelation: OverviewRevelationView): string {
+    const locators = parseRevelationLocators(revelation);
+    const links: string[] = [];
+    for (const locator of locators) {
+      const wikiPath = extractWikiPath(locator.value);
+      if (wikiPath) {
+        links.push(`[${locatorLabel(locator)}](${wikiPath})`);
+      } else if (locator.kind === "replay_seq") {
+        links.push(
+          `[${locatorLabel(locator)}](openplanter://overview/replay/${encodeURIComponent(locator.value)})`,
+        );
+      } else if (locator.value.startsWith("gap:")) {
+        links.push(
+          `[${locatorLabel(locator)}](openplanter://overview/gap/${encodeURIComponent(locator.value)})`,
+        );
+      } else if (locator.value.startsWith("action:")) {
+        const actionId = locator.value.slice("action:".length);
+        links.push(
+          `[${locatorLabel(locator)}](openplanter://overview/action/${encodeURIComponent(actionId)})`,
+        );
+      }
+      if (links.length >= 3) {
+        break;
+      }
+    }
+    return links.length > 0 ? links.join(", ") : "_No proof links yet._";
+  }
+
+  function buildInvestigationHomepageMarkdown(
+    overview: InvestigationOverviewView | null,
+  ): string {
+    const replaySummary = summarizeReplay(replayEntries);
+    const lines: string[] = ["# Investigation Home", ""];
+
+    if (!overview) {
+      lines.push("No investigation overview is available yet.");
+      return lines.join("\n");
+    }
+
+    lines.push("## Current Status");
+    lines.push(`- Session: \`${overview.session_id ?? "no active session"}\``);
+    lines.push(`- Active state: **${replaySummary.activeState}** (${replaySummary.activeDetail})`);
+    lines.push(`- Replay health: **${replaySummary.healthLabel}** (${replaySummary.healthDetail})`);
+    lines.push(`- Last updated: ${formatTimestamp(overview.generated_at)}`);
+    lines.push("");
+
+    lines.push("## Current Conclusions & Proofs");
+    if (overview.recent_revelations.length === 0) {
+      lines.push("- No conclusions surfaced yet.");
+    } else {
+      for (const revelation of overview.recent_revelations.slice(0, 6)) {
+        lines.push(`- **${revelation.title}** — ${revelation.summary}`);
+        lines.push(`  - Proof links: ${renderProofLinks(revelation)}`);
+      }
+    }
+    lines.push("");
+
+    lines.push("## Open Questions");
+    if (overview.focus_questions.length === 0) {
+      lines.push("- No open questions right now.");
+    } else {
+      for (const question of overview.focus_questions) {
+        lines.push(`- **${question.text}** (_priority: ${question.priority}_)`);
+      }
+    }
+    lines.push("");
+
+    lines.push("## Documents / Evidence Needed");
+    if (overview.outstanding_gaps.length === 0) {
+      lines.push("- No unresolved evidence gaps.");
+    } else {
+      for (const gap of overview.outstanding_gaps) {
+        const actionLinks = gap.related_action_ids.map(
+          (actionId) =>
+            `[${actionId}](openplanter://overview/action/${encodeURIComponent(actionId)})`,
+        );
+        lines.push(`- **${gap.label}** (_${gap.kind}_ / ${gap.scope})`);
+        if (actionLinks.length > 0) {
+          lines.push(`  - Linked to-do(s): ${actionLinks.join(", ")}`);
+        }
+      }
+    }
+    lines.push("");
+
+    lines.push("## Open To-dos");
+    if (overview.candidate_actions.length === 0) {
+      lines.push("- No open to-dos.");
+    } else {
+      for (const action of overview.candidate_actions) {
+        lines.push(
+          `- [${action.label}](openplanter://overview/action/${encodeURIComponent(action.action_id)}) (_priority: ${action.priority}_)`,
+        );
+      }
+    }
+
+    return lines.join("\n");
   }
 
   function findElementsByData(
@@ -792,6 +895,18 @@ export function createOverviewPane(): HTMLElement {
       return;
     }
 
+    if (path === INVESTIGATION_HOME_PATH) {
+      documentTitle = INVESTIGATION_HOME_TITLE;
+      documentStatus = "ready";
+      documentHtml = md.render(buildInvestigationHomepageMarkdown(overview));
+      documentError = "";
+      loadedDocumentPath = path;
+      render();
+      interceptDocumentLinks();
+      documentViewport.scrollTop = 0;
+      return;
+    }
+
     const source = findSourceByPath(overview, path);
     documentTitle = source?.title ?? path.replace(/^wiki\//, "").replace(/\.md$/, "");
     documentStatus = "loading";
@@ -870,6 +985,31 @@ export function createOverviewPane(): HTMLElement {
       const href = anchor.getAttribute("href");
       if (!href) return;
       anchor.addEventListener("click", (event) => {
+        if (href.startsWith("openplanter://overview/action/")) {
+          event.preventDefault();
+          const actionId = decodeURIComponent(
+            href.slice("openplanter://overview/action/".length),
+          );
+          focusOverviewCard(actionsSection.body, "action-id", actionId);
+          return;
+        }
+        if (href.startsWith("openplanter://overview/gap/")) {
+          event.preventDefault();
+          const gapId = decodeURIComponent(href.slice("openplanter://overview/gap/".length));
+          focusOverviewCard(gapsSection.body, "gap-id", gapId);
+          return;
+        }
+        if (href.startsWith("openplanter://overview/replay/")) {
+          event.preventDefault();
+          const replaySeq = Number.parseInt(
+            decodeURIComponent(href.slice("openplanter://overview/replay/".length)),
+            10,
+          );
+          if (!Number.isNaN(replaySeq)) {
+            focusReplay(replaySeq);
+          }
+          return;
+        }
         const resolvedPath = resolveWikiMarkdownHref(href, {
           baseWikiPath: loadedDocumentPath,
         });
@@ -1340,7 +1480,7 @@ export function createOverviewPane(): HTMLElement {
   function renderDocumentNav(overview: InvestigationOverviewView | null): void {
     const selectedPath = appState.get().overviewSelectedWikiPath;
 
-    if (!overview || overview.wiki_nav.sources.length === 0) {
+    if (!overview) {
       documentSelect.innerHTML = "";
       const option = document.createElement("option");
       option.value = "";
@@ -1352,6 +1492,14 @@ export function createOverviewPane(): HTMLElement {
 
     documentSelect.disabled = false;
     documentSelect.innerHTML = "";
+
+    const homeGroup = document.createElement("optgroup");
+    homeGroup.label = "investigation";
+    const homeOption = document.createElement("option");
+    homeOption.value = INVESTIGATION_HOME_PATH;
+    homeOption.textContent = INVESTIGATION_HOME_TITLE;
+    homeGroup.appendChild(homeOption);
+    documentSelect.appendChild(homeGroup);
 
     let currentCategory = "";
     let categoryGroup: HTMLOptGroupElement | null = null;
@@ -1369,7 +1517,10 @@ export function createOverviewPane(): HTMLElement {
       (categoryGroup ?? documentSelect).appendChild(option);
     }
 
-    documentSelect.value = selectedPath ?? overview.wiki_nav.sources[0]?.file_path ?? "";
+    documentSelect.value =
+      selectedPath && (selectedPath === INVESTIGATION_HOME_PATH || findSourceByPath(overview, selectedPath))
+        ? selectedPath
+        : INVESTIGATION_HOME_PATH;
   }
 
   function renderDocument(overview: InvestigationOverviewView | null): void {
