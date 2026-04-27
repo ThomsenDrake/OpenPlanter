@@ -202,6 +202,105 @@ class SessionStoreTypedStateTests(unittest.TestCase):
             self.assertEqual(projected["external_observations"], ["fresh"])
             self.assertEqual(projected["custom_field"], "after")
 
+    def test_save_state_writes_investigation_homepage_with_conclusions_questions_and_todos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(session_id="wiki-homepage", resume=False)
+            session_dir = root / ".openplanter" / "sessions" / sid
+            typed = {
+                "schema_version": "1.0.0",
+                "session_id": sid,
+                "created_at": "2026-03-13T00:00:00+00:00",
+                "updated_at": "2026-03-13T00:00:00+00:00",
+                "objective": "Determine whether ACME bribed officials.",
+                "active_investigation_id": "acme-bribery",
+                "ontology": {"namespace": "openplanter.core", "version": "2026-03"},
+                "entities": {},
+                "links": {},
+                "claims": {
+                    "cl_1": {
+                        "claim_text": "ACME paid Consultant X before contract awards.",
+                        "status": "supported",
+                        "support_evidence_ids": ["ev_1"],
+                    }
+                },
+                "evidence": {
+                    "ev_1": {
+                        "id": "ev_1",
+                        "content": "Invoice and payment ledger entries show transfers in March 2025.",
+                        "source_uri": "docs/payments.csv",
+                    }
+                },
+                "hypotheses": {},
+                "questions": {
+                    "q_1": {
+                        "id": "q_1",
+                        "question_text": "Who approved Consultant X invoices?",
+                        "status": "open",
+                        "needed_documents": ["Invoice approval signatures", "Accounts payable audit trail"],
+                    }
+                },
+                "tasks": {
+                    "t_1": {
+                        "id": "t_1",
+                        "description": "Request AP approval log export.",
+                        "status": "pending",
+                        "priority": "high",
+                        "artifact_path": "artifacts/ap-log-request.md",
+                    }
+                },
+                "actions": {},
+                "provenance_nodes": {},
+                "confidence_profiles": {},
+                "timeline": [],
+                "indexes": {"by_external_ref": {}, "by_tag": {}},
+                "legacy": {
+                    "external_observations": [],
+                    "turn_history": [],
+                    "loop_metrics": {},
+                    "extra_fields": {},
+                },
+            }
+            (session_dir / "investigation_state.json").write_text(json.dumps(typed), encoding="utf-8")
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-03-13T12:30:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            homepage_path = root / ".openplanter" / "wiki" / "investigations" / "acme-bribery" / "index.md"
+            self.assertTrue(homepage_path.exists())
+            homepage = homepage_path.read_text(encoding="utf-8")
+            self.assertIn("## Current Status", homepage)
+            self.assertIn("## Current Conclusions", homepage)
+            self.assertIn("Proof citations", homepage)
+            self.assertIn("## Open Questions and Needed Documents", homepage)
+            self.assertIn("Invoice approval signatures", homepage)
+            self.assertIn("[Open](artifacts/ap-log-request.md)", homepage)
+
+    def test_save_state_skips_investigation_homepage_without_active_investigation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(session_id="no-inv-homepage", resume=False)
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-03-13T12:30:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            investigations_dir = root / ".openplanter" / "wiki" / "investigations"
+            self.assertFalse(investigations_dir.exists())
+
 
 class QuestionReasoningPacketTests(unittest.TestCase):
     def test_build_question_reasoning_packet_groups_findings_and_contradictions(self) -> None:
