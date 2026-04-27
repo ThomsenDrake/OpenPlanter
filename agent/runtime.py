@@ -464,6 +464,10 @@ class SessionStore:
             )
         except (OSError, TypeError):
             pass  # Non-fatal: projection is optional
+        try:
+            _write_investigation_homepage(self.workspace, self.session_root_dir, typed_state)
+        except OSError:
+            pass  # Non-fatal: homepage generation is best effort
 
         self._touch_metadata(session_id)
 
@@ -739,6 +743,166 @@ def _seed_wiki(workspace: Path, session_root_dir: str) -> None:
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+
+def _status_is_open(status: Any) -> bool:
+    value = str(status or "").strip().lower()
+    return value not in {"resolved", "closed", "done", "completed", "wont_fix", "won't_fix", "cancelled"}
+
+
+def _list_from(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _document_needs(question: dict[str, Any]) -> list[str]:
+    candidate_keys = (
+        "needed_documents",
+        "required_documents",
+        "documents_needed",
+        "missing_documents",
+    )
+    docs: list[str] = []
+    for key in candidate_keys:
+        for item in _list_from(question.get(key)):
+            if isinstance(item, str) and item.strip():
+                docs.append(item.strip())
+            elif isinstance(item, dict):
+                label = str(item.get("name") or item.get("document") or item.get("description") or "").strip()
+                if label:
+                    docs.append(label)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        lowered = doc.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(doc)
+    return deduped
+
+
+def _evidence_link(ev_id: str, evidence: dict[str, dict[str, Any]]) -> str:
+    ev = evidence.get(ev_id, {})
+    url = str(ev.get("url") or ev.get("source_url") or ev.get("source_uri") or "").strip()
+    label = str(ev.get("content") or ev.get("text") or ev.get("description") or ev_id).strip()[:140]
+    if url:
+        return f"- `{ev_id}`: [{label}]({url})"
+    return f"- `{ev_id}`: {label}"
+
+
+def _render_investigation_homepage(investigation_id: str, state: dict[str, Any]) -> str:
+    questions = state.get("questions") if isinstance(state.get("questions"), dict) else {}
+    claims = state.get("claims") if isinstance(state.get("claims"), dict) else {}
+    evidence = state.get("evidence") if isinstance(state.get("evidence"), dict) else {}
+    tasks = state.get("tasks") if isinstance(state.get("tasks"), dict) else {}
+    objective = str(state.get("objective") or "").strip()
+    updated_at = str(state.get("updated_at") or _utc_now())
+
+    open_questions = [
+        (qid, q) for qid, q in questions.items()
+        if isinstance(q, dict) and _status_is_open(q.get("status"))
+    ]
+    open_tasks = [
+        (tid, t) for tid, t in tasks.items()
+        if isinstance(t, dict) and _status_is_open(t.get("status"))
+    ]
+    current_conclusions = []
+    for cid, claim in claims.items():
+        if not isinstance(claim, dict):
+            continue
+        status = str(claim.get("status") or "unresolved").strip().lower()
+        if status not in {"supported", "contested", "unresolved", "proposed"}:
+            continue
+        text = str(claim.get("claim_text") or claim.get("text") or cid).strip()
+        support_ids = _list_from(claim.get("support_evidence_ids")) + _list_from(claim.get("evidence_ids"))
+        contradiction_ids = _list_from(claim.get("contradiction_evidence_ids")) + _list_from(claim.get("contradict_evidence_ids"))
+        evidence_ids: list[str] = []
+        for raw_id in support_ids + contradiction_ids:
+            if isinstance(raw_id, str) and raw_id not in evidence_ids:
+                evidence_ids.append(raw_id)
+        current_conclusions.append((cid, status, text, evidence_ids[:8]))
+
+    lines = [
+        f"# Investigation Homepage: {investigation_id}",
+        "",
+        "## Current Status",
+        f"- **Last updated**: {updated_at}",
+        f"- **Objective**: {objective or 'Not set'}",
+        f"- **Open questions**: {len(open_questions)}",
+        f"- **Open to-dos**: {len(open_tasks)}",
+        f"- **Tracked claims**: {len(claims)}",
+        "",
+        "## Current Conclusions",
+    ]
+    if current_conclusions:
+        for claim_id, status, claim_text, evidence_ids in current_conclusions:
+            lines.append(f"- **{status.upper()}** `{claim_id}`: {claim_text}")
+            if evidence_ids:
+                lines.append("  - Proof citations:")
+                for ev_id in evidence_ids:
+                    lines.append(f"    - `{ev_id}`")
+    else:
+        lines.append("- No claim conclusions have been recorded yet.")
+
+    lines.extend(["", "## Citation Proofs"])
+    cited_ids: list[str] = []
+    for _, _, _, ev_ids in current_conclusions:
+        for ev_id in ev_ids:
+            if ev_id not in cited_ids:
+                cited_ids.append(ev_id)
+    if cited_ids:
+        for ev_id in cited_ids:
+            lines.append(_evidence_link(ev_id, evidence))
+    else:
+        lines.append("- No supporting or contradicting evidence has been attached to claims yet.")
+
+    lines.extend(["", "## Open Questions and Needed Documents"])
+    if open_questions:
+        for qid, question in open_questions:
+            text = str(question.get("question_text") or question.get("question") or qid).strip()
+            lines.append(f"- **{qid}**: {text}")
+            docs = _document_needs(question)
+            if docs:
+                lines.append("  - Documents needed:")
+                for doc in docs:
+                    lines.append(f"    - {doc}")
+            else:
+                lines.append("  - Documents needed: _Not captured yet._")
+    else:
+        lines.append("- No open questions.")
+
+    lines.extend(["", "## Open To-Dos"])
+    if open_tasks:
+        for tid, task in open_tasks:
+            desc = str(task.get("description") or task.get("text") or tid).strip()
+            status = str(task.get("status") or "pending").strip().lower()
+            priority = str(task.get("priority") or "unspecified").strip().lower()
+            action_link = str(task.get("link") or task.get("url") or task.get("artifact_path") or "").strip()
+            if action_link:
+                lines.append(
+                    f"- [ ] `{tid}` ({status}, priority: {priority}) — {desc} — [Open]({action_link})"
+                )
+            else:
+                lines.append(f"- [ ] `{tid}` ({status}, priority: {priority}) — {desc}")
+    else:
+        lines.append("- No open to-dos.")
+
+    lines.extend(["", "_This page is auto-generated from `investigation_state.json`._", ""])
+    return "\n".join(lines)
+
+
+def _write_investigation_homepage(workspace: Path, session_root_dir: str, state: dict[str, Any]) -> None:
+    investigation_id = state.get("active_investigation_id")
+    if not isinstance(investigation_id, str) or not investigation_id.strip():
+        return
+    inv_id = investigation_id.strip()
+    slug = _safe_component(inv_id.lower())
+    investigations_root = workspace / session_root_dir / "wiki" / "investigations"
+    homepage_path = investigations_root / slug / "index.md"
+    homepage_path.parent.mkdir(parents=True, exist_ok=True)
+    homepage_path.write_text(_render_investigation_homepage(inv_id, state), encoding="utf-8")
 
 
 @dataclass
