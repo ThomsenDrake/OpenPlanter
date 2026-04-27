@@ -123,7 +123,21 @@ describe("createOverviewPane", () => {
       expect(pane.textContent).toContain("Acme and PAC filings overlap");
       expect(pane.querySelector(".overview-document-select")).not.toBeNull();
       expect(pane.querySelector(".overview-nav")).toBeNull();
+      expect(pane.textContent).toContain("Investigation Home");
       expect(pane.textContent).toContain("Acme Corp");
+    });
+  });
+
+  it("defaults document view to investigation home with open to-dos", async () => {
+    __setHandler("get_investigation_overview", () => makeOverview());
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
+      expect(pane.textContent).toContain("Open To-dos");
+      expect(pane.textContent).toContain("Verify claim c1");
     });
   });
 
@@ -323,8 +337,8 @@ describe("createOverviewPane", () => {
     ) as HTMLSelectElement;
 
     await vi.waitFor(() => {
-      expect(documentSelect.options.length).toBe(2);
-      expect(readPaths).toEqual(["wiki/acme.md"]);
+      expect(documentSelect.options.length).toBe(3);
+      expect(readPaths).toEqual([]);
     });
 
     documentSelect.value = "wiki/budget.md";
@@ -342,7 +356,7 @@ describe("createOverviewPane", () => {
     });
 
     expect(documentSelect.value).toBe("wiki/budget.md");
-    expect(readPaths).toEqual(["wiki/acme.md", "wiki/budget.md"]);
+    expect(readPaths).toEqual(["wiki/budget.md"]);
   });
 
   it("keeps the wiki viewport mounted across unrelated app state updates", async () => {
@@ -357,7 +371,7 @@ describe("createOverviewPane", () => {
 
     await vi.waitFor(() => {
       expect(viewport).not.toBeNull();
-      expect(pane.textContent).toContain("wiki/acme.md");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
     });
 
     viewport.scrollTop = 64;
