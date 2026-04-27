@@ -344,6 +344,15 @@ class SessionStore:
             typed_state["active_investigation_id"] = investigation_id.strip()
             investigation_path = self._investigation_state_path(sid)
             save_investigation_state(investigation_path, typed_state)
+            try:
+                _write_investigation_homepage(
+                    workspace=self.workspace,
+                    session_root_dir=self.session_root_dir,
+                    session_id=sid,
+                    state=typed_state,
+                )
+            except OSError:
+                pass
 
         return sid, state, created_new
 
@@ -464,6 +473,16 @@ class SessionStore:
             )
         except (OSError, TypeError):
             pass  # Non-fatal: projection is optional
+
+        try:
+            _write_investigation_homepage(
+                workspace=self.workspace,
+                session_root_dir=self.session_root_dir,
+                session_id=session_id,
+                state=typed_state,
+            )
+        except OSError:
+            pass
 
         self._touch_metadata(session_id)
 
@@ -739,6 +758,217 @@ def _seed_wiki(workspace: Path, session_root_dir: str) -> None:
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+
+def _build_evidence_citation(evidence_id: str, evidence_record: dict[str, Any]) -> str:
+    source_uri = evidence_record.get("source_uri")
+    if isinstance(source_uri, str) and source_uri.strip():
+        return f"[{evidence_id}]({source_uri.strip()})"
+    return evidence_id
+
+
+def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> str:
+    packet = build_question_reasoning_packet(state)
+    findings = packet.get("findings", {})
+    supported = findings.get("supported", []) if isinstance(findings, dict) else []
+    contested = findings.get("contested", []) if isinstance(findings, dict) else []
+    unresolved_questions = packet.get("unresolved_questions", [])
+    candidate_actions = packet.get("candidate_actions", [])
+    evidence = state.get("evidence") if isinstance(state.get("evidence"), dict) else {}
+    tasks = state.get("tasks") if isinstance(state.get("tasks"), dict) else {}
+    updated_at = str(state.get("updated_at") or _utc_now())
+    active_investigation_id = str(state.get("active_investigation_id") or session_id)
+
+    lines = [
+        f"# Investigation Homepage: {active_investigation_id}",
+        "",
+        "> Auto-generated from `investigation_state.json`.",
+        "",
+        "## Current Status",
+        f"- **Session ID**: `{session_id}`",
+        f"- **Investigation ID**: `{active_investigation_id}`",
+        f"- **Last updated**: `{updated_at}`",
+        f"- **Open questions**: {len(unresolved_questions)}",
+        f"- **Supported conclusions**: {len(supported)}",
+        f"- **Contested conclusions**: {len(contested)}",
+        "",
+        "## Current Conclusions and Citations to Proofs",
+        "",
+        "### Supported Conclusions",
+    ]
+
+    if not supported:
+        lines.append("- _No supported conclusions yet._")
+    for idx, claim in enumerate(supported, start=1):
+        claim_text = str(claim.get("claim") or "").strip() or "Unnamed supported conclusion"
+        confidence = claim.get("confidence")
+        confidence_suffix = f" (confidence: {confidence})" if confidence is not None else ""
+        lines.append(f"{idx}. {claim_text}{confidence_suffix}")
+        proof_ids = [str(ev_id) for ev_id in claim.get("support_evidence_ids", []) if ev_id]
+        if proof_ids:
+            citations = [
+                _build_evidence_citation(ev_id, evidence.get(ev_id, {}))
+                for ev_id in proof_ids
+            ]
+            lines.append(f"   - Proofs: {', '.join(citations)}")
+        else:
+            lines.append("   - Proofs: _No supporting evidence linked yet._")
+
+    lines.extend(["", "### Contested Conclusions"])
+    if not contested:
+        lines.append("- _No contested conclusions currently tracked._")
+    for idx, claim in enumerate(contested, start=1):
+        claim_text = str(claim.get("claim") or "").strip() or "Unnamed contested conclusion"
+        lines.append(f"{idx}. {claim_text}")
+        support_ids = [str(ev_id) for ev_id in claim.get("support_evidence_ids", []) if ev_id]
+        contra_ids = [str(ev_id) for ev_id in claim.get("contradiction_evidence_ids", []) if ev_id]
+        if support_ids:
+            support_citations = [
+                _build_evidence_citation(ev_id, evidence.get(ev_id, {}))
+                for ev_id in support_ids
+            ]
+            lines.append(f"   - Supporting citations: {', '.join(support_citations)}")
+        if contra_ids:
+            contradiction_citations = [
+                _build_evidence_citation(ev_id, evidence.get(ev_id, {}))
+                for ev_id in contra_ids
+            ]
+            lines.append(f"   - Contradicting citations: {', '.join(contradiction_citations)}")
+
+    lines.extend(["", "## Open Questions and Needed Documents"])
+    if not unresolved_questions:
+        lines.append("- _No open questions recorded._")
+    for idx, question in enumerate(unresolved_questions, start=1):
+        question_id = str(question.get("id") or f"q-{idx}")
+        text = str(question.get("question") or "").strip() or "Unspecified open question"
+        lines.append(f"{idx}. **{text}** (`{question_id}`)")
+        matching_actions = []
+        for action in candidate_actions:
+            gap_refs = action.get("evidence_gap_refs", [])
+            if not isinstance(gap_refs, list):
+                continue
+            for gap in gap_refs:
+                if isinstance(gap, dict) and str(gap.get("scope") or "") == f"question:{question_id}":
+                    matching_actions.append(action)
+                    break
+        if not matching_actions:
+            lines.append("   - Needed documents: _No specific document targets yet._")
+            continue
+        for action in matching_actions:
+            label = str(action.get("label") or "Investigate evidence gap")
+            lines.append(f"   - Needed documents: {label}")
+
+    lines.extend(["", "## Open To-Dos"])
+    open_tasks = []
+    for task_id, raw_task in tasks.items():
+        if not isinstance(raw_task, dict):
+            continue
+        status = str(raw_task.get("status") or "open").lower()
+        if status in {"done", "completed", "closed", "cancelled", "canceled"}:
+            continue
+        description = str(raw_task.get("description") or raw_task.get("label") or task_id)
+        open_tasks.append((str(raw_task.get("id") or task_id), status, description))
+
+    if not open_tasks and not candidate_actions:
+        lines.append("- _No open to-dos._")
+    for task_id, status, description in open_tasks:
+        lines.append(f"- [{description}](#todo-{task_id.lower()}) — `{status}`")
+    for action in candidate_actions:
+        action_id = str(action.get("action_id") or "")
+        label = str(action.get("label") or "").strip()
+        if not action_id or not label:
+            continue
+        lines.append(f"- [{label}](#todo-{action_id.lower()}) — `candidate_action`")
+
+    lines.extend(["", "## To-Do Details"])
+    if not open_tasks and not candidate_actions:
+        lines.append("- _No to-do details available._")
+    for task_id, status, description in open_tasks:
+        lines.extend([
+            f"### TODO {task_id}",
+            f"<a id=\"todo-{task_id.lower()}\"></a>",
+            f"- **Status**: `{status}`",
+            f"- **Description**: {description}",
+            "",
+        ])
+    for action in candidate_actions:
+        action_id = str(action.get("action_id") or "")
+        label = str(action.get("label") or "").strip()
+        if not action_id or not label:
+            continue
+        lines.extend([
+            f"### TODO {action_id}",
+            f"<a id=\"todo-{action_id.lower()}\"></a>",
+            "- **Status**: `candidate_action`",
+            f"- **Description**: {label}",
+        ])
+        rationale = action.get("rationale")
+        if isinstance(rationale, str) and rationale.strip():
+            lines.append(f"- **Rationale**: {rationale.strip()}")
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _upsert_investigation_index_link(index_path: Path, investigation_id: str, relative_path: str) -> None:
+    if not index_path.exists():
+        return
+    content = index_path.read_text(encoding="utf-8")
+    if relative_path in content:
+        return
+
+    row = f"| {investigation_id} | Active session scope | [{relative_path}]({relative_path}) |"
+    section_header = "### Investigations"
+    if section_header in content:
+        lines = content.splitlines()
+        insert_at = None
+        for idx, line in enumerate(lines):
+            if line.strip() == section_header:
+                insert_at = idx + 1
+                break
+        if insert_at is None:
+            return
+        while insert_at < len(lines) and lines[insert_at].strip() == "":
+            insert_at += 1
+        if insert_at >= len(lines) or not lines[insert_at].strip().startswith("| Source |"):
+            lines.insert(insert_at, "| Source | Jurisdiction | Link |")
+            lines.insert(insert_at + 1, "|--------|-------------|------|")
+            insert_at += 2
+        while insert_at < len(lines) and lines[insert_at].strip().startswith("|"):
+            insert_at += 1
+        lines.insert(insert_at, row)
+        index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return
+
+    addition = [
+        "",
+        "### Investigations",
+        "",
+        "| Source | Jurisdiction | Link |",
+        "|--------|-------------|------|",
+        row,
+    ]
+    index_path.write_text(content.rstrip() + "\n" + "\n".join(addition) + "\n", encoding="utf-8")
+
+
+def _write_investigation_homepage(
+    workspace: Path,
+    session_root_dir: str,
+    session_id: str,
+    state: dict[str, Any],
+) -> None:
+    wiki_root = workspace / session_root_dir / "wiki"
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    investigation_id = str(state.get("active_investigation_id") or session_id).strip() or session_id
+    slug = _safe_component(investigation_id).lower()
+    relative_path = f"investigations/{slug}.md"
+    homepage_path = wiki_root / relative_path
+    homepage_path.parent.mkdir(parents=True, exist_ok=True)
+    homepage_path.write_text(
+        _render_investigation_homepage(state, session_id=session_id),
+        encoding="utf-8",
+    )
+    _upsert_investigation_index_link(wiki_root / "index.md", investigation_id, relative_path)
 
 
 @dataclass
