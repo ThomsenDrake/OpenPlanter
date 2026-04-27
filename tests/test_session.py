@@ -8,6 +8,7 @@ from pathlib import Path
 from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
+from agent.investigation_state import save_investigation_state
 from agent.model import Conversation, ModelTurn, ScriptedModel
 from agent.runtime import SessionRuntime, SessionStore, _has_reasoning_content
 from agent.tools import WorkspaceTools
@@ -467,6 +468,85 @@ class SessionRuntimeTests(unittest.TestCase):
                 turn_record["outputs"]["result_summary_ref"],
             )
             self.assertEqual(turn_record["outcome"]["status"], "completed")
+
+    def test_store_writes_investigation_homepage_with_status_conclusions_questions_and_todos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            wiki_dir = root / ".openplanter" / "wiki"
+            wiki_dir.mkdir(parents=True, exist_ok=True)
+            (wiki_dir / "index.md").write_text(
+                "# Data Sources Wiki\n\n## Sources by Category\n",
+                encoding="utf-8",
+            )
+
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home",
+                resume=False,
+                investigation_id="acme-probe",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["updated_at"] = "2026-04-25T00:00:00+00:00"
+            typed_state["questions"] = {
+                "q_open": {
+                    "id": "q_open",
+                    "question_text": "Who approved the transfer?",
+                    "status": "open",
+                    "priority": "high",
+                    "claim_ids": ["cl_supported"],
+                }
+            }
+            typed_state["claims"] = {
+                "cl_supported": {
+                    "id": "cl_supported",
+                    "claim_text": "A payment was routed through shell entities.",
+                    "status": "supported",
+                    "confidence": 0.82,
+                    "support_evidence_ids": ["ev_doc_1"],
+                }
+            }
+            typed_state["evidence"] = {
+                "ev_doc_1": {
+                    "id": "ev_doc_1",
+                    "source_uri": "https://example.com/proof.pdf",
+                }
+            }
+            typed_state["tasks"] = {
+                "todo_1": {
+                    "id": "todo_1",
+                    "description": "Pull wire transfer records",
+                    "status": "open",
+                }
+            }
+
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                    "turn_history": [],
+                    "loop_metrics": {},
+                },
+            )
+
+            homepage = root / ".openplanter" / "wiki" / "investigations" / "acme-probe.md"
+            self.assertTrue(homepage.exists())
+            content = homepage.read_text(encoding="utf-8")
+            self.assertIn("## Current Status", content)
+            self.assertIn("## Current Conclusions and Citations to Proofs", content)
+            self.assertIn("[ev_doc_1](https://example.com/proof.pdf)", content)
+            self.assertIn("## Open Questions and Needed Documents", content)
+            self.assertIn("## Open To-Dos", content)
+            self.assertIn("(#todo-todo_1)", content)
+
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("### Investigations", index_content)
+            self.assertIn("[investigations/acme-probe.md](investigations/acme-probe.md)", index_content)
 
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
