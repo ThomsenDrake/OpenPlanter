@@ -1097,7 +1097,13 @@ def _upsert_investigation_index_link(index_path: Path, investigation_id: str, re
         content = index_path.read_text(encoding="utf-8")
     else:
         content = "# Data Sources Wiki\n\n## Sources by Category\n"
-    if relative_path in content:
+    link_target_pattern = re.compile(
+        rf"\]\({re.escape(relative_path)}\)(?:\s*\||\s*$)"
+    )
+    if any(
+        line.lstrip().startswith("|") and link_target_pattern.search(line)
+        for line in content.splitlines()
+    ):
         return
 
     investigation_label = _markdown_table_cell(investigation_id)

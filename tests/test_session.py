@@ -644,6 +644,30 @@ class SessionRuntimeTests(unittest.TestCase):
             )
             self.assertNotIn("| test|pipe", index_content)
 
+    def test_store_adds_index_links_for_substring_homepage_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="homepage-substring-long",
+                resume=False,
+                investigation_id="acme.md",
+            )
+            store.open_session(
+                session_id="homepage-substring-short",
+                resume=False,
+                investigation_id="acme",
+            )
+
+            index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                "[investigations/acme.md.md](investigations/acme.md.md)",
+                index_content,
+            )
+            self.assertIn("[investigations/acme.md](investigations/acme.md)", index_content)
+
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
