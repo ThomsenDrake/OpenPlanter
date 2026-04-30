@@ -622,6 +622,23 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("# Data Sources Wiki", index_content)
             self.assertIn("[investigations/artifact.md](investigations/artifact.md)", index_content)
 
+    def test_store_escapes_investigation_id_in_homepage_index_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="escaped-home",
+                resume=False,
+                investigation_id="test|pipe\nnext",
+            )
+
+            index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "| test\\|pipe next | Active investigation | [investigations/test-pipe-next.md](investigations/test-pipe-next.md) |",
+                index_content,
+            )
+            self.assertNotIn("| test|pipe", index_content)
+
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

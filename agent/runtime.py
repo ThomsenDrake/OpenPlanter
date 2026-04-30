@@ -791,6 +791,10 @@ def _markdown_link(label: str, target: str) -> str:
     return f"[{safe_label}]({safe_target})"
 
 
+def _markdown_table_cell(value: str) -> str:
+    return value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("|", "\\|")
+
+
 def _evidence_label(evidence_id: str, evidence_record: dict[str, Any]) -> str:
     for key in ("title", "name", "description", "content", "text", "source_uri", "url"):
         value = evidence_record.get(key)
@@ -1089,7 +1093,8 @@ def _upsert_investigation_index_link(index_path: Path, investigation_id: str, re
     if relative_path in content:
         return
 
-    row = f"| {investigation_id} | Active investigation | [{relative_path}]({relative_path}) |"
+    investigation_label = _markdown_table_cell(investigation_id)
+    row = f"| {investigation_label} | Active investigation | [{relative_path}]({relative_path}) |"
     section_header = "### Investigations"
     lines = content.splitlines()
     insert_at: int | None = None
