@@ -948,6 +948,11 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
     investigation_id = str(state.get("active_investigation_id") or session_id).strip() or session_id
     objective = str(state.get("objective") or "").strip()
     updated_at = str(state.get("updated_at") or _utc_now())
+    open_question_count = sum(
+        1
+        for raw_question in questions.values()
+        if isinstance(raw_question, dict) and _status_is_open(raw_question.get("status"))
+    )
 
     open_tasks: list[tuple[str, dict[str, Any]]] = []
     for task_id, raw_task in tasks.items():
@@ -964,7 +969,7 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         f"- **Investigation ID**: `{investigation_id}`",
         f"- **Last updated**: `{updated_at}`",
         f"- **Objective**: {objective or 'Not set'}",
-        f"- **Open questions**: {len(unresolved_questions)}",
+        f"- **Open questions**: {open_question_count}",
         f"- **Supported conclusions**: {len(supported)}",
         f"- **Contested conclusions**: {len(contested)}",
         f"- **Open to-dos**: {len(open_tasks) + len(candidate_actions)}",

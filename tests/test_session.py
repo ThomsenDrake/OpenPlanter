@@ -588,6 +588,47 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("### Investigations", index_content)
             self.assertIn("[investigations/acme-probe.md](investigations/acme-probe.md)", index_content)
 
+    def test_store_counts_all_open_questions_in_investigation_homepage_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home-many-questions",
+                resume=False,
+                investigation_id="many-questions",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["questions"] = {
+                f"q_{index}": {
+                    "id": f"q_{index}",
+                    "question_text": f"Open question {index}",
+                    "status": "open",
+                }
+                for index in range(1, 10)
+            }
+            typed_state["questions"]["q_closed"] = {
+                "id": "q_closed",
+                "question_text": "Already answered",
+                "status": "resolved",
+            }
+
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            homepage = root / ".openplanter" / "wiki" / "investigations" / "many-questions.md"
+            content = homepage.read_text(encoding="utf-8")
+            self.assertIn("- **Open questions**: 9", content)
+
     def test_store_skips_investigation_homepage_without_active_investigation_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
