@@ -6,6 +6,7 @@ Includes live API tests that are skipped if network is unavailable.
 Tests use small queries that don't require an API key.
 """
 
+import io
 import json
 import os
 import socket
@@ -219,11 +220,20 @@ class TestCensusAcsFetch(unittest.TestCase):
 
     def test_fetch_census_data_handles_http_error(self):
         """Test error handling for HTTP errors."""
-        # Build URL with intentionally invalid parameters
         url = "https://api.census.gov/data/9999/acs/acs5?get=INVALID&for=state:*"
+        error = urllib.error.HTTPError(
+            url=url,
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=io.BytesIO(b"invalid dataset"),
+        )
 
-        with self.assertRaises(urllib.error.HTTPError):
-            fetch_census_acs.fetch_census_data(url)
+        with mock.patch("urllib.request.urlopen", side_effect=error) as urlopen:
+            with self.assertRaises(urllib.error.HTTPError):
+                fetch_census_acs.fetch_census_data(url)
+
+        urlopen.assert_called_once_with(url, timeout=30)
 
     @unittest.skipIf(
         os.getenv("SKIP_LIVE_TESTS") == "1",
