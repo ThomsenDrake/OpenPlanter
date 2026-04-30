@@ -8,6 +8,7 @@ Tests use small queries that don't require an API key.
 
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,9 @@ import urllib.error
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 import fetch_census_acs
+
+
+TRANSIENT_CENSUS_ERRORS = (urllib.error.URLError, TimeoutError, socket.timeout)
 
 
 class TestCensusAcsFetch(unittest.TestCase):
@@ -170,7 +174,7 @@ class TestCensusAcsFetch(unittest.TestCase):
 
             print(f"\nLive test: Successfully fetched {len(data) - 1} states from Census API")
 
-        except urllib.error.URLError as e:
+        except TRANSIENT_CENSUS_ERRORS as e:
             self.skipTest(f"Network unavailable: {e}")
         except Exception as e:
             self.fail(f"Live API test failed: {e}")
@@ -208,7 +212,7 @@ class TestCensusAcsFetch(unittest.TestCase):
 
             print(f"\nLive test: Successfully fetched income data for {len(data) - 1} MA counties")
 
-        except urllib.error.URLError as e:
+        except TRANSIENT_CENSUS_ERRORS as e:
             self.skipTest(f"Network unavailable: {e}")
         except Exception as e:
             self.fail(f"Live API test failed: {e}")
@@ -262,7 +266,7 @@ class TestCensusAcsFetch(unittest.TestCase):
             finally:
                 os.unlink(temp_path)
 
-        except urllib.error.URLError as e:
+        except TRANSIENT_CENSUS_ERRORS as e:
             self.skipTest(f"Network unavailable: {e}")
         except Exception as e:
             self.fail(f"End-to-end test failed: {e}")
