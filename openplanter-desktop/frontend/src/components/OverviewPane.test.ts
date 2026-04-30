@@ -152,6 +152,57 @@ describe("createOverviewPane", () => {
     expect(readPaths).toEqual([]);
   });
 
+  it("encodes wiki source links from investigation home markdown", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        focus_questions: [
+          {
+            id: "q1",
+            text: "What is in the Q1 notes draft?",
+            priority: "high",
+          },
+        ],
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "q1-notes",
+              title: "Q1 notes draft",
+              category: "records",
+              file_path: "wiki/Q1 notes (draft).md",
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Needed documents");
+      expect(pane.textContent).toContain("Q1 notes draft");
+    });
+
+    const sourceLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Q1 notes draft",
+    ) as HTMLAnchorElement | undefined;
+    expect(sourceLink).toBeDefined();
+    expect(sourceLink?.getAttribute("href")).toBe("wiki/Q1%20notes%20%28draft%29.md");
+
+    sourceLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/Q1 notes (draft).md");
+      expect(readPaths).toEqual(["wiki/Q1 notes (draft).md"]);
+    });
+  });
+
   it("links investigation home entries to overview cards and replay", async () => {
     __setHandler("get_investigation_overview", () =>
       makeOverview({

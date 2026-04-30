@@ -1159,7 +1159,7 @@ def _write_investigation_homepage(
         return
 
     wiki_root = workspace / session_root_dir / "wiki"
-    relative_path = f"investigations/{_safe_component(investigation_id).lower()}.md"
+    relative_path = f"investigations/{_safe_component(investigation_id)}.md"
     homepage_path = wiki_root / relative_path
     homepage_path.parent.mkdir(parents=True, exist_ok=True)
     homepage_path.write_text(

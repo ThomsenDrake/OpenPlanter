@@ -413,8 +413,19 @@ export function createOverviewPane(): HTMLElement {
     return INVESTIGATION_HOME_PATH;
   }
 
+  function encodeMarkdownLinkDestination(href: string): string {
+    const encoder = new TextEncoder();
+    return href.replace(
+      /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g,
+      (value) =>
+        Array.from(encoder.encode(value))
+          .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+          .join(""),
+    );
+  }
+
   function markdownLink(label: string, href: string): string {
-    return `[${label.replace(/[\[\]]/g, "")}](${href.replace(/\)/g, "%29")})`;
+    return `[${label.replace(/[\[\]]/g, "")}](${encodeMarkdownLinkDestination(href)})`;
   }
 
   function keywordTokens(text: string): string[] {

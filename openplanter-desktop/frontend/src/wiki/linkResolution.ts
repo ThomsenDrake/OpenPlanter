@@ -10,6 +10,23 @@ function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
   return trimmed;
 }
 
+function decodeWikiPathSegment(segment: string): string | null {
+  try {
+    const decoded = decodeURIComponent(segment);
+    if (
+      decoded.includes("/") ||
+      decoded.includes("\\") ||
+      decoded.includes("?") ||
+      decoded.includes("#")
+    ) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveWikiMarkdownHref(
   href: string,
   options?: { baseWikiPath?: string | null },
@@ -33,7 +50,9 @@ export function resolveWikiMarkdownHref(
     : [...baseSegments, ...withoutFragment.split("/")];
 
   const normalizedSegments: string[] = [];
-  for (const segment of rawSegments) {
+  for (const rawSegment of rawSegments) {
+    const segment = decodeWikiPathSegment(rawSegment);
+    if (segment == null) return null;
     if (!segment || segment === ".") continue;
     if (segment === "..") {
       if (normalizedSegments.length === 0) return null;

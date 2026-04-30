@@ -24,6 +24,12 @@ describe("resolveWikiMarkdownHref", () => {
     expect(resolveWikiMarkdownHref("contracts/usaspending.md#summary")).toBe("wiki/contracts/usaspending.md");
   });
 
+  it("decodes percent-encoded wiki path segments", () => {
+    expect(resolveWikiMarkdownHref("wiki/Q1%20notes%20%28draft%29.md")).toBe(
+      "wiki/Q1 notes (draft).md",
+    );
+  });
+
   it("rejects non-wiki or unsafe links", () => {
     expect(resolveWikiMarkdownHref("https://example.com/doc.md")).toBeNull();
     expect(resolveWikiMarkdownHref("/tmp/doc.md")).toBeNull();
@@ -32,5 +38,6 @@ describe("resolveWikiMarkdownHref", () => {
     expect(resolveWikiMarkdownHref("#summary")).toBeNull();
     expect(resolveWikiMarkdownHref("../../secret.md")).toBeNull();
     expect(resolveWikiMarkdownHref("contracts/usaspending.md?raw=1")).toBeNull();
+    expect(resolveWikiMarkdownHref("wiki/%2Fsecret.md")).toBeNull();
   });
 });

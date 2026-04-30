@@ -668,6 +668,29 @@ class SessionRuntimeTests(unittest.TestCase):
             )
             self.assertIn("[investigations/acme.md](investigations/acme.md)", index_content)
 
+    def test_store_preserves_investigation_homepage_slug_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="homepage-case-upper",
+                resume=False,
+                investigation_id="AcmeProbe",
+            )
+            store.open_session(
+                session_id="homepage-case-lower",
+                resume=False,
+                investigation_id="acmeprobe",
+            )
+
+            wiki_dir = root / ".openplanter" / "wiki"
+            self.assertTrue((wiki_dir / "investigations" / "AcmeProbe.md").exists())
+            self.assertTrue((wiki_dir / "investigations" / "acmeprobe.md").exists())
+
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("[investigations/AcmeProbe.md](investigations/AcmeProbe.md)", index_content)
+            self.assertIn("[investigations/acmeprobe.md](investigations/acmeprobe.md)", index_content)
+
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
