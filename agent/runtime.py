@@ -42,7 +42,8 @@ def _new_session_id() -> str:
 
 
 def _safe_component(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-") or "artifact"
+    component = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
+    return component or "artifact"
 
 
 def _has_reasoning_content(packet: dict[str, Any]) -> bool:
@@ -351,7 +352,7 @@ class SessionStore:
                     session_id=sid,
                     state=typed_state,
                 )
-            except (OSError, TypeError):
+            except (AttributeError, OSError, TypeError):
                 pass
 
         return sid, state, created_new
@@ -481,7 +482,7 @@ class SessionStore:
                 session_id=session_id,
                 state=typed_state,
             )
-        except (OSError, TypeError):
+        except (AttributeError, OSError, TypeError):
             pass  # Non-fatal: homepage generation is optional
 
         self._touch_metadata(session_id)
@@ -808,6 +809,18 @@ def _evidence_citation(evidence_id: str, evidence_record: dict[str, Any]) -> str
     return f"`{evidence_id}`: {label}"
 
 
+def _evidence_record(evidence: dict[str, Any], evidence_id: str) -> dict[str, Any]:
+    record = evidence.get(evidence_id)
+    return record if isinstance(record, dict) else {}
+
+
+def _evidence_citations(evidence_ids: list[str], evidence: dict[str, Any]) -> list[str]:
+    return [
+        _evidence_citation(evidence_id, _evidence_record(evidence, evidence_id))
+        for evidence_id in evidence_ids
+    ]
+
+
 def _record_label(record: dict[str, Any], fallback: str, *keys: str) -> str:
     for key in keys:
         value = record.get(key)
@@ -961,11 +974,7 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         lines.append(f"{index}. **{claim_id}**: {claim_text}{suffix}")
         proof_ids = _string_items(claim.get("support_evidence_ids"))
         if proof_ids:
-            citations = [
-                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
-                for evidence_id in proof_ids
-                if isinstance(evidence.get(evidence_id, {}), dict)
-            ]
+            citations = _evidence_citations(proof_ids, evidence)
             lines.append(f"   - Proofs: {', '.join(citations) if citations else '_No supporting evidence linked yet._'}")
         else:
             lines.append("   - Proofs: _No supporting evidence linked yet._")
@@ -982,18 +991,10 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         support_ids = _string_items(claim.get("support_evidence_ids"))
         contradiction_ids = _string_items(claim.get("contradiction_evidence_ids"))
         if support_ids:
-            support_citations = [
-                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
-                for evidence_id in support_ids
-                if isinstance(evidence.get(evidence_id, {}), dict)
-            ]
+            support_citations = _evidence_citations(support_ids, evidence)
             lines.append(f"   - Supporting citations: {', '.join(support_citations)}")
         if contradiction_ids:
-            contradiction_citations = [
-                _evidence_citation(evidence_id, evidence.get(evidence_id, {}))
-                for evidence_id in contradiction_ids
-                if isinstance(evidence.get(evidence_id, {}), dict)
-            ]
+            contradiction_citations = _evidence_citations(contradiction_ids, evidence)
             lines.append(f"   - Contradicting citations: {', '.join(contradiction_citations)}")
 
     if unresolved:

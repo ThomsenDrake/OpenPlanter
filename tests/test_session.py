@@ -507,7 +507,7 @@ class SessionRuntimeTests(unittest.TestCase):
                     "claim_text": "A payment was routed through shell entities.",
                     "status": "supported",
                     "confidence": 0.82,
-                    "support_evidence_ids": ["ev_doc_1"],
+                    "support_evidence_ids": ["ev_doc_1", "ev_bad"],
                 },
                 "cl_contested": {
                     "id": "cl_contested",
@@ -528,6 +528,7 @@ class SessionRuntimeTests(unittest.TestCase):
                     "description": "Approval email",
                     "source_uri": "docs/approval-email.md",
                 },
+                "ev_bad": "malformed evidence should not crash homepage generation",
             }
             typed_state["tasks"] = {
                 "todo_1": {
@@ -565,6 +566,7 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("Trace Acme payment approvals.", content)
             self.assertIn("## Current Conclusions and Citations to Proofs", content)
             self.assertIn("[ev_doc_1: Payment ledger](https://example.com/proof.pdf)", content)
+            self.assertIn("`ev_bad`: ev_bad", content)
             self.assertIn("Contradicting citations", content)
             self.assertIn("[ev_doc_2: Approval email](docs/approval-email.md)", content)
             self.assertIn("## Open Questions and Needed Documents", content)
@@ -594,6 +596,31 @@ class SessionRuntimeTests(unittest.TestCase):
             )
 
             self.assertFalse((root / ".openplanter" / "wiki" / "investigations").exists())
+
+    def test_store_sanitizes_investigation_homepage_slug_path_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="unsafe-home",
+                resume=False,
+                investigation_id="..",
+            )
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            wiki_dir = root / ".openplanter" / "wiki"
+            self.assertTrue((wiki_dir / "investigations" / "artifact.md").exists())
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("# Data Sources Wiki", index_content)
+            self.assertIn("[investigations/artifact.md](investigations/artifact.md)", index_content)
 
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
