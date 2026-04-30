@@ -533,7 +533,8 @@ class SessionRuntimeTests(unittest.TestCase):
             typed_state["tasks"] = {
                 "todo_1": {
                     "id": "todo_1",
-                    "description": "Pull wire transfer records",
+                    "description": "Pull wire transfer\nrecords",
+                    "link": "docs/wire transfer\nrecords).md",
                     "status": "open",
                     "priority": "high",
                 },
@@ -573,7 +574,11 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("Wire approval memo", content)
             self.assertIn("Accounts payable audit trail", content)
             self.assertIn("## Open To-Dos", content)
-            self.assertIn("[Pull wire transfer records](#todo-todo_1)", content)
+            self.assertIn(
+                "[Pull wire transfer records](docs/wire%20transfer%20records%29.md)",
+                content,
+            )
+            self.assertIn("- **Description**: Pull wire transfer records", content)
             self.assertNotIn("Closed item", content)
 
             index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")

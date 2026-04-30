@@ -785,14 +785,21 @@ def _string_items(value: Any) -> list[str]:
     return [str(item).strip() for item in _list_value(value) if str(item).strip()]
 
 
+def _markdown_inline_text(value: str) -> str:
+    return re.sub(r"\s*[\r\n]+\s*", " ", value).strip()
+
+
 def _markdown_link(label: str, target: str) -> str:
-    safe_label = label.replace("[", "\\[").replace("]", "\\]")
-    safe_target = target.replace(")", "%29")
+    safe_label = _markdown_inline_text(label).replace("[", "\\[").replace("]", "\\]")
+    safe_target = re.sub(r"\s+", "%20", _markdown_inline_text(target)).replace(
+        ")",
+        "%29",
+    )
     return f"[{safe_label}]({safe_target})"
 
 
 def _markdown_table_cell(value: str) -> str:
-    return value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("|", "\\|")
+    return _markdown_inline_text(value).replace("|", "\\|")
 
 
 def _evidence_label(evidence_id: str, evidence_record: dict[str, Any]) -> str:
@@ -829,7 +836,7 @@ def _record_label(record: dict[str, Any], fallback: str, *keys: str) -> str:
     for key in keys:
         value = record.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return _markdown_inline_text(value)
     return fallback
 
 
