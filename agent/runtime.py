@@ -791,9 +791,10 @@ def _markdown_inline_text(value: str) -> str:
 
 def _markdown_link(label: str, target: str) -> str:
     safe_label = _markdown_inline_text(label).replace("[", "\\[").replace("]", "\\]")
-    safe_target = re.sub(r"\s+", "%20", _markdown_inline_text(target)).replace(
-        ")",
-        "%29",
+    safe_target = (
+        re.sub(r"\s+", "%20", _markdown_inline_text(target))
+        .replace("(", "%28")
+        .replace(")", "%29")
     )
     return f"[{safe_label}]({safe_target})"
 

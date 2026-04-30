@@ -521,7 +521,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 "ev_doc_1": {
                     "id": "ev_doc_1",
                     "description": "Payment ledger",
-                    "source_uri": "https://example.com/proof.pdf",
+                    "source_uri": "https://example.com/proof(file).pdf",
                 },
                 "ev_doc_2": {
                     "id": "ev_doc_2",
@@ -534,7 +534,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 "todo_1": {
                     "id": "todo_1",
                     "description": "Pull wire transfer\nrecords",
-                    "link": "docs/wire transfer\nrecords).md",
+                    "link": "docs/wire transfer\nrecords(v2).md",
                     "status": "open",
                     "priority": "high",
                 },
@@ -566,7 +566,10 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("## Current Status", content)
             self.assertIn("Trace Acme payment approvals.", content)
             self.assertIn("## Current Conclusions and Citations to Proofs", content)
-            self.assertIn("[ev_doc_1: Payment ledger](https://example.com/proof.pdf)", content)
+            self.assertIn(
+                "[ev_doc_1: Payment ledger](https://example.com/proof%28file%29.pdf)",
+                content,
+            )
             self.assertIn("`ev_bad`: ev_bad", content)
             self.assertIn("Contradicting citations", content)
             self.assertIn("[ev_doc_2: Approval email](docs/approval-email.md)", content)
@@ -575,7 +578,7 @@ class SessionRuntimeTests(unittest.TestCase):
             self.assertIn("Accounts payable audit trail", content)
             self.assertIn("## Open To-Dos", content)
             self.assertIn(
-                "[Pull wire transfer records](docs/wire%20transfer%20records%29.md)",
+                "[Pull wire transfer records](docs/wire%20transfer%20records%28v2%29.md)",
                 content,
             )
             self.assertIn("- **Description**: Pull wire transfer records", content)
