@@ -1,4 +1,5 @@
 const PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+const ENCODED_PATH_DELIMITER_RE = /%(?:2[fF]|5[cC]|3[fF]|23)/;
 
 function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
   if (!baseWikiPath) return null;
@@ -11,8 +12,10 @@ function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
 }
 
 function decodeWikiPathSegment(segment: string): string | null {
+  if (ENCODED_PATH_DELIMITER_RE.test(segment)) return null;
+  const withBarePercentsEscaped = segment.replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
   try {
-    const decoded = decodeURIComponent(segment);
+    const decoded = decodeURIComponent(withBarePercentsEscaped);
     if (
       decoded.includes("/") ||
       decoded.includes("\\") ||
@@ -23,7 +26,7 @@ function decodeWikiPathSegment(segment: string): string | null {
     }
     return decoded;
   } catch {
-    return null;
+    return segment;
   }
 }
 
