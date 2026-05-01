@@ -35,6 +35,7 @@ import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 import {
   createWikiMarkdownRenderer,
   isGeneratedInvestigationHomepageMarkdown,
+  renderGeneratedInvestigationHomepageMarkdown,
   renderWikiMarkdown,
 } from "../wiki/markdown";
 import { appState } from "../state/store";
@@ -313,8 +314,11 @@ export function createGraphPane(): HTMLElement {
     currentDrawerDecodesWikiLinks = false;
     readWikiFile(wikiPath).then((content) => {
       if (loadSeq !== drawerLoadSeq) return;
-      currentDrawerDecodesWikiLinks = isGeneratedInvestigationHomepageMarkdown(wikiPath, content);
-      drawerBody.innerHTML = renderWikiMarkdown(md, content);
+      const isGeneratedHomepage = isGeneratedInvestigationHomepageMarkdown(wikiPath, content);
+      currentDrawerDecodesWikiLinks = isGeneratedHomepage;
+      drawerBody.innerHTML = isGeneratedHomepage
+        ? renderGeneratedInvestigationHomepageMarkdown(md, content)
+        : renderWikiMarkdown(md, content);
       interceptDrawerLinks();
     }).catch((err) => {
       if (loadSeq !== drawerLoadSeq) return;

@@ -21,6 +21,13 @@ function stripSafeTodoAnchors(markdown: string): string {
   return markdown.replace(/^<a id="todo-[A-Za-z0-9._-]+"><\/a>\r?\n?/gm, "");
 }
 
+function restoreSafeTodoAnchors(html: string): string {
+  return html.replace(
+    /<p>&lt;a id=&quot;(todo-[A-Za-z0-9._-]+)&quot;&gt;&lt;\/a&gt;<\/p>/g,
+    '<a id="$1" class="wiki-anchor"></a>',
+  );
+}
+
 export function isGeneratedInvestigationHomepageMarkdown(
   path: string | null,
   markdown: string,
@@ -70,5 +77,12 @@ export function createWikiMarkdownRenderer(): MarkdownIt {
 }
 
 export function renderWikiMarkdown(md: MarkdownIt, markdown: string): string {
+  return restoreSafeTodoAnchors(md.render(markdown));
+}
+
+export function renderGeneratedInvestigationHomepageMarkdown(
+  md: MarkdownIt,
+  markdown: string,
+): string {
   return md.render(stripSafeTodoAnchors(markdown));
 }

@@ -19,6 +19,7 @@ import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 import {
   createWikiMarkdownRenderer,
   isGeneratedInvestigationHomepageMarkdown,
+  renderGeneratedInvestigationHomepageMarkdown,
   renderWikiMarkdown,
 } from "../wiki/markdown";
 
@@ -1005,10 +1006,13 @@ export function createOverviewPane(): HTMLElement {
     try {
       const content = await readWikiFile(path);
       if (seq !== docSeq) return;
+      const decodesGeneratedWikiLinks = shouldDecodeGeneratedWikiLinks(path, content);
       documentStatus = "ready";
-      documentHtml = renderWikiMarkdown(md, content);
+      documentHtml = decodesGeneratedWikiLinks
+        ? renderGeneratedInvestigationHomepageMarkdown(md, content)
+        : renderWikiMarkdown(md, content);
       documentError = "";
-      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(path, content);
+      loadedDocumentDecodesWikiLinks = decodesGeneratedWikiLinks;
       loadedDocumentPath = path;
       render();
       interceptDocumentLinks();
