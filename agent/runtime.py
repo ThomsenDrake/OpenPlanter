@@ -799,10 +799,31 @@ def _markdown_inline_text(value: str) -> str:
     return re.sub(r"\s*[\r\n]+\s*", " ", value).strip()
 
 
+_LINK_PROTOCOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _investigation_homepage_link_target(target: str) -> str:
+    safe_target = _markdown_inline_text(target)
+    if (
+        not safe_target
+        or safe_target.startswith(("#", "/", "\\", "../", "wiki/"))
+        or _LINK_PROTOCOL_RE.match(safe_target)
+    ):
+        return safe_target
+
+    path_without_fragment = safe_target.split("#", 1)[0]
+    path_without_query = path_without_fragment.split("?", 1)[0]
+    if not path_without_query.endswith(".md"):
+        return safe_target
+
+    relative_target = safe_target[2:] if safe_target.startswith("./") else safe_target
+    return f"../{relative_target}"
+
+
 def _markdown_link(label: str, target: str) -> str:
     safe_label = _markdown_inline_text(label).replace("[", "\\[").replace("]", "\\]")
     safe_target = (
-        re.sub(r"\s+", "%20", _markdown_inline_text(target))
+        re.sub(r"\s+", "%20", _investigation_homepage_link_target(target))
         .replace("(", "%28")
         .replace(")", "%29")
     )

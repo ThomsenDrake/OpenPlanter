@@ -586,13 +586,13 @@ class SessionRuntimeTests(unittest.TestCase):
             )
             self.assertIn("`ev_bad`: ev_bad", content)
             self.assertIn("Contradicting citations", content)
-            self.assertIn("[ev_doc_2: Approval email](docs/approval-email.md)", content)
+            self.assertIn("[ev_doc_2: Approval email](../docs/approval-email.md)", content)
             self.assertIn("## Open Questions and Needed Documents", content)
             self.assertIn("Wire approval memo", content)
             self.assertIn("Accounts payable audit trail", content)
             self.assertIn("## Open To-Dos", content)
             self.assertIn(
-                "[Pull wire transfer records](docs/wire%20transfer%20records%28v2%29.md)",
+                "[Pull wire transfer records](../docs/wire%20transfer%20records%28v2%29.md)",
                 content,
             )
             self.assertIn("[Call bank records team](#todo-todo_2)", content)
