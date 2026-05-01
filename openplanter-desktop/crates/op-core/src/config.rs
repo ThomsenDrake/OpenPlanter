@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::obsidian::{
     DEFAULT_OBSIDIAN_EXPORT_SUBDIR, OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER,
-    normalize_obsidian_export_mode,
+    normalize_obsidian_export_mode, normalize_obsidian_export_subdir,
 };
 
 pub const AZURE_FOUNDRY_MODEL_PREFIX: &str = "azure-foundry/";
@@ -673,9 +673,8 @@ impl AgentConfig {
             obsidian_export_mode: normalize_obsidian_export_mode(
                 env_opt("OPENPLANTER_OBSIDIAN_EXPORT_MODE").as_deref(),
             ),
-            obsidian_export_subdir: env_or(
-                "OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR",
-                DEFAULT_OBSIDIAN_EXPORT_SUBDIR,
+            obsidian_export_subdir: normalize_obsidian_export_subdir(
+                env_opt("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR").as_deref(),
             ),
             obsidian_generate_canvas: env_bool("OPENPLANTER_OBSIDIAN_GENERATE_CANVAS", true),
             max_persisted_observations: env_int("OPENPLANTER_MAX_PERSISTED_OBS", 400),
@@ -900,6 +899,7 @@ mod tests {
             "OPENPLANTER_RATE_LIMIT_BACKOFF_MAX_SEC",
             "OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC",
             "OPENPLANTER_ZAI_STREAM_MAX_RETRIES",
+            "OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR",
         ];
         // Save original values
         let saved: Vec<_> = keys.iter().map(|k| (*k, env::var(k).ok())).collect();
@@ -988,6 +988,7 @@ mod tests {
         );
         assert_eq!(cfg.web_search_provider, "exa");
         assert_eq!(cfg.continuity_mode, "auto");
+        assert_eq!(cfg.obsidian_export_subdir, DEFAULT_OBSIDIAN_EXPORT_SUBDIR);
         assert_eq!(cfg.rate_limit_max_retries, 12);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 1.0);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 60.0);
@@ -1058,6 +1059,7 @@ mod tests {
             env::set_var("OPENPLANTER_CONTINUITY_MODE", "continue");
             env::set_var("OPENPLANTER_ZAI_STREAM_MAX_RETRIES", "7");
             env::set_var("OPENPLANTER_TAVILY_BASE_URL", "https://tavily.example");
+            env::set_var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR", "/");
         }
 
         let cfg = AgentConfig::from_env("/tmp");
@@ -1107,6 +1109,7 @@ mod tests {
         assert_eq!(cfg.web_search_provider, "tavily");
         assert_eq!(cfg.continuity_mode, "continue");
         assert_eq!(cfg.tavily_base_url, "https://tavily.example");
+        assert_eq!(cfg.obsidian_export_subdir, DEFAULT_OBSIDIAN_EXPORT_SUBDIR);
         assert_eq!(cfg.rate_limit_max_retries, 5);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 2.5);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 30.0);

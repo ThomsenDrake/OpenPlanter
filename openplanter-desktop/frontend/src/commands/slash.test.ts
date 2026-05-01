@@ -222,7 +222,7 @@ describe("dispatchSlashCommand", () => {
       expect(request.root).toBe("/tmp/My Vault");
       expect(request.mode).toBe("fresh-vault");
       expect(request.subdir).toBe("Research");
-      expect(request.generateCanvas).toBe(true);
+      expect(request.generateCanvas).toBe(false);
       return {
         enabled: true,
         configured: true,
@@ -236,8 +236,31 @@ describe("dispatchSlashCommand", () => {
     });
 
     const result = await dispatchSlashCommand(
-      '/obsidian enable "/tmp/My Vault" --mode fresh-vault --subdir Research'
+      '/obsidian enable "/tmp/My Vault" --mode fresh-vault --subdir Research --no-canvas'
     );
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Obsidian export enabled"))).toBe(true);
+  });
+
+  it("obsidian enable preserves unspecified settings", async () => {
+    __setHandler("configure_obsidian_export", ({ request }: any) => {
+      expect(request).toEqual({
+        enabled: true,
+        root: "/tmp/New Vault",
+      });
+      return {
+        enabled: true,
+        configured: true,
+        root: "/tmp/New Vault",
+        target_root: "/tmp/New Vault",
+        mode: "fresh_vault",
+        subdir: "Research",
+        generate_canvas: false,
+        warnings: [],
+      };
+    });
+
+    const result = await dispatchSlashCommand('/obsidian enable "/tmp/New Vault"');
     expect(result).not.toBeNull();
     expect(result!.lines.some((l) => l.includes("Obsidian export enabled"))).toBe(true);
   });

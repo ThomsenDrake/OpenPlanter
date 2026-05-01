@@ -4,6 +4,7 @@ import {
   getObsidianExportStatus,
   openObsidianInvestigation,
 } from "../api/invoke";
+import type { ConfigureObsidianExportRequest } from "../api/types";
 import { appState } from "../state/store";
 import type { CommandResult } from "./model";
 
@@ -95,8 +96,8 @@ async function handleObsidianCommandInner(args: string): Promise<CommandResult> 
     const modeIndex = tokens.indexOf("--mode");
     const subdirIndex = tokens.indexOf("--subdir");
     const noCanvas = tokens.includes("--no-canvas");
-    const mode = modeIndex >= 0 ? flagValue(tokens, "--mode") : "existing_vault_folder";
-    const subdir = subdirIndex >= 0 ? flagValue(tokens, "--subdir") : "OpenPlanter";
+    const mode = modeIndex >= 0 ? flagValue(tokens, "--mode") : undefined;
+    const subdir = subdirIndex >= 0 ? flagValue(tokens, "--subdir") : undefined;
     if (modeIndex >= 0 && !mode) {
       return { action: "handled", lines: ["Missing value for --mode.", `Usage: ${OBSIDIAN_USAGE}`] };
     }
@@ -116,13 +117,14 @@ async function handleObsidianCommandInner(args: string): Promise<CommandResult> 
         lines: ["Usage: /obsidian enable <vault-path> [--mode fresh-vault|existing-vault-folder] [--subdir OpenPlanter] [--no-canvas]"],
       };
     }
-    const status = await configureObsidianExport({
+    const request: ConfigureObsidianExportRequest = {
       enabled: true,
       root,
-      mode,
-      subdir,
-      generateCanvas: !noCanvas,
-    });
+    };
+    if (mode) request.mode = mode;
+    if (subdir) request.subdir = subdir;
+    if (noCanvas) request.generateCanvas = false;
+    const status = await configureObsidianExport(request);
     appState.update((s) => ({
       ...s,
       obsidianExportEnabled: status.enabled,

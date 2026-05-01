@@ -107,7 +107,12 @@ pub fn normalize_obsidian_export_subdir(value: Option<&str>) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_OBSIDIAN_EXPORT_SUBDIR);
-    cleaned.trim_matches(['/', '\\']).trim().to_string()
+    let normalized = cleaned.trim_matches(['/', '\\']).trim();
+    if normalized.is_empty() {
+        DEFAULT_OBSIDIAN_EXPORT_SUBDIR.to_string()
+    } else {
+        normalized.to_string()
+    }
 }
 
 pub fn target_root(
@@ -1310,6 +1315,30 @@ mod tests {
                 "https://example.com/a file?q=one two&ok=1"
             ),
             "[External source](https://example.com/a%20file?q=one%20two&ok=1)"
+        );
+    }
+
+    #[test]
+    fn subdir_normalization_defaults_empty_results() {
+        assert_eq!(
+            normalize_obsidian_export_subdir(None),
+            DEFAULT_OBSIDIAN_EXPORT_SUBDIR
+        );
+        assert_eq!(
+            normalize_obsidian_export_subdir(Some("")),
+            DEFAULT_OBSIDIAN_EXPORT_SUBDIR
+        );
+        assert_eq!(
+            normalize_obsidian_export_subdir(Some("/")),
+            DEFAULT_OBSIDIAN_EXPORT_SUBDIR
+        );
+        assert_eq!(
+            normalize_obsidian_export_subdir(Some("\\\\")),
+            DEFAULT_OBSIDIAN_EXPORT_SUBDIR
+        );
+        assert_eq!(
+            normalize_obsidian_export_subdir(Some("/Research/OpenPlanter/")),
+            "Research/OpenPlanter"
         );
     }
 
