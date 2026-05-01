@@ -1077,7 +1077,6 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
     for task_id, task in open_tasks:
         description = _record_label(task, task_id, "description", "label", "text", "title")
         lines.extend([
-            f'<a id="{_todo_anchor(task_id)}"></a>',
             f"### TODO {task_id}",
             f"- **Status**: `{str(task.get('status') or 'open')}`",
             f"- **Description**: {description}",
@@ -1090,7 +1089,6 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         if not action_id:
             continue
         lines.extend([
-            f'<a id="{_todo_anchor(action_id)}"></a>',
             f"### TODO {action_id}",
             "- **Status**: `candidate_action`",
             f"- **Description**: {_candidate_action_label(action)}",

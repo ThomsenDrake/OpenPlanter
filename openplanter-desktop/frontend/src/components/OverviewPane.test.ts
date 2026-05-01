@@ -253,6 +253,56 @@ describe("createOverviewPane", () => {
     });
   });
 
+  it("adds markdown heading ids for generated to-do fragment links", async () => {
+    const generatedPath = "wiki/investigations/acme.md";
+    appState.update((state) => ({
+      ...state,
+      overviewSelectedWikiPath: generatedPath,
+    }));
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      expect(path).toBe(generatedPath);
+      return [
+        "# Investigation Home",
+        "",
+        "## Open To-Dos",
+        "- [Call bank records team](#todo-todo_2)",
+        "",
+        "## To-Do Details",
+        "### TODO todo_2",
+        "- **Status**: `open`",
+      ].join("\n");
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "generated-home",
+              title: "Generated Home",
+              category: "investigation",
+              file_path: generatedPath,
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Call bank records team");
+    });
+
+    const todoLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Call bank records team",
+    ) as HTMLAnchorElement | undefined;
+    expect(todoLink?.getAttribute("href")).toBe("#todo-todo_2");
+    const todoHeading = pane.querySelector<HTMLElement>('[id="todo-todo_2"]');
+    expect(todoHeading?.textContent).toBe("TODO todo_2");
+  });
+
   it("links investigation home entries to overview cards and replay", async () => {
     __setHandler("get_investigation_overview", () =>
       makeOverview({

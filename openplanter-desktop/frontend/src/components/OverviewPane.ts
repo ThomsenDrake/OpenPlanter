@@ -20,6 +20,14 @@ import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 
+function markdownHeadingId(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "");
+}
+
 const md = new MarkdownIt({
   html: false,
   linkify: true,
@@ -35,6 +43,20 @@ const md = new MarkdownIt({
     return "";
   },
 });
+const defaultHeadingOpenRenderer =
+  md.renderer.rules.heading_open ??
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.heading_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const inlineToken = tokens[idx + 1];
+  if (!token.attrGet("id") && inlineToken?.type === "inline") {
+    const id = markdownHeadingId(inlineToken.content);
+    if (id) {
+      token.attrSet("id", id);
+    }
+  }
+  return defaultHeadingOpenRenderer(tokens, idx, options, env, self);
+};
 
 const MARKDOWN_LINK_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 const MARKDOWN_DESTINATION_UNSAFE_RE = /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;

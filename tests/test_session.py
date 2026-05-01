@@ -547,6 +547,11 @@ class SessionRuntimeTests(unittest.TestCase):
                     "status": "open",
                     "priority": "high",
                 },
+                "todo_2": {
+                    "id": "todo_2",
+                    "description": "Call bank records team",
+                    "status": "open",
+                },
                 "todo_done": {
                     "id": "todo_done",
                     "description": "Closed item",
@@ -590,6 +595,9 @@ class SessionRuntimeTests(unittest.TestCase):
                 "[Pull wire transfer records](docs/wire%20transfer%20records%28v2%29.md)",
                 content,
             )
+            self.assertIn("[Call bank records team](#todo-todo_2)", content)
+            self.assertIn("### TODO todo_2", content)
+            self.assertNotIn("<a id=", content)
             self.assertIn("- **Description**: Pull wire transfer records", content)
             self.assertNotIn("Closed item", content)
 
