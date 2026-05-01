@@ -253,6 +253,60 @@ describe("createOverviewPane", () => {
     });
   });
 
+  it("preserves literal percent-hex links from manual investigation wiki pages", async () => {
+    const manualPath = "wiki/investigations/manual.md";
+    const literalTargetPath = "wiki/revenue%20growth.md";
+    const readPaths: string[] = [];
+    appState.update((state) => ({
+      ...state,
+      overviewSelectedWikiPath: manualPath,
+    }));
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      if (path !== manualPath) {
+        return `# ${path}`;
+      }
+      return [
+        "# Manual Investigation Notes",
+        "",
+        "- [Revenue Growth](../revenue%20growth.md)",
+      ].join("\n");
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "manual",
+              title: "Manual Investigation Notes",
+              category: "investigations",
+              file_path: manualPath,
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Revenue Growth");
+    });
+
+    const revenueLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Revenue Growth",
+    ) as HTMLAnchorElement | undefined;
+    expect(revenueLink?.getAttribute("href")).toBe("../revenue%20growth.md");
+    revenueLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe(literalTargetPath);
+      expect(readPaths).toEqual([manualPath, literalTargetPath]);
+    });
+  });
+
   it("adds markdown heading ids for generated to-do fragment links", async () => {
     const generatedPath = "wiki/investigations/acme.md";
     const decodedTargetPath = "wiki/docs/wire transfer records(v2).md";
@@ -267,7 +321,9 @@ describe("createOverviewPane", () => {
         return `# ${path}`;
       }
       return [
-        "# Investigation Home",
+        "# Investigation Home: acme",
+        "",
+        "> Auto-generated from `investigation_state.json`.",
         "",
         "## Open To-Dos",
         "- [Call bank records team](#todo-todo_2)",

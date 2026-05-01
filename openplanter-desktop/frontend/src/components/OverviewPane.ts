@@ -116,10 +116,14 @@ const CURATED_REPLAY_ROLES = new Set([
 const INVESTIGATION_HOME_PATH = "openplanter://investigation-home";
 const INVESTIGATION_HOME_TITLE = "Investigation Home";
 
-function shouldDecodeGeneratedWikiLinks(path: string | null): boolean {
+function shouldDecodeGeneratedWikiLinks(path: string | null, markdown = ""): boolean {
+  if (path === INVESTIGATION_HOME_PATH) return true;
+  if (!path?.startsWith("wiki/investigations/") || !path.endsWith(".md")) return false;
+
+  const firstLine = markdown.split(/\r?\n/, 1)[0]?.trim() ?? "";
   return (
-    path === INVESTIGATION_HOME_PATH ||
-    (path?.startsWith("wiki/investigations/") === true && path.endsWith(".md"))
+    /^# Investigation Home(?::|$)/.test(firstLine) &&
+    markdown.includes("> Auto-generated from `investigation_state.json`.")
   );
 }
 
@@ -199,6 +203,7 @@ export function createOverviewPane(): HTMLElement {
   let documentHtml = "";
   let documentTitle = "Wiki document";
   let documentError = "";
+  let loadedDocumentDecodesWikiLinks = false;
   let replayError = "";
   let loadedDocumentPath: string | null = null;
   let replayEntries: ReplayEntry[] = [];
@@ -1010,6 +1015,7 @@ export function createOverviewPane(): HTMLElement {
       documentTitle = "Wiki document";
       documentHtml = "";
       documentError = "";
+      loadedDocumentDecodesWikiLinks = false;
       loadedDocumentPath = null;
       render();
       return;
@@ -1020,6 +1026,7 @@ export function createOverviewPane(): HTMLElement {
       documentTitle = INVESTIGATION_HOME_TITLE;
       documentHtml = "";
       documentError = "";
+      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(path);
       loadedDocumentPath = path;
       render();
       documentViewport.scrollTop = 0;
@@ -1031,6 +1038,7 @@ export function createOverviewPane(): HTMLElement {
     documentStatus = "loading";
     documentHtml = "";
     documentError = "";
+    loadedDocumentDecodesWikiLinks = false;
     render();
 
     try {
@@ -1039,6 +1047,7 @@ export function createOverviewPane(): HTMLElement {
       documentStatus = "ready";
       documentHtml = md.render(content);
       documentError = "";
+      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(path, content);
       loadedDocumentPath = path;
       render();
       interceptDocumentLinks();
@@ -1048,6 +1057,7 @@ export function createOverviewPane(): HTMLElement {
       documentStatus = "error";
       documentHtml = "";
       documentError = String(error);
+      loadedDocumentDecodesWikiLinks = false;
       loadedDocumentPath = null;
       render();
     }
@@ -1131,7 +1141,7 @@ export function createOverviewPane(): HTMLElement {
         }
         const resolvedPath = resolveWikiMarkdownHref(href, {
           baseWikiPath: loadedDocumentPath,
-          decodePercentEncoding: shouldDecodeGeneratedWikiLinks(loadedDocumentPath),
+          decodePercentEncoding: loadedDocumentDecodesWikiLinks,
         });
         if (!resolvedPath) return;
 
@@ -1650,6 +1660,7 @@ export function createOverviewPane(): HTMLElement {
       documentTitle = INVESTIGATION_HOME_TITLE;
       documentStatus = "ready";
       loadedDocumentPath = INVESTIGATION_HOME_PATH;
+      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(INVESTIGATION_HOME_PATH);
       documentTitleEl.textContent = documentTitle;
       documentStatusEl.hidden = true;
       documentContentEl.hidden = false;
@@ -1781,6 +1792,7 @@ export function createOverviewPane(): HTMLElement {
   window.addEventListener("session-changed", () => {
     invalidatePendingLoads();
     loadedDocumentPath = null;
+    loadedDocumentDecodesWikiLinks = false;
     documentStatus = "idle";
     documentHtml = "";
     documentTitle = "Wiki document";
