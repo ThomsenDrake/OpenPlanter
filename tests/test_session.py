@@ -615,8 +615,9 @@ class SessionRuntimeTests(unittest.TestCase):
             )
             self.assertIn("[Review report section](../docs/report.md#follow-up)", content)
             self.assertIn("[Call bank records team](#todo-todo_2)", content)
+            self.assertIn('<a id="todo-todo_2"></a>', content)
+            self.assertIn('<a id="todo-todo_fragment"></a>', content)
             self.assertIn("### TODO todo_2", content)
-            self.assertNotIn("<a id=", content)
             self.assertIn("- **Description**: Pull wire transfer records", content)
             self.assertNotIn("Closed item", content)
 

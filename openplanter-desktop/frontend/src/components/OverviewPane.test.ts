@@ -331,8 +331,10 @@ describe("createOverviewPane", () => {
         "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
         "",
         "## To-Do Details",
+        '<a id="todo-todo_2"></a>',
         "### TODO todo_2",
         "- **Status**: `open`",
+        '<a id="todo-todo"></a>',
         "### TODO .todo",
         "- **Status**: `open`",
       ].join("\n");
@@ -366,6 +368,7 @@ describe("createOverviewPane", () => {
     expect(todoLink?.getAttribute("href")).toBe("#todo-todo_2");
     const todoHeading = pane.querySelector<HTMLElement>('[id="todo-todo_2"]');
     expect(todoHeading?.textContent).toBe("TODO todo_2");
+    expect(pane.textContent).not.toContain('<a id="todo-todo_2"></a>');
     const punctuatedLink = Array.from(pane.querySelectorAll("a")).find(
       (anchor) => anchor.textContent === "Punctuated task",
     ) as HTMLAnchorElement | undefined;

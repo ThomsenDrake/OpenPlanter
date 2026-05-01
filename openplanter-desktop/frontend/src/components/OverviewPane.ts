@@ -1,6 +1,3 @@
-import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
-
 import {
   getInvestigationOverview,
   getSessionHistory,
@@ -19,52 +16,9 @@ import { appState } from "../state/store";
 import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
+import { createWikiMarkdownRenderer, renderWikiMarkdown } from "../wiki/markdown";
 
-function safeHeadingComponent(text: string): string {
-  const component = text
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^[.-]+|[.-]+$/g, "");
-  return component || "artifact";
-}
-
-function markdownHeadingId(text: string): string {
-  const trimmed = text.trim();
-  const todoMatch = /^TODO\s+(.+)$/i.exec(trimmed);
-  if (todoMatch) {
-    return `todo-${safeHeadingComponent(todoMatch[1].toLowerCase())}`;
-  }
-  return safeHeadingComponent(trimmed.toLowerCase());
-}
-
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: false,
-  highlight(str: string, lang: string) {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return hljs.highlight(str, { language: lang }).value;
-      } catch {
-        // Fall through to markdown-it default escaping.
-      }
-    }
-    return "";
-  },
-});
-const defaultHeadingOpenRenderer =
-  md.renderer.rules.heading_open ??
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
-md.renderer.rules.heading_open = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
-  const inlineToken = tokens[idx + 1];
-  if (!token.attrGet("id") && inlineToken?.type === "inline") {
-    const id = markdownHeadingId(inlineToken.content);
-    if (id) {
-      token.attrSet("id", id);
-    }
-  }
-  return defaultHeadingOpenRenderer(tokens, idx, options, env, self);
-};
+const md = createWikiMarkdownRenderer();
 
 const MARKDOWN_LINK_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 const MARKDOWN_DESTINATION_UNSAFE_RE = /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;
@@ -1045,7 +999,7 @@ export function createOverviewPane(): HTMLElement {
       const content = await readWikiFile(path);
       if (seq !== docSeq) return;
       documentStatus = "ready";
-      documentHtml = md.render(content);
+      documentHtml = renderWikiMarkdown(md, content);
       documentError = "";
       loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(path, content);
       loadedDocumentPath = path;
@@ -1664,7 +1618,7 @@ export function createOverviewPane(): HTMLElement {
       documentTitleEl.textContent = documentTitle;
       documentStatusEl.hidden = true;
       documentContentEl.hidden = false;
-      const homeHtml = md.render(buildInvestigationHomepageMarkdown(overview));
+      const homeHtml = renderWikiMarkdown(md, buildInvestigationHomepageMarkdown(overview));
       if (documentContentEl.innerHTML !== homeHtml) {
         documentHtml = homeHtml;
         documentContentEl.innerHTML = homeHtml;

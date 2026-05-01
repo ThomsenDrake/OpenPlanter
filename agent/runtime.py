@@ -1127,7 +1127,9 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         lines.append("- _No to-do details available._")
     for task_id, task in open_tasks:
         description = _record_label(task, task_id, "description", "label", "text", "title")
+        anchor = _todo_anchor(task_id)
         lines.extend([
+            f'<a id="{anchor}"></a>',
             f"### TODO {task_id}",
             f"- **Status**: `{str(task.get('status') or 'open')}`",
             f"- **Description**: {description}",
@@ -1139,7 +1141,9 @@ def _render_investigation_homepage(state: dict[str, Any], session_id: str) -> st
         action_id = str(action.get("id") or action.get("action_id") or "").strip()
         if not action_id:
             continue
+        anchor = _todo_anchor(action_id)
         lines.extend([
+            f'<a id="{anchor}"></a>',
             f"### TODO {action_id}",
             "- **Status**: `candidate_action`",
             f"- **Description**: {_candidate_action_label(action)}",

@@ -32,21 +32,10 @@ import { bindInteractions } from "../graph/interaction";
 import { getCategoryColor } from "../graph/colors";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
+import { createWikiMarkdownRenderer, renderWikiMarkdown } from "../wiki/markdown";
 import { appState } from "../state/store";
-import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
 
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: false,
-  highlight(str: string, lang: string) {
-    if (lang && hljs.getLanguage(lang)) {
-      try { return hljs.highlight(str, { language: lang }).value; } catch { /* fallback */ }
-    }
-    return "";
-  },
-});
+const md = createWikiMarkdownRenderer();
 
 export function createGraphPane(): HTMLElement {
   const pane = document.createElement("div");
@@ -318,7 +307,7 @@ export function createGraphPane(): HTMLElement {
     const loadSeq = ++drawerLoadSeq;
     readWikiFile(wikiPath).then((content) => {
       if (loadSeq !== drawerLoadSeq) return;
-      drawerBody.innerHTML = md.render(content);
+      drawerBody.innerHTML = renderWikiMarkdown(md, content);
       interceptDrawerLinks();
     }).catch((err) => {
       if (loadSeq !== drawerLoadSeq) return;
