@@ -59,7 +59,24 @@ function flagValue(tokens: string[], flag: string): string | null {
   return value;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return String(error);
+}
+
 export async function handleObsidianCommand(args: string): Promise<CommandResult> {
+  try {
+    return await handleObsidianCommandInner(args);
+  } catch (error) {
+    return {
+      action: "handled",
+      lines: [`Obsidian command failed: ${errorMessage(error)}`],
+    };
+  }
+}
+
+async function handleObsidianCommandInner(args: string): Promise<CommandResult> {
   const tokens = tokenizeArgs(args);
   const subcommand = (tokens.shift() || "status").toLowerCase();
 

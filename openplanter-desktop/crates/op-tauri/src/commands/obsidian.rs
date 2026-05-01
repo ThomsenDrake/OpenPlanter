@@ -8,7 +8,7 @@ use op_core::obsidian::{
     normalize_obsidian_export_subdir, obsidian_open_uri_for_path,
 };
 use op_core::settings::{PersistentSettings, SettingsStore};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
@@ -18,10 +18,20 @@ use tauri_plugin_shell::ShellExt;
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureObsidianExportRequest {
     pub enabled: Option<bool>,
-    pub root: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_root_update")]
+    pub root: Option<Option<String>>,
     pub mode: Option<String>,
     pub subdir: Option<String>,
     pub generate_canvas: Option<bool>,
+}
+
+fn deserialize_nullable_root_update<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,12 +69,12 @@ fn apply_request_to_config(
     if let Some(enabled) = request.enabled {
         config.enabled = enabled;
     }
-    if let Some(root) = request.root.as_deref() {
-        config.root = if root.trim().is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(root.trim()))
-        };
+    if let Some(root) = request.root.as_ref() {
+        config.root = root
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
     }
     if let Some(mode) = request.mode.as_deref() {
         config.mode = normalize_obsidian_export_mode(Some(mode));
@@ -239,7 +249,7 @@ mod tests {
             ObsidianExportConfig::default(),
             &ConfigureObsidianExportRequest {
                 enabled: Some(true),
-                root: Some("/tmp/Vault".into()),
+                root: Some(Some("/tmp/Vault".into())),
                 mode: Some("fresh-vault".into()),
                 subdir: None,
                 generate_canvas: Some(false),
@@ -250,6 +260,26 @@ mod tests {
         assert_eq!(config.mode, "fresh_vault");
         assert_eq!(config.subdir, "OpenPlanter");
         assert!(!config.generate_canvas);
+    }
+
+    #[test]
+    fn configure_request_can_clear_root_with_null() {
+        let request: ConfigureObsidianExportRequest =
+            serde_json::from_value(serde_json::json!({"root": null})).unwrap();
+        assert_eq!(request.root, Some(None));
+
+        let config = apply_request_to_config(
+            ObsidianExportConfig {
+                root: Some(PathBuf::from("/tmp/Vault")),
+                ..Default::default()
+            },
+            &request,
+        );
+        assert_eq!(config.root, None);
+
+        let omitted: ConfigureObsidianExportRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.root, None);
     }
 
     #[test]

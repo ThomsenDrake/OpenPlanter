@@ -248,6 +248,19 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("Missing value for --mode"))).toBe(true);
   });
 
+  it("obsidian command reports backend errors as command output", async () => {
+    __setHandler("get_obsidian_export_status", () => {
+      throw new Error("export root missing");
+    });
+
+    const result = await dispatchSlashCommand("/obsidian status");
+    expect(result).not.toBeNull();
+    expect(result!.action).toBe("handled");
+    expect(
+      result!.lines.some((l) => l.includes("Obsidian command failed: export root missing"))
+    ).toBe(true);
+  });
+
   it("help includes continuity command", async () => {
     const result = await dispatchSlashCommand("/help");
     expect(result).not.toBeNull();
