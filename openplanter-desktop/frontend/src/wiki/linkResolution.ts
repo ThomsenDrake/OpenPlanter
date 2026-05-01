@@ -12,8 +12,8 @@ function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
 }
 
 function decodeWikiPathSegment(segment: string, decodePercentEncoding: boolean): string | null {
-  if (ENCODED_PATH_DELIMITER_RE.test(segment)) return null;
   if (!decodePercentEncoding) return segment;
+  if (ENCODED_PATH_DELIMITER_RE.test(segment)) return null;
   const withBarePercentsEscaped = segment.replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
   try {
     const decoded = decodeURIComponent(withBarePercentsEscaped);

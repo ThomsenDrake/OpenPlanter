@@ -51,6 +51,17 @@ describe("resolveWikiMarkdownHref", () => {
     expect(resolveWikiMarkdownHref("wiki/revenue%growth.md")).toBe("wiki/revenue%growth.md");
   });
 
+  it("preserves literal encoded delimiters by default", () => {
+    expect(resolveWikiMarkdownHref("wiki/report%23draft.md")).toBe("wiki/report%23draft.md");
+    expect(resolveWikiMarkdownHref("wiki/report%3Fdraft.md")).toBe("wiki/report%3Fdraft.md");
+    expect(resolveWikiMarkdownHref("wiki/folder%2Fsecret.md")).toBe(
+      "wiki/folder%2Fsecret.md",
+    );
+    expect(resolveWikiMarkdownHref("wiki/folder%5Csecret.md")).toBe(
+      "wiki/folder%5Csecret.md",
+    );
+  });
+
   it("decodes encoded literal percent signs for generated links", () => {
     expect(
       resolveWikiMarkdownHref("wiki/revenue%2520growth.md", {
@@ -76,7 +87,15 @@ describe("resolveWikiMarkdownHref", () => {
     expect(resolveWikiMarkdownHref("#summary")).toBeNull();
     expect(resolveWikiMarkdownHref("../../secret.md")).toBeNull();
     expect(resolveWikiMarkdownHref("contracts/usaspending.md?raw=1")).toBeNull();
-    expect(resolveWikiMarkdownHref("wiki/%2Fsecret.md")).toBeNull();
-    expect(resolveWikiMarkdownHref("wiki/folder%5Csecret.md")).toBeNull();
+    expect(
+      resolveWikiMarkdownHref("wiki/%2Fsecret.md", {
+        decodePercentEncoding: true,
+      }),
+    ).toBeNull();
+    expect(
+      resolveWikiMarkdownHref("wiki/folder%5Csecret.md", {
+        decodePercentEncoding: true,
+      }),
+    ).toBeNull();
   });
 });
