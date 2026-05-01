@@ -20,12 +20,20 @@ import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
 
-function markdownHeadingId(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
+function safeHeadingComponent(text: string): string {
+  const component = text
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[.-]+|[.-]+$/g, "");
+  return component || "artifact";
+}
+
+function markdownHeadingId(text: string): string {
+  const trimmed = text.trim();
+  const todoMatch = /^TODO\s+(.+)$/i.exec(trimmed);
+  if (todoMatch) {
+    return `todo-${safeHeadingComponent(todoMatch[1].toLowerCase())}`;
+  }
+  return safeHeadingComponent(trimmed.toLowerCase());
 }
 
 const md = new MarkdownIt({

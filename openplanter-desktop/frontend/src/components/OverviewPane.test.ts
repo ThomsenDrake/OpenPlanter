@@ -271,10 +271,13 @@ describe("createOverviewPane", () => {
         "",
         "## Open To-Dos",
         "- [Call bank records team](#todo-todo_2)",
+        "- [Punctuated task](#todo-todo)",
         "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
         "",
         "## To-Do Details",
         "### TODO todo_2",
+        "- **Status**: `open`",
+        "### TODO .todo",
         "- **Status**: `open`",
       ].join("\n");
     });
@@ -307,6 +310,12 @@ describe("createOverviewPane", () => {
     expect(todoLink?.getAttribute("href")).toBe("#todo-todo_2");
     const todoHeading = pane.querySelector<HTMLElement>('[id="todo-todo_2"]');
     expect(todoHeading?.textContent).toBe("TODO todo_2");
+    const punctuatedLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Punctuated task",
+    ) as HTMLAnchorElement | undefined;
+    expect(punctuatedLink?.getAttribute("href")).toBe("#todo-todo");
+    const punctuatedHeading = pane.querySelector<HTMLElement>('[id="todo-todo"]');
+    expect(punctuatedHeading?.textContent).toBe("TODO .todo");
 
     const wireLink = Array.from(pane.querySelectorAll("a")).find(
       (anchor) => anchor.textContent === "Wire records",
