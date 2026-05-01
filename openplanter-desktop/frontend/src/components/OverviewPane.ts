@@ -36,6 +36,10 @@ const md = new MarkdownIt({
   },
 });
 
+const MARKDOWN_LINK_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+const MARKDOWN_DESTINATION_UNSAFE_RE = /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;
+const MARKDOWN_WIKI_DESTINATION_UNSAFE_RE = /%|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;
+
 type DocumentStatus = "idle" | "loading" | "ready" | "error";
 type ReplayStatus = "idle" | "loading" | "ready" | "error";
 type EvidenceLocatorKind =
@@ -415,8 +419,11 @@ export function createOverviewPane(): HTMLElement {
 
   function encodeMarkdownLinkDestination(href: string): string {
     const encoder = new TextEncoder();
+    const unsafePattern = MARKDOWN_LINK_PROTOCOL_RE.test(href)
+      ? MARKDOWN_DESTINATION_UNSAFE_RE
+      : MARKDOWN_WIKI_DESTINATION_UNSAFE_RE;
     return href.replace(
-      /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g,
+      unsafePattern,
       (value) =>
         Array.from(encoder.encode(value))
           .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
@@ -1087,6 +1094,7 @@ export function createOverviewPane(): HTMLElement {
         }
         const resolvedPath = resolveWikiMarkdownHref(href, {
           baseWikiPath: loadedDocumentPath,
+          decodePercentEncoding: loadedDocumentPath === INVESTIGATION_HOME_PATH,
         });
         if (!resolvedPath) return;
 

@@ -11,8 +11,9 @@ function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
   return trimmed;
 }
 
-function decodeWikiPathSegment(segment: string): string | null {
+function decodeWikiPathSegment(segment: string, decodePercentEncoding: boolean): string | null {
   if (ENCODED_PATH_DELIMITER_RE.test(segment)) return null;
+  if (!decodePercentEncoding) return segment;
   const withBarePercentsEscaped = segment.replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
   try {
     const decoded = decodeURIComponent(withBarePercentsEscaped);
@@ -32,7 +33,7 @@ function decodeWikiPathSegment(segment: string): string | null {
 
 export function resolveWikiMarkdownHref(
   href: string,
-  options?: { baseWikiPath?: string | null },
+  options?: { baseWikiPath?: string | null; decodePercentEncoding?: boolean },
 ): string | null {
   const trimmed = href.trim();
   if (!trimmed) return null;
@@ -54,7 +55,7 @@ export function resolveWikiMarkdownHref(
 
   const normalizedSegments: string[] = [];
   for (const rawSegment of rawSegments) {
-    const segment = decodeWikiPathSegment(rawSegment);
+    const segment = decodeWikiPathSegment(rawSegment, options?.decodePercentEncoding === true);
     if (segment == null) return null;
     if (!segment || segment === ".") continue;
     if (segment === "..") {

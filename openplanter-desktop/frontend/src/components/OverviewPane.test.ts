@@ -203,6 +203,56 @@ describe("createOverviewPane", () => {
     });
   });
 
+  it("preserves literal percent-hex wiki source filenames from investigation home", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        focus_questions: [
+          {
+            id: "q1",
+            text: "What revenue growth records are available?",
+            priority: "high",
+          },
+        ],
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "revenue-growth",
+              title: "Revenue growth",
+              category: "records",
+              file_path: "wiki/revenue%20growth.md",
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Revenue growth");
+    });
+
+    const sourceLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Revenue growth",
+    ) as HTMLAnchorElement | undefined;
+    expect(sourceLink).toBeDefined();
+    expect(sourceLink?.getAttribute("href")).toBe("wiki/revenue%2520growth.md");
+
+    sourceLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/revenue%20growth.md");
+      expect(readPaths).toEqual(["wiki/revenue%20growth.md"]);
+    });
+  });
+
   it("links investigation home entries to overview cards and replay", async () => {
     __setHandler("get_investigation_overview", () =>
       makeOverview({

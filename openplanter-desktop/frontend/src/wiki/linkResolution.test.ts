@@ -25,13 +25,29 @@ describe("resolveWikiMarkdownHref", () => {
   });
 
   it("decodes percent-encoded wiki path segments", () => {
-    expect(resolveWikiMarkdownHref("wiki/Q1%20notes%20%28draft%29.md")).toBe(
-      "wiki/Q1 notes (draft).md",
+    expect(
+      resolveWikiMarkdownHref("wiki/Q1%20notes%20%28draft%29.md", {
+        decodePercentEncoding: true,
+      }),
+    ).toBe("wiki/Q1 notes (draft).md");
+  });
+
+  it("preserves literal percent-hex text in wiki path segments by default", () => {
+    expect(resolveWikiMarkdownHref("wiki/revenue%20growth.md")).toBe(
+      "wiki/revenue%20growth.md",
     );
   });
 
   it("preserves literal percent signs in wiki path segments", () => {
     expect(resolveWikiMarkdownHref("wiki/revenue%growth.md")).toBe("wiki/revenue%growth.md");
+  });
+
+  it("decodes encoded literal percent signs for generated links", () => {
+    expect(
+      resolveWikiMarkdownHref("wiki/revenue%2520growth.md", {
+        decodePercentEncoding: true,
+      }),
+    ).toBe("wiki/revenue%20growth.md");
   });
 
   it("rejects non-wiki or unsafe links", () => {
