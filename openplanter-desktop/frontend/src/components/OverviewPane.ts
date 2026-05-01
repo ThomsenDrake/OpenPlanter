@@ -16,7 +16,11 @@ import { appState } from "../state/store";
 import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
-import { createWikiMarkdownRenderer, renderWikiMarkdown } from "../wiki/markdown";
+import {
+  createWikiMarkdownRenderer,
+  isGeneratedInvestigationHomepageMarkdown,
+  renderWikiMarkdown,
+} from "../wiki/markdown";
 
 const md = createWikiMarkdownRenderer();
 
@@ -72,13 +76,7 @@ const INVESTIGATION_HOME_TITLE = "Investigation Home";
 
 function shouldDecodeGeneratedWikiLinks(path: string | null, markdown = ""): boolean {
   if (path === INVESTIGATION_HOME_PATH) return true;
-  if (!path?.startsWith("wiki/investigations/") || !path.endsWith(".md")) return false;
-
-  const firstLine = markdown.split(/\r?\n/, 1)[0]?.trim() ?? "";
-  return (
-    /^# Investigation Home(?::|$)/.test(firstLine) &&
-    markdown.includes("> Auto-generated from `investigation_state.json`.")
-  );
+  return isGeneratedInvestigationHomepageMarkdown(path, markdown);
 }
 
 export function createOverviewPane(): HTMLElement {

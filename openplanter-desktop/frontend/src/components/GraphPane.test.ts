@@ -172,6 +172,7 @@ describe("createGraphPane wiki drawer events", () => {
       "",
       "## Open To-Dos",
       "- [Call bank records team](#todo-todo_2)",
+      "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
       "",
       "## To-Do Details",
       '<a id="todo-todo_2"></a>',
@@ -198,5 +199,19 @@ describe("createGraphPane wiki drawer events", () => {
     const todoHeading = drawerBody?.querySelector<HTMLElement>('[id="todo-todo_2"]');
     expect(todoHeading?.textContent).toBe("TODO todo_2");
     expect(drawerBody?.textContent).not.toContain('<a id="todo-todo_2"></a>');
+
+    const wireLink = Array.from(drawerBody?.querySelectorAll("a") ?? []).find(
+      (anchor) => anchor.textContent === "Wire records",
+    ) as HTMLAnchorElement | undefined;
+    expect(wireLink?.getAttribute("href")).toBe(
+      "../docs/wire%20transfer%20records%28v2%29.md",
+    );
+    wireLink!.click();
+
+    await vi.waitFor(() => {
+      expect(mocks.readWikiFile).toHaveBeenCalledWith(
+        "wiki/docs/wire transfer records(v2).md",
+      );
+    });
   });
 });

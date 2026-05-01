@@ -21,6 +21,19 @@ function stripSafeTodoAnchors(markdown: string): string {
   return markdown.replace(/^<a id="todo-[A-Za-z0-9._-]+"><\/a>\r?\n?/gm, "");
 }
 
+export function isGeneratedInvestigationHomepageMarkdown(
+  path: string | null,
+  markdown: string,
+): boolean {
+  if (!path?.startsWith("wiki/investigations/") || !path.endsWith(".md")) return false;
+
+  const firstLine = markdown.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return (
+    /^# Investigation Home(?::|$)/.test(firstLine) &&
+    markdown.includes("> Auto-generated from `investigation_state.json`.")
+  );
+}
+
 export function createWikiMarkdownRenderer(): MarkdownIt {
   const md = new MarkdownIt({
     html: false,
