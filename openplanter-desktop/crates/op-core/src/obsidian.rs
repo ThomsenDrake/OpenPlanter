@@ -940,7 +940,11 @@ fn render_canvas(
         let source_id = value_str(node, "id")
             .map(ToString::to_string)
             .unwrap_or_else(|| format!("node-{index}"));
-        let canvas_id = format!("graph-{}", safe_component(&source_id));
+        let canvas_id = format!(
+            "graph-{}-{}",
+            safe_component(&source_id),
+            stable_slug_suffix(&source_id)
+        );
         node_id_map.insert(source_id.clone(), canvas_id.clone());
         let label = record_label(node, &source_id, &["label", "type"]);
         let kind = value_str(node, "type").unwrap_or("Node");
@@ -1361,6 +1365,44 @@ mod tests {
             target_root(workspace, &config).unwrap(),
             PathBuf::from("/tmp/Vault/Research/OpenPlanter")
         );
+    }
+
+    #[test]
+    fn canvas_graph_node_ids_are_unique_after_sanitizing() {
+        let state = InvestigationState::new("session-1");
+        let graph = serde_json::json!({
+            "nodes": [
+                {"id": "a b", "type": "Claim", "label": "A B"},
+                {"id": "a-b", "type": "Claim", "label": "A dash B"}
+            ],
+            "edges": [
+                {"source": "a b", "target": "a-b", "type": "related"}
+            ]
+        });
+
+        let canvas = render_canvas(&state, Some(&graph)).unwrap();
+        let graph_node_ids: Vec<String> = canvas["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["type"] == "text")
+            .filter_map(|node| node["id"].as_str().map(ToString::to_string))
+            .collect();
+        let unique_ids: std::collections::HashSet<String> =
+            graph_node_ids.iter().cloned().collect();
+        assert_eq!(graph_node_ids.len(), 2);
+        assert_eq!(unique_ids.len(), 2);
+        assert!(graph_node_ids.iter().all(|id| id.starts_with("graph-a-b-")));
+
+        let graph_edge = canvas["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["id"] == "graph-edge-0")
+            .unwrap();
+        assert_ne!(graph_edge["fromNode"], graph_edge["toNode"]);
+        assert!(unique_ids.contains(graph_edge["fromNode"].as_str().unwrap()));
+        assert!(unique_ids.contains(graph_edge["toNode"].as_str().unwrap()));
     }
 
     #[test]

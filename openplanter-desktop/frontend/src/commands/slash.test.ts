@@ -265,6 +265,36 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("Obsidian export enabled"))).toBe(true);
   });
 
+  it("obsidian enable can explicitly re-enable canvas", async () => {
+    __setHandler("configure_obsidian_export", ({ request }: any) => {
+      expect(request).toEqual({
+        enabled: true,
+        root: "/tmp/New Vault",
+        generateCanvas: true,
+      });
+      return {
+        enabled: true,
+        configured: true,
+        root: "/tmp/New Vault",
+        target_root: "/tmp/New Vault",
+        mode: "fresh_vault",
+        subdir: "Research",
+        generate_canvas: true,
+        warnings: [],
+      };
+    });
+
+    const result = await dispatchSlashCommand('/obsidian enable "/tmp/New Vault" --canvas');
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Obsidian export enabled"))).toBe(true);
+  });
+
+  it("obsidian enable rejects conflicting canvas flags", async () => {
+    const result = await dispatchSlashCommand('/obsidian enable "/tmp/New Vault" --canvas --no-canvas');
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Choose either --canvas or --no-canvas"))).toBe(true);
+  });
+
   it("obsidian enable validates missing flag values", async () => {
     const result = await dispatchSlashCommand("/obsidian enable /tmp/Vault --mode");
     expect(result).not.toBeNull();

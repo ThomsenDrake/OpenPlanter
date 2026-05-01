@@ -9,7 +9,7 @@ import { appState } from "../state/store";
 import type { CommandResult } from "./model";
 
 export const OBSIDIAN_USAGE =
-  "/obsidian status|enable <vault-path> [--mode fresh-vault|existing-vault-folder] [--subdir OpenPlanter] [--no-canvas]|disable|export|open";
+  "/obsidian status|enable <vault-path> [--mode fresh-vault|existing-vault-folder] [--subdir OpenPlanter] [--canvas|--no-canvas]|disable|export|open";
 
 function tokenizeArgs(input: string): string[] {
   const tokens: string[] = [];
@@ -95,7 +95,11 @@ async function handleObsidianCommandInner(args: string): Promise<CommandResult> 
   if (subcommand === "enable") {
     const modeIndex = tokens.indexOf("--mode");
     const subdirIndex = tokens.indexOf("--subdir");
+    const canvas = tokens.includes("--canvas");
     const noCanvas = tokens.includes("--no-canvas");
+    if (canvas && noCanvas) {
+      return { action: "handled", lines: ["Choose either --canvas or --no-canvas.", `Usage: ${OBSIDIAN_USAGE}`] };
+    }
     const mode = modeIndex >= 0 ? flagValue(tokens, "--mode") : undefined;
     const subdir = subdirIndex >= 0 ? flagValue(tokens, "--subdir") : undefined;
     if (modeIndex >= 0 && !mode) {
@@ -105,7 +109,7 @@ async function handleObsidianCommandInner(args: string): Promise<CommandResult> 
       return { action: "handled", lines: ["Missing value for --subdir.", `Usage: ${OBSIDIAN_USAGE}`] };
     }
     const pathTokens = tokens.filter((token, index) => {
-      if (token === "--mode" || token === "--subdir" || token === "--no-canvas") return false;
+      if (token === "--mode" || token === "--subdir" || token === "--canvas" || token === "--no-canvas") return false;
       if (modeIndex >= 0 && index === modeIndex + 1) return false;
       if (subdirIndex >= 0 && index === subdirIndex + 1) return false;
       return true;
@@ -123,6 +127,7 @@ async function handleObsidianCommandInner(args: string): Promise<CommandResult> 
     };
     if (mode) request.mode = mode;
     if (subdir) request.subdir = subdir;
+    if (canvas) request.generateCanvas = true;
     if (noCanvas) request.generateCanvas = false;
     const status = await configureObsidianExport(request);
     appState.update((s) => ({
