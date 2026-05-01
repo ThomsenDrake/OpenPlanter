@@ -413,16 +413,25 @@ export function createOverviewPane(): HTMLElement {
 
   function encodeMarkdownLinkDestination(href: string): string {
     const encoder = new TextEncoder();
-    const unsafePattern = MARKDOWN_LINK_PROTOCOL_RE.test(href)
-      ? MARKDOWN_DESTINATION_UNSAFE_RE
-      : MARKDOWN_WIKI_DESTINATION_UNSAFE_RE;
-    return href.replace(
-      unsafePattern,
-      (value) =>
-        Array.from(encoder.encode(value))
-          .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
-          .join(""),
+    const isWikiDestination = !MARKDOWN_LINK_PROTOCOL_RE.test(href);
+    const unsafePattern = isWikiDestination
+      ? MARKDOWN_WIKI_DESTINATION_UNSAFE_RE
+      : MARKDOWN_DESTINATION_UNSAFE_RE;
+    const encodePart = (value: string) =>
+      value.replace(
+        unsafePattern,
+        (unsafeValue) =>
+          Array.from(encoder.encode(unsafeValue))
+            .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+            .join(""),
     );
+    if (isWikiDestination && href.includes("#")) {
+      const fragmentIndex = href.indexOf("#");
+      const path = href.slice(0, fragmentIndex);
+      const fragment = href.slice(fragmentIndex + 1);
+      return `${encodePart(path)}#${encodePart(fragment)}`;
+    }
+    return encodePart(href);
   }
 
   function markdownLink(label: string, href: string): string {

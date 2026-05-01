@@ -449,6 +449,48 @@ describe("createOverviewPane", () => {
     expect(replayCard?.style.outline).toContain("var(--accent)");
   });
 
+  it("keeps wiki proof fragments clickable from investigation home", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-wiki-fragment",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Report summary proof",
+            summary: "The report summary supports the conclusion.",
+            provenance: {
+              source: "agent_step",
+              source_refs: ["wiki/docs/report.md#summary"],
+            },
+          },
+        ],
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Report summary proof");
+    });
+
+    const proofLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.getAttribute("href") === "wiki/docs/report.md#summary",
+    ) as HTMLAnchorElement | undefined;
+    expect(proofLink).toBeDefined();
+    proofLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/docs/report.md");
+      expect(readPaths).toEqual(["wiki/docs/report.md"]);
+    });
+  });
+
   it("refreshes the overview when curator updates arrive", async () => {
     let callCount = 0;
     __setHandler("get_investigation_overview", () => {
