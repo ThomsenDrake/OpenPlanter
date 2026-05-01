@@ -838,11 +838,19 @@ def _percent_encode_match(match: re.Match[str]) -> str:
 
 def _encode_markdown_link_target(target: str) -> str:
     safe_target = _investigation_homepage_link_target(target)
+    is_wiki_target = _is_investigation_homepage_wiki_target(safe_target)
     unsafe_pattern = (
         _MARKDOWN_WIKI_DESTINATION_UNSAFE_RE
-        if _is_investigation_homepage_wiki_target(safe_target)
+        if is_wiki_target
         else _MARKDOWN_DESTINATION_UNSAFE_RE
     )
+    if is_wiki_target and "#" in safe_target:
+        path, fragment = safe_target.split("#", 1)
+        return (
+            unsafe_pattern.sub(_percent_encode_match, path)
+            + "#"
+            + unsafe_pattern.sub(_percent_encode_match, fragment)
+        )
     return unsafe_pattern.sub(_percent_encode_match, safe_target)
 
 

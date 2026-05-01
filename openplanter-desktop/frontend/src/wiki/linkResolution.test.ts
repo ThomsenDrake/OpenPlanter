@@ -41,6 +41,15 @@ describe("resolveWikiMarkdownHref", () => {
     ).toBe("wiki/docs/wire transfer records(v2).md");
   });
 
+  it("preserves fragment delimiters in generated investigation homepage links", () => {
+    expect(
+      resolveWikiMarkdownHref("../docs/report.md#summary", {
+        baseWikiPath: "wiki/investigations/acme.md",
+        decodePercentEncoding: true,
+      }),
+    ).toBe("wiki/docs/report.md");
+  });
+
   it("preserves literal percent-hex text in wiki path segments by default", () => {
     expect(resolveWikiMarkdownHref("wiki/revenue%20growth.md")).toBe(
       "wiki/revenue%20growth.md",

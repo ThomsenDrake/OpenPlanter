@@ -516,7 +516,7 @@ class SessionRuntimeTests(unittest.TestCase):
                     "claim_text": "A payment was routed through shell entities.",
                     "status": "supported",
                     "confidence": 0.82,
-                    "support_evidence_ids": ["ev_doc_1", "ev_bad"],
+                    "support_evidence_ids": ["ev_doc_1", "ev_doc_4", "ev_bad"],
                 },
                 "cl_contested": {
                     "id": "cl_contested",
@@ -542,6 +542,11 @@ class SessionRuntimeTests(unittest.TestCase):
                     "description": "Literal percent file",
                     "source_uri": "docs/revenue%20growth.md",
                 },
+                "ev_doc_4": {
+                    "id": "ev_doc_4",
+                    "description": "Fragment proof",
+                    "source_uri": "docs/report.md#summary",
+                },
                 "ev_bad": "malformed evidence should not crash homepage generation",
             }
             typed_state["tasks"] = {
@@ -555,6 +560,12 @@ class SessionRuntimeTests(unittest.TestCase):
                 "todo_2": {
                     "id": "todo_2",
                     "description": "Call bank records team",
+                    "status": "open",
+                },
+                "todo_fragment": {
+                    "id": "todo_fragment",
+                    "description": "Review report section",
+                    "link": "docs/report.md#follow-up",
                     "status": "open",
                 },
                 "todo_done": {
@@ -591,6 +602,7 @@ class SessionRuntimeTests(unittest.TestCase):
             )
             self.assertIn("`ev_bad`: ev_bad", content)
             self.assertIn("[ev_doc_3: Literal percent file](../docs/revenue%2520growth.md)", content)
+            self.assertIn("[ev_doc_4: Fragment proof](../docs/report.md#summary)", content)
             self.assertIn("Contradicting citations", content)
             self.assertIn("[ev_doc_2: Approval email](../docs/approval-email.md)", content)
             self.assertIn("## Open Questions and Needed Documents", content)
@@ -601,6 +613,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 "[Pull wire transfer records](../docs/wire%20transfer%20records%28v2%29.md)",
                 content,
             )
+            self.assertIn("[Review report section](../docs/report.md#follow-up)", content)
             self.assertIn("[Call bank records team](#todo-todo_2)", content)
             self.assertIn("### TODO todo_2", content)
             self.assertNotIn("<a id=", content)
