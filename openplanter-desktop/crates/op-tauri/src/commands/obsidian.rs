@@ -1,3 +1,4 @@
+use crate::commands::session::is_safe_session_id;
 use crate::state::AppState;
 use op_core::config::AgentConfig;
 use op_core::engine::context::load_or_migrate_investigation_state;
@@ -101,6 +102,14 @@ fn metadata_investigation_id(session_dir: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn validate_export_session_id(session_id: &str) -> Result<(), String> {
+    if is_safe_session_id(session_id) {
+        Ok(())
+    } else {
+        Err("Invalid session id".to_string())
+    }
+}
+
 pub(crate) async fn export_session_dir_with_config(
     workspace: &Path,
     session_dir: &Path,
@@ -130,9 +139,7 @@ async fn resolve_session_dir(
             .clone()
             .ok_or_else(|| "No active session selected".to_string())?,
     };
-    if session_id.contains(['/', '\\', '\0']) {
-        return Err("Invalid session id".to_string());
-    }
+    validate_export_session_id(&session_id)?;
     let session_dir = cfg
         .workspace
         .join(&cfg.session_root_dir)
@@ -243,5 +250,13 @@ mod tests {
         assert_eq!(config.mode, "fresh_vault");
         assert_eq!(config.subdir, "OpenPlanter");
         assert!(!config.generate_canvas);
+    }
+
+    #[test]
+    fn validate_export_session_id_rejects_dot_segments() {
+        assert!(validate_export_session_id(".").is_err());
+        assert!(validate_export_session_id("..").is_err());
+        assert!(validate_export_session_id("../session").is_err());
+        assert!(validate_export_session_id("session-1").is_ok());
     }
 }

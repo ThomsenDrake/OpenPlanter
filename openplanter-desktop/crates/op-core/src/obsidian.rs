@@ -1019,13 +1019,33 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), ObsidianExportError> {
         path: tmp.display().to_string(),
         source,
     })?;
-    fs::rename(&tmp, path).map_err(|source| {
-        let _ = fs::remove_file(&tmp);
-        ObsidianExportError::WriteFile {
-            path: path.display().to_string(),
-            source,
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if path.exists() {
+                if let Err(remove_error) = fs::remove_file(path) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(ObsidianExportError::WriteFile {
+                        path: path.display().to_string(),
+                        source: remove_error,
+                    });
+                }
+                fs::rename(&tmp, path).map_err(|source| {
+                    let _ = fs::remove_file(&tmp);
+                    ObsidianExportError::WriteFile {
+                        path: path.display().to_string(),
+                        source,
+                    }
+                })
+            } else {
+                let _ = fs::remove_file(&tmp);
+                Err(ObsidianExportError::WriteFile {
+                    path: path.display().to_string(),
+                    source: first_error,
+                })
+            }
         }
-    })
+    }
 }
 
 fn read_optional_json(path: &Path) -> Result<Option<Value>, ObsidianExportError> {
@@ -1388,5 +1408,16 @@ mod tests {
                 .join("Investigation Map.canvas")
                 .exists()
         );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("Vault").join("Index.md");
+
+        atomic_write(&path, "first\n").unwrap();
+        atomic_write(&path, "second\n").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "second\n");
     }
 }
