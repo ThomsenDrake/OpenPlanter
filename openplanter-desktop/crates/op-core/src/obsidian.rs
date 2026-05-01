@@ -1040,26 +1040,55 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), ObsidianExportError> {
         Ok(()) => Ok(()),
         Err(first_error) => {
             if path.exists() {
-                if let Err(remove_error) = fs::remove_file(path) {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(ObsidianExportError::WriteFile {
-                        path: path.display().to_string(),
-                        source: remove_error,
-                    });
-                }
-                fs::rename(&tmp, path).map_err(|source| {
-                    let _ = fs::remove_file(&tmp);
-                    ObsidianExportError::WriteFile {
-                        path: path.display().to_string(),
-                        source,
-                    }
-                })
+                replace_existing_with_backup(&tmp, path)
             } else {
                 let _ = fs::remove_file(&tmp);
                 Err(ObsidianExportError::WriteFile {
                     path: path.display().to_string(),
                     source: first_error,
                 })
+            }
+        }
+    }
+}
+
+fn replace_existing_with_backup(tmp: &Path, path: &Path) -> Result<(), ObsidianExportError> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("openplanter");
+    let backup = path.with_file_name(format!(".{file_name}.backup-{}", Uuid::new_v4()));
+    if let Err(source) = fs::rename(path, &backup) {
+        let _ = fs::remove_file(tmp);
+        return Err(ObsidianExportError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        });
+    }
+
+    match fs::rename(tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(source) => {
+            let restore_result = fs::rename(&backup, path);
+            let _ = fs::remove_file(tmp);
+            match restore_result {
+                Ok(()) => Err(ObsidianExportError::WriteFile {
+                    path: path.display().to_string(),
+                    source,
+                }),
+                Err(restore_error) => Err(ObsidianExportError::WriteFile {
+                    path: path.display().to_string(),
+                    source: std::io::Error::new(
+                        restore_error.kind(),
+                        format!(
+                            "failed to restore previous file from {} after replacement failed: {source}; restore error: {restore_error}",
+                            backup.display()
+                        ),
+                    ),
+                }),
             }
         }
     }
@@ -1531,5 +1560,30 @@ mod tests {
         atomic_write(&path, "second\n").unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn fallback_replace_restores_existing_file_on_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("Vault").join("Index.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "previous\n").unwrap();
+        let missing_tmp = workspace.path().join("Vault").join(".Index.md.tmp-missing");
+
+        let result = replace_existing_with_backup(&missing_tmp, &path);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "previous\n");
+        let backup_count = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".Index.md.backup-")
+            })
+            .count();
+        assert_eq!(backup_count, 0);
     }
 }
