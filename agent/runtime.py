@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -44,6 +45,15 @@ def _new_session_id() -> str:
 def _safe_component(text: str) -> str:
     component = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
     return component or "artifact"
+
+
+def _stable_slug_suffix(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+
+
+def _investigation_homepage_relative_path(investigation_id: str) -> str:
+    slug = _safe_component(investigation_id).lower()
+    return f"investigations/{slug}-{_stable_slug_suffix(investigation_id)}.md"
 
 
 def _has_reasoning_content(packet: dict[str, Any]) -> bool:
@@ -1165,7 +1175,7 @@ def _write_investigation_homepage(
         return
 
     wiki_root = workspace / session_root_dir / "wiki"
-    relative_path = f"investigations/{_safe_component(investigation_id)}.md"
+    relative_path = _investigation_homepage_relative_path(investigation_id)
     homepage_path = wiki_root / relative_path
     homepage_path.parent.mkdir(parents=True, exist_ok=True)
     homepage_path.write_text(

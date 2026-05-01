@@ -27,6 +27,15 @@ def _investigation_report() -> str:
     )
 
 
+def _single_homepage_path(root: Path, slug_prefix: str) -> Path:
+    matches = sorted(
+        (root / ".openplanter" / "wiki" / "investigations").glob(f"{slug_prefix}-*.md")
+    )
+    if len(matches) != 1:
+        raise AssertionError(f"Expected one homepage for {slug_prefix}, found {matches}")
+    return matches[0]
+
+
 class SessionRuntimeTests(unittest.TestCase):
     def test_session_persist_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -560,7 +569,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 },
             )
 
-            homepage = root / ".openplanter" / "wiki" / "investigations" / "acme-probe.md"
+            homepage = _single_homepage_path(root, "acme-probe")
             self.assertTrue(homepage.exists())
             content = homepage.read_text(encoding="utf-8")
             self.assertIn("## Current Status", content)
@@ -586,7 +595,8 @@ class SessionRuntimeTests(unittest.TestCase):
 
             index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
             self.assertIn("### Investigations", index_content)
-            self.assertIn("[investigations/acme-probe.md](investigations/acme-probe.md)", index_content)
+            homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
+            self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
 
     def test_store_counts_all_open_questions_in_investigation_homepage_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -625,7 +635,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 },
             )
 
-            homepage = root / ".openplanter" / "wiki" / "investigations" / "many-questions.md"
+            homepage = _single_homepage_path(root, "many-questions")
             content = homepage.read_text(encoding="utf-8")
             self.assertIn("- **Open questions**: 9", content)
 
@@ -696,10 +706,11 @@ class SessionRuntimeTests(unittest.TestCase):
             )
 
             wiki_dir = root / ".openplanter" / "wiki"
-            self.assertTrue((wiki_dir / "investigations" / "artifact.md").exists())
+            homepage = _single_homepage_path(root, "artifact")
+            homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
             index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
             self.assertIn("# Data Sources Wiki", index_content)
-            self.assertIn("[investigations/artifact.md](investigations/artifact.md)", index_content)
+            self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
 
     def test_store_escapes_investigation_id_in_homepage_index_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -712,9 +723,11 @@ class SessionRuntimeTests(unittest.TestCase):
             )
 
             index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(encoding="utf-8")
-            self.assertIn(
-                "| test\\|pipe next | Active investigation | [investigations/test-pipe-next.md](investigations/test-pipe-next.md) |",
+            self.assertRegex(
                 index_content,
+                r"\| test\\\|pipe next \| Active investigation \| "
+                r"\[investigations/test-pipe-next-[0-9a-f]{8}\.md\]"
+                r"\(investigations/test-pipe-next-[0-9a-f]{8}\.md\) \|",
             )
             self.assertNotIn("| test|pipe", index_content)
 
@@ -736,13 +749,18 @@ class SessionRuntimeTests(unittest.TestCase):
             index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(
                 encoding="utf-8"
             )
-            self.assertIn(
-                "[investigations/acme.md.md](investigations/acme.md.md)",
+            self.assertRegex(
                 index_content,
+                r"\[investigations/acme\.md-[0-9a-f]{8}\.md\]"
+                r"\(investigations/acme\.md-[0-9a-f]{8}\.md\)",
             )
-            self.assertIn("[investigations/acme.md](investigations/acme.md)", index_content)
+            self.assertRegex(
+                index_content,
+                r"\[investigations/acme-[0-9a-f]{8}\.md\]"
+                r"\(investigations/acme-[0-9a-f]{8}\.md\)",
+            )
 
-    def test_store_preserves_investigation_homepage_slug_case(self) -> None:
+    def test_store_avoids_case_insensitive_investigation_homepage_slug_collisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             store = SessionStore(workspace=root)
@@ -758,12 +776,14 @@ class SessionRuntimeTests(unittest.TestCase):
             )
 
             wiki_dir = root / ".openplanter" / "wiki"
-            self.assertTrue((wiki_dir / "investigations" / "AcmeProbe.md").exists())
-            self.assertTrue((wiki_dir / "investigations" / "acmeprobe.md").exists())
+            homepages = sorted((wiki_dir / "investigations").glob("acmeprobe-*.md"))
+            self.assertEqual(len(homepages), 2)
+            self.assertEqual({path.name for path in homepages}, {path.name.lower() for path in homepages})
 
             index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
-            self.assertIn("[investigations/AcmeProbe.md](investigations/AcmeProbe.md)", index_content)
-            self.assertIn("[investigations/acmeprobe.md](investigations/acmeprobe.md)", index_content)
+            for homepage in homepages:
+                homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
+                self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
 
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
