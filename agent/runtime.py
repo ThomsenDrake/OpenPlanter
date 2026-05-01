@@ -352,7 +352,7 @@ class SessionStore:
                     session_id=sid,
                     state=typed_state,
                 )
-            except (AttributeError, OSError, TypeError):
+            except (AttributeError, OSError, TypeError, UnicodeError):
                 pass
 
         return sid, state, created_new
@@ -482,7 +482,7 @@ class SessionStore:
                 session_id=session_id,
                 state=typed_state,
             )
-        except (AttributeError, OSError, TypeError):
+        except (AttributeError, OSError, TypeError, UnicodeError):
             pass  # Non-fatal: homepage generation is optional
 
         self._touch_metadata(session_id)

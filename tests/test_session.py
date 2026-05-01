@@ -629,6 +629,36 @@ class SessionRuntimeTests(unittest.TestCase):
             content = homepage.read_text(encoding="utf-8")
             self.assertIn("- **Open questions**: 9", content)
 
+    def test_store_save_state_ignores_unicode_homepage_generation_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home-bad-unicode",
+                resume=False,
+                investigation_id="bad-unicode",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["objective"] = "Malformed external text: \ud800"
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": ["still persisted"],
+                },
+            )
+
+            state_path = root / ".openplanter" / "sessions" / sid / "state.json"
+            self.assertTrue(state_path.exists())
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["external_observations"], ["still persisted"])
+
     def test_store_skips_investigation_homepage_without_active_investigation_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
