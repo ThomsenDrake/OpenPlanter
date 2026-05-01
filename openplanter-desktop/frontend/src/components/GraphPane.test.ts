@@ -163,4 +163,55 @@ describe("createGraphPane wiki drawer events", () => {
       expect(pane.querySelector(".graph-source-drawer-body")?.textContent).toContain("missing file");
     });
   });
+
+  it("adds stable heading ids and hides generated to-do anchor markers", async () => {
+    mocks.readWikiFile.mockResolvedValue([
+      "# Investigation Home: acme",
+      "",
+      "> Auto-generated from `investigation_state.json`.",
+      "",
+      "## Open To-Dos",
+      "- [Call bank records team](#todo-todo_2)",
+      "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
+      "",
+      "## To-Do Details",
+      '<a id="todo-todo_2"></a>',
+      "### TODO todo_2",
+      "- **Status**: `open`",
+    ].join("\n"));
+
+    window.dispatchEvent(new CustomEvent(OPEN_WIKI_DRAWER_EVENT, {
+      detail: {
+        wikiPath: "wiki/investigations/acme.md",
+        source: "chat",
+        requestedTitle: "Generated Home",
+      },
+    }));
+
+    await vi.waitFor(() => {
+      expect(mocks.readWikiFile).toHaveBeenCalledWith("wiki/investigations/acme.md");
+    });
+
+    const drawerBody = pane.querySelector(".graph-source-drawer-body");
+    await vi.waitFor(() => {
+      expect(drawerBody?.textContent).toContain("Call bank records team");
+    });
+    const todoHeading = drawerBody?.querySelector<HTMLElement>('[id="todo-todo_2"]');
+    expect(todoHeading?.textContent).toBe("TODO todo_2");
+    expect(drawerBody?.textContent).not.toContain('<a id="todo-todo_2"></a>');
+
+    const wireLink = Array.from(drawerBody?.querySelectorAll("a") ?? []).find(
+      (anchor) => anchor.textContent === "Wire records",
+    ) as HTMLAnchorElement | undefined;
+    expect(wireLink?.getAttribute("href")).toBe(
+      "../docs/wire%20transfer%20records%28v2%29.md",
+    );
+    wireLink!.click();
+
+    await vi.waitFor(() => {
+      expect(mocks.readWikiFile).toHaveBeenCalledWith(
+        "wiki/docs/wire transfer records(v2).md",
+      );
+    });
+  });
 });

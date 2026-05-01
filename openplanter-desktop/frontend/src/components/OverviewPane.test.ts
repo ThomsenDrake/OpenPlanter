@@ -118,12 +118,376 @@ describe("createOverviewPane", () => {
     document.body.appendChild(pane);
 
     await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Investigation Home");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
       expect(pane.textContent).toContain("Who controls Acme Corp?");
       expect(pane.textContent).toContain("Claim c1 needs more evidence");
       expect(pane.textContent).toContain("Acme and PAC filings overlap");
       expect(pane.querySelector(".overview-document-select")).not.toBeNull();
       expect(pane.querySelector(".overview-nav")).toBeNull();
       expect(pane.textContent).toContain("Acme Corp");
+    });
+  });
+
+  it("defaults document view to investigation home with open to-dos", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () => makeOverview());
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Current Status");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
+      expect(pane.textContent).toContain("Open Questions");
+      expect(pane.textContent).toContain("Documents / Evidence Needed");
+      expect(pane.textContent).toContain("Open To-dos");
+      expect(pane.textContent).toContain("Verify claim c1");
+    });
+    expect(appState.get().overviewSelectedWikiPath).toBe("openplanter://investigation-home");
+    expect(readPaths).toEqual([]);
+  });
+
+  it("encodes wiki source links from investigation home markdown", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        focus_questions: [
+          {
+            id: "q1",
+            text: "What is in the Q1 notes draft?",
+            priority: "high",
+          },
+        ],
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "q1-notes",
+              title: "Q1 notes draft",
+              category: "records",
+              file_path: "wiki/Q1 notes (draft).md",
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Needed documents");
+      expect(pane.textContent).toContain("Q1 notes draft");
+    });
+
+    const sourceLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Q1 notes draft",
+    ) as HTMLAnchorElement | undefined;
+    expect(sourceLink).toBeDefined();
+    expect(sourceLink?.getAttribute("href")).toBe("wiki/Q1%20notes%20%28draft%29.md");
+
+    sourceLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/Q1 notes (draft).md");
+      expect(readPaths).toEqual(["wiki/Q1 notes (draft).md"]);
+    });
+  });
+
+  it("preserves literal percent-hex wiki source filenames from investigation home", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}\n\nMock wiki document`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        focus_questions: [
+          {
+            id: "q1",
+            text: "What revenue growth records are available?",
+            priority: "high",
+          },
+        ],
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "revenue-growth",
+              title: "Revenue growth",
+              category: "records",
+              file_path: "wiki/revenue%20growth.md",
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Revenue growth");
+    });
+
+    const sourceLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Revenue growth",
+    ) as HTMLAnchorElement | undefined;
+    expect(sourceLink).toBeDefined();
+    expect(sourceLink?.getAttribute("href")).toBe("wiki/revenue%2520growth.md");
+
+    sourceLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/revenue%20growth.md");
+      expect(readPaths).toEqual(["wiki/revenue%20growth.md"]);
+    });
+  });
+
+  it("preserves literal percent-hex links from manual investigation wiki pages", async () => {
+    const manualPath = "wiki/investigations/manual.md";
+    const literalTargetPath = "wiki/revenue%20growth.md";
+    const readPaths: string[] = [];
+    appState.update((state) => ({
+      ...state,
+      overviewSelectedWikiPath: manualPath,
+    }));
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      if (path !== manualPath) {
+        return `# ${path}`;
+      }
+      return [
+        "# Manual Investigation Notes",
+        "",
+        "- [Revenue Growth](../revenue%20growth.md)",
+      ].join("\n");
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "manual",
+              title: "Manual Investigation Notes",
+              category: "investigations",
+              file_path: manualPath,
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Revenue Growth");
+    });
+
+    const revenueLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Revenue Growth",
+    ) as HTMLAnchorElement | undefined;
+    expect(revenueLink?.getAttribute("href")).toBe("../revenue%20growth.md");
+    revenueLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe(literalTargetPath);
+      expect(readPaths).toEqual([manualPath, literalTargetPath]);
+    });
+  });
+
+  it("adds markdown heading ids for generated to-do fragment links", async () => {
+    const generatedPath = "wiki/investigations/acme.md";
+    const decodedTargetPath = "wiki/docs/wire transfer records(v2).md";
+    const readPaths: string[] = [];
+    appState.update((state) => ({
+      ...state,
+      overviewSelectedWikiPath: generatedPath,
+    }));
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      if (path !== generatedPath) {
+        return `# ${path}`;
+      }
+      return [
+        "# Investigation Home: acme",
+        "",
+        "> Auto-generated from `investigation_state.json`.",
+        "",
+        "## Open To-Dos",
+        "- [Call bank records team](#todo-todo_2)",
+        "- [Punctuated task](#todo-todo)",
+        "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
+        "",
+        "## To-Do Details",
+        '<a id="todo-todo_2"></a>',
+        "### TODO todo_2",
+        "- **Status**: `open`",
+        '<a id="todo-todo"></a>',
+        "### TODO .todo",
+        "- **Status**: `open`",
+      ].join("\n");
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        wiki_nav: {
+          sources: [
+            {
+              source_id: "generated-home",
+              title: "Generated Home",
+              category: "investigation",
+              file_path: generatedPath,
+              sections: [],
+            },
+          ],
+        },
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Call bank records team");
+    });
+
+    const todoLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Call bank records team",
+    ) as HTMLAnchorElement | undefined;
+    expect(todoLink?.getAttribute("href")).toBe("#todo-todo_2");
+    const todoHeading = pane.querySelector<HTMLElement>('[id="todo-todo_2"]');
+    expect(todoHeading?.textContent).toBe("TODO todo_2");
+    expect(pane.textContent).not.toContain('<a id="todo-todo_2"></a>');
+    const punctuatedLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Punctuated task",
+    ) as HTMLAnchorElement | undefined;
+    expect(punctuatedLink?.getAttribute("href")).toBe("#todo-todo");
+    const punctuatedHeading = pane.querySelector<HTMLElement>('[id="todo-todo"]');
+    expect(punctuatedHeading?.textContent).toBe("TODO .todo");
+
+    const wireLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Wire records",
+    ) as HTMLAnchorElement | undefined;
+    expect(wireLink?.getAttribute("href")).toBe(
+      "../docs/wire%20transfer%20records%28v2%29.md",
+    );
+    wireLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe(decodedTargetPath);
+      expect(readPaths).toEqual([generatedPath, decodedTargetPath]);
+    });
+  });
+
+  it("links investigation home entries to overview cards and replay", async () => {
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-linked",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Linked proof trail",
+            summary: "This proof should link to a gap, action, and replay entry.",
+            provenance: {
+              source: "agent_step",
+              replay_seq: 7,
+              evidence_refs: ["gap:claim:c1:missing_evidence", "action:ca_1"],
+            },
+          },
+        ],
+      }),
+    );
+    __setHandler("get_session_history", () => [
+      {
+        seq: 7,
+        timestamp: "2026-03-17T12:04:00Z",
+        role: "assistant",
+        content: "Replay evidence entry",
+      },
+    ]);
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Linked proof trail");
+      expect(pane.textContent).toContain("Replay evidence entry");
+    });
+
+    const findLink = (prefix: string): HTMLAnchorElement => {
+      const link = Array.from(pane.querySelectorAll("a")).find((anchor) =>
+        anchor.getAttribute("href")?.startsWith(prefix),
+      ) as HTMLAnchorElement | undefined;
+      expect(link).toBeDefined();
+      return link!;
+    };
+
+    findLink("openplanter://overview/action/").click();
+    const actionCard = pane.querySelector('[data-action-id="ca_1"]') as HTMLElement | null;
+    expect(actionCard?.style.outline).toContain("var(--accent)");
+
+    findLink("openplanter://overview/gap/").click();
+    const gapCard = pane.querySelector(
+      '[data-gap-id="gap:claim:c1:missing_evidence"]',
+    ) as HTMLElement | null;
+    expect(gapCard?.style.outline).toContain("var(--accent)");
+
+    findLink("openplanter://overview/replay/").click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const replayCard = pane.querySelector('[data-replay-seq="7"]') as HTMLElement | null;
+    expect(replayCard?.style.outline).toContain("var(--accent)");
+  });
+
+  it("keeps wiki proof fragments clickable from investigation home", async () => {
+    const readPaths: string[] = [];
+    __setHandler("read_wiki_file", ({ path }: { path: string }) => {
+      readPaths.push(path);
+      return `# ${path}`;
+    });
+    __setHandler("get_investigation_overview", () =>
+      makeOverview({
+        recent_revelations: [
+          {
+            revelation_id: "rev-wiki-fragment",
+            occurred_at: "2026-03-17T12:05:00Z",
+            title: "Report summary proof",
+            summary: "The report summary supports the conclusion.",
+            provenance: {
+              source: "agent_step",
+              source_refs: ["wiki/docs/report.md#summary"],
+            },
+          },
+        ],
+      }),
+    );
+
+    const pane = createOverviewPane();
+    document.body.appendChild(pane);
+
+    await vi.waitFor(() => {
+      expect(pane.textContent).toContain("Report summary proof");
+    });
+
+    const proofLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.getAttribute("href") === "wiki/docs/report.md#summary",
+    ) as HTMLAnchorElement | undefined;
+    expect(proofLink).toBeDefined();
+    proofLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe("wiki/docs/report.md");
+      expect(readPaths).toEqual(["wiki/docs/report.md"]);
     });
   });
 
@@ -323,8 +687,8 @@ describe("createOverviewPane", () => {
     ) as HTMLSelectElement;
 
     await vi.waitFor(() => {
-      expect(documentSelect.options.length).toBe(2);
-      expect(readPaths).toEqual(["wiki/acme.md"]);
+      expect(documentSelect.options.length).toBe(3);
+      expect(readPaths).toEqual([]);
     });
 
     documentSelect.value = "wiki/budget.md";
@@ -342,7 +706,7 @@ describe("createOverviewPane", () => {
     });
 
     expect(documentSelect.value).toBe("wiki/budget.md");
-    expect(readPaths).toEqual(["wiki/acme.md", "wiki/budget.md"]);
+    expect(readPaths).toEqual(["wiki/budget.md"]);
   });
 
   it("keeps the wiki viewport mounted across unrelated app state updates", async () => {
@@ -357,7 +721,7 @@ describe("createOverviewPane", () => {
 
     await vi.waitFor(() => {
       expect(viewport).not.toBeNull();
-      expect(pane.textContent).toContain("wiki/acme.md");
+      expect(pane.textContent).toContain("Current Conclusions & Proofs");
     });
 
     viewport.scrollTop = 64;

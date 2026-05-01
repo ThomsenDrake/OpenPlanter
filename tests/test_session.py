@@ -8,6 +8,7 @@ from pathlib import Path
 from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
+from agent.investigation_state import save_investigation_state
 from agent.model import Conversation, ModelTurn, ScriptedModel
 from agent.runtime import SessionRuntime, SessionStore, _has_reasoning_content
 from agent.tools import WorkspaceTools
@@ -24,6 +25,15 @@ def _investigation_report() -> str:
         "## Unresolved Findings\n"
         "- None."
     )
+
+
+def _single_homepage_path(root: Path, slug_prefix: str) -> Path:
+    matches = sorted(
+        (root / ".openplanter" / "wiki" / "investigations").glob(f"{slug_prefix}-*.md")
+    )
+    if len(matches) != 1:
+        raise AssertionError(f"Expected one homepage for {slug_prefix}, found {matches}")
+    return matches[0]
 
 
 class SessionRuntimeTests(unittest.TestCase):
@@ -467,6 +477,341 @@ class SessionRuntimeTests(unittest.TestCase):
                 turn_record["outputs"]["result_summary_ref"],
             )
             self.assertEqual(turn_record["outcome"]["status"], "completed")
+
+    def test_store_writes_investigation_homepage_with_conclusions_questions_and_todos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            wiki_dir = root / ".openplanter" / "wiki"
+            wiki_dir.mkdir(parents=True, exist_ok=True)
+            (wiki_dir / "index.md").write_text(
+                "# Data Sources Wiki\n\n## Sources by Category\n\n## Contributing\n",
+                encoding="utf-8",
+            )
+
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home",
+                resume=False,
+                investigation_id="acme-probe",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["objective"] = "Trace Acme payment approvals."
+            typed_state["updated_at"] = "2026-04-25T00:00:00+00:00"
+            typed_state["questions"] = {
+                "q_open": {
+                    "id": "q_open",
+                    "question_text": "Who approved the transfer?",
+                    "status": "open",
+                    "priority": "high",
+                    "claim_ids": ["cl_supported"],
+                    "needed_documents": [
+                        "Wire approval memo",
+                        {"name": "Accounts payable audit trail"},
+                    ],
+                }
+            }
+            typed_state["claims"] = {
+                "cl_supported": {
+                    "id": "cl_supported",
+                    "claim_text": "A payment was routed through shell entities.",
+                    "status": "supported",
+                    "confidence": 0.82,
+                    "support_evidence_ids": ["ev_doc_1", "ev_doc_4", "ev_bad"],
+                },
+                "cl_contested": {
+                    "id": "cl_contested",
+                    "claim_text": "The transfer was approved by the CFO.",
+                    "status": "contested",
+                    "support_evidence_ids": ["ev_doc_1", "ev_doc_3"],
+                    "contradiction_evidence_ids": ["ev_doc_2"],
+                },
+            }
+            typed_state["evidence"] = {
+                "ev_doc_1": {
+                    "id": "ev_doc_1",
+                    "description": "Payment ledger",
+                    "source_uri": "https://example.com/proof(file).pdf",
+                },
+                "ev_doc_2": {
+                    "id": "ev_doc_2",
+                    "description": "Approval email",
+                    "source_uri": "docs/approval-email.md",
+                },
+                "ev_doc_3": {
+                    "id": "ev_doc_3",
+                    "description": "Literal percent file",
+                    "source_uri": "docs/revenue%20growth.md",
+                },
+                "ev_doc_4": {
+                    "id": "ev_doc_4",
+                    "description": "Fragment proof",
+                    "source_uri": "docs/report.md#summary",
+                },
+                "ev_bad": "malformed evidence should not crash homepage generation",
+            }
+            typed_state["tasks"] = {
+                "todo_1": {
+                    "id": "todo_1",
+                    "description": "Pull wire transfer\nrecords",
+                    "link": "docs/wire transfer\nrecords(v2).md",
+                    "status": "open",
+                    "priority": "high",
+                },
+                "todo_2": {
+                    "id": "todo_2",
+                    "description": "Call bank records team",
+                    "status": "open",
+                },
+                "todo_fragment": {
+                    "id": "todo_fragment",
+                    "description": "Review report section",
+                    "link": "docs/report.md#follow-up",
+                    "status": "open",
+                },
+                "todo_done": {
+                    "id": "todo_done",
+                    "description": "Closed item",
+                    "status": "completed",
+                },
+            }
+
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                    "turn_history": [],
+                    "loop_metrics": {},
+                },
+            )
+
+            homepage = _single_homepage_path(root, "acme-probe")
+            self.assertTrue(homepage.exists())
+            content = homepage.read_text(encoding="utf-8")
+            self.assertIn("## Current Status", content)
+            self.assertIn("Trace Acme payment approvals.", content)
+            self.assertIn("## Current Conclusions and Citations to Proofs", content)
+            self.assertIn(
+                "[ev_doc_1: Payment ledger](https://example.com/proof%28file%29.pdf)",
+                content,
+            )
+            self.assertIn("`ev_bad`: ev_bad", content)
+            self.assertIn("[ev_doc_3: Literal percent file](../docs/revenue%2520growth.md)", content)
+            self.assertIn("[ev_doc_4: Fragment proof](../docs/report.md#summary)", content)
+            self.assertIn("Contradicting citations", content)
+            self.assertIn("[ev_doc_2: Approval email](../docs/approval-email.md)", content)
+            self.assertIn("## Open Questions and Needed Documents", content)
+            self.assertIn("Wire approval memo", content)
+            self.assertIn("Accounts payable audit trail", content)
+            self.assertIn("## Open To-Dos", content)
+            self.assertIn(
+                "[Pull wire transfer records](../docs/wire%20transfer%20records%28v2%29.md)",
+                content,
+            )
+            self.assertIn("[Review report section](../docs/report.md#follow-up)", content)
+            self.assertIn("[Call bank records team](#todo-todo_2)", content)
+            self.assertIn('<a id="todo-todo_2"></a>', content)
+            self.assertIn('<a id="todo-todo_fragment"></a>', content)
+            self.assertIn("### TODO todo_2", content)
+            self.assertIn("- **Description**: Pull wire transfer records", content)
+            self.assertNotIn("Closed item", content)
+
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("### Investigations", index_content)
+            homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
+            self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
+
+    def test_store_counts_all_open_questions_in_investigation_homepage_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home-many-questions",
+                resume=False,
+                investigation_id="many-questions",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["questions"] = {
+                f"q_{index}": {
+                    "id": f"q_{index}",
+                    "question_text": f"Open question {index}",
+                    "status": "open",
+                }
+                for index in range(1, 10)
+            }
+            typed_state["questions"]["q_closed"] = {
+                "id": "q_closed",
+                "question_text": "Already answered",
+                "status": "resolved",
+            }
+
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            homepage = _single_homepage_path(root, "many-questions")
+            content = homepage.read_text(encoding="utf-8")
+            self.assertIn("- **Open questions**: 9", content)
+
+    def test_store_save_state_ignores_unicode_homepage_generation_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="wiki-home-bad-unicode",
+                resume=False,
+                investigation_id="bad-unicode",
+            )
+            typed_state = store.load_typed_state(sid)
+            typed_state["objective"] = "Malformed external text: \ud800"
+            save_investigation_state(
+                root / ".openplanter" / "sessions" / sid / "investigation_state.json",
+                typed_state,
+            )
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": ["still persisted"],
+                },
+            )
+
+            state_path = root / ".openplanter" / "sessions" / sid / "state.json"
+            self.assertTrue(state_path.exists())
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["external_observations"], ["still persisted"])
+
+    def test_store_skips_investigation_homepage_without_active_investigation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(session_id="no-home", resume=False)
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            self.assertFalse((root / ".openplanter" / "wiki" / "investigations").exists())
+
+    def test_store_sanitizes_investigation_homepage_slug_path_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            sid, _, _ = store.open_session(
+                session_id="unsafe-home",
+                resume=False,
+                investigation_id="..",
+            )
+
+            store.save_state(
+                sid,
+                {
+                    "session_id": sid,
+                    "saved_at": "2026-04-25T00:00:00+00:00",
+                    "external_observations": [],
+                },
+            )
+
+            wiki_dir = root / ".openplanter" / "wiki"
+            homepage = _single_homepage_path(root, "artifact")
+            homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("# Data Sources Wiki", index_content)
+            self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
+
+    def test_store_escapes_investigation_id_in_homepage_index_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="escaped-home",
+                resume=False,
+                investigation_id="test|pipe\nnext",
+            )
+
+            index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(encoding="utf-8")
+            self.assertRegex(
+                index_content,
+                r"\| test\\\|pipe next \| Active investigation \| "
+                r"\[investigations/test-pipe-next-[0-9a-f]{8}\.md\]"
+                r"\(investigations/test-pipe-next-[0-9a-f]{8}\.md\) \|",
+            )
+            self.assertNotIn("| test|pipe", index_content)
+
+    def test_store_adds_index_links_for_substring_homepage_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="homepage-substring-long",
+                resume=False,
+                investigation_id="acme.md",
+            )
+            store.open_session(
+                session_id="homepage-substring-short",
+                resume=False,
+                investigation_id="acme",
+            )
+
+            index_content = (root / ".openplanter" / "wiki" / "index.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertRegex(
+                index_content,
+                r"\[investigations/acme\.md-[0-9a-f]{8}\.md\]"
+                r"\(investigations/acme\.md-[0-9a-f]{8}\.md\)",
+            )
+            self.assertRegex(
+                index_content,
+                r"\[investigations/acme-[0-9a-f]{8}\.md\]"
+                r"\(investigations/acme-[0-9a-f]{8}\.md\)",
+            )
+
+    def test_store_avoids_case_insensitive_investigation_homepage_slug_collisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SessionStore(workspace=root)
+            store.open_session(
+                session_id="homepage-case-upper",
+                resume=False,
+                investigation_id="AcmeProbe",
+            )
+            store.open_session(
+                session_id="homepage-case-lower",
+                resume=False,
+                investigation_id="acmeprobe",
+            )
+
+            wiki_dir = root / ".openplanter" / "wiki"
+            homepages = sorted((wiki_dir / "investigations").glob("acmeprobe-*.md"))
+            self.assertEqual(len(homepages), 2)
+            self.assertEqual({path.name for path in homepages}, {path.name.lower() for path in homepages})
+
+            index_content = (wiki_dir / "index.md").read_text(encoding="utf-8")
+            for homepage in homepages:
+                homepage_relpath = homepage.relative_to(wiki_dir).as_posix()
+                self.assertIn(f"[{homepage_relpath}]({homepage_relpath})", index_content)
 
     def test_append_event_preserves_legacy_shape_with_v2_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

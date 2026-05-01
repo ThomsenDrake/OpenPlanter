@@ -1,6 +1,3 @@
-import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
-
 import {
   getInvestigationOverview,
   getSessionHistory,
@@ -19,22 +16,18 @@ import { appState } from "../state/store";
 import { formatToolCallSummary } from "./toolArgs";
 import { OPEN_WIKI_DRAWER_EVENT, type OpenWikiDrawerDetail } from "../wiki/drawerEvents";
 import { resolveWikiMarkdownHref } from "../wiki/linkResolution";
+import {
+  createWikiMarkdownRenderer,
+  isGeneratedInvestigationHomepageMarkdown,
+  renderGeneratedInvestigationHomepageMarkdown,
+  renderWikiMarkdown,
+} from "../wiki/markdown";
 
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: false,
-  highlight(str: string, lang: string) {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return hljs.highlight(str, { language: lang }).value;
-      } catch {
-        // Fall through to markdown-it default escaping.
-      }
-    }
-    return "";
-  },
-});
+const md = createWikiMarkdownRenderer();
+
+const MARKDOWN_LINK_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+const MARKDOWN_DESTINATION_UNSAFE_RE = /%(?![0-9A-Fa-f]{2})|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;
+const MARKDOWN_WIKI_DESTINATION_UNSAFE_RE = /%|[\u0000-\u0020"<>\\^`{|}()[\]\u007f]/g;
 
 type DocumentStatus = "idle" | "loading" | "ready" | "error";
 type ReplayStatus = "idle" | "loading" | "ready" | "error";
@@ -79,6 +72,13 @@ const CURATED_REPLAY_ROLES = new Set([
   "step-summary",
   "user",
 ]);
+const INVESTIGATION_HOME_PATH = "openplanter://investigation-home";
+const INVESTIGATION_HOME_TITLE = "Investigation Home";
+
+function shouldDecodeGeneratedWikiLinks(path: string | null, markdown = ""): boolean {
+  if (path === INVESTIGATION_HOME_PATH) return true;
+  return isGeneratedInvestigationHomepageMarkdown(path, markdown);
+}
 
 export function createOverviewPane(): HTMLElement {
   const pane = document.createElement("div");
@@ -156,6 +156,7 @@ export function createOverviewPane(): HTMLElement {
   let documentHtml = "";
   let documentTitle = "Wiki document";
   let documentError = "";
+  let loadedDocumentDecodesWikiLinks = false;
   let replayError = "";
   let loadedDocumentPath: string | null = null;
   let replayEntries: ReplayEntry[] = [];
@@ -402,10 +403,199 @@ export function createOverviewPane(): HTMLElement {
     overview: InvestigationOverviewView,
     currentPath: string | null,
   ): string | null {
+    if (currentPath === INVESTIGATION_HOME_PATH) {
+      return currentPath;
+    }
     if (currentPath && findSourceByPath(overview, currentPath)) {
       return currentPath;
     }
-    return overview.wiki_nav.sources[0]?.file_path ?? null;
+    return INVESTIGATION_HOME_PATH;
+  }
+
+  function encodeMarkdownLinkDestination(href: string): string {
+    const encoder = new TextEncoder();
+    const isWikiDestination = !MARKDOWN_LINK_PROTOCOL_RE.test(href);
+    const unsafePattern = isWikiDestination
+      ? MARKDOWN_WIKI_DESTINATION_UNSAFE_RE
+      : MARKDOWN_DESTINATION_UNSAFE_RE;
+    const encodePart = (value: string) =>
+      value.replace(
+        unsafePattern,
+        (unsafeValue) =>
+          Array.from(encoder.encode(unsafeValue))
+            .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+            .join(""),
+    );
+    if (isWikiDestination && href.includes("#")) {
+      const fragmentIndex = href.indexOf("#");
+      const path = href.slice(0, fragmentIndex);
+      const fragment = href.slice(fragmentIndex + 1);
+      return `${encodePart(path)}#${encodePart(fragment)}`;
+    }
+    return encodePart(href);
+  }
+
+  function markdownLink(label: string, href: string): string {
+    return `[${label.replace(/[\[\]]/g, "")}](${encodeMarkdownLinkDestination(href)})`;
+  }
+
+  function keywordTokens(text: string): string[] {
+    const stopWords = new Set([
+      "and",
+      "are",
+      "for",
+      "from",
+      "how",
+      "that",
+      "the",
+      "what",
+      "which",
+      "who",
+      "would",
+    ]);
+    return text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !stopWords.has(token));
+  }
+
+  function inferredDocsForQuestion(
+    question: OverviewQuestionView,
+    overview: InvestigationOverviewView,
+  ): WikiNavSourceView[] {
+    const relatedGapText = overview.outstanding_gaps
+      .filter((gap) => gap.label.toLowerCase().includes(question.id.toLowerCase()))
+      .map((gap) => gap.label)
+      .join(" ");
+    const relatedActionText = overview.candidate_actions
+      .filter((action) => action.label.toLowerCase().includes(question.id.toLowerCase()))
+      .map((action) => action.label)
+      .join(" ");
+    const keywords = new Set(keywordTokens(`${question.text} ${relatedGapText} ${relatedActionText}`));
+    const candidates = overview.wiki_nav.sources
+      .map((source) => {
+        const haystack = `${source.title} ${source.category} ${source.file_path}`.toLowerCase();
+        let score = 0;
+        for (const token of keywords) {
+          if (source.title.toLowerCase().includes(token)) {
+            score += 2;
+          } else if (haystack.includes(token)) {
+            score += 1;
+          }
+        }
+        return { source, score };
+      })
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score || left.source.title.localeCompare(right.source.title))
+      .slice(0, 3)
+      .map((candidate) => candidate.source);
+
+    return candidates.length > 0 ? candidates : overview.wiki_nav.sources.slice(0, 3);
+  }
+
+  function overviewLinkForLocator(locator: EvidenceLocator): string | null {
+    const wikiPath = extractWikiPath(locator.value);
+    if (wikiPath) {
+      return wikiPath;
+    }
+    if (locator.value.startsWith("gap:")) {
+      return `openplanter://overview/gap/${encodeURIComponent(locator.value)}`;
+    }
+    if (locator.value.startsWith("action:")) {
+      return `openplanter://overview/action/${encodeURIComponent(locator.value.slice("action:".length))}`;
+    }
+    const replaySeq =
+      locator.kind === "replay_seq"
+        ? Number.parseInt(locator.value, 10)
+        : findReplaySeqForLocator(locator);
+    if (replaySeq != null && Number.isFinite(replaySeq)) {
+      return `openplanter://overview/replay/${encodeURIComponent(String(replaySeq))}`;
+    }
+    return null;
+  }
+
+  function renderProofLinks(revelation: OverviewRevelationView): string {
+    const links = parseRevelationLocators(revelation)
+      .map((locator) => {
+        const href = overviewLinkForLocator(locator);
+        return href ? markdownLink(locatorLabel(locator), href) : null;
+      })
+      .filter((link): link is string => link != null)
+      .slice(0, 4);
+    return links.length > 0 ? links.join(", ") : "_No proof links yet._";
+  }
+
+  function buildInvestigationHomepageMarkdown(
+    overview: InvestigationOverviewView,
+  ): string {
+    const replaySummary = summarizeReplay(replayEntries);
+    const lines: string[] = [
+      "# Investigation Home",
+      "",
+      "## Current Status",
+      `- Session: \`${overview.session_id ?? "no active session"}\``,
+      `- Active state: **${replaySummary.activeState}** (${replaySummary.activeDetail})`,
+      `- Replay health: **${replaySummary.healthLabel}** (${replaySummary.healthDetail})`,
+      `- Last updated: ${formatTimestamp(overview.generated_at)}`,
+      `- Snapshot: ${overview.snapshot.supported_count} supported, ${overview.snapshot.contested_count} contested, ${overview.snapshot.outstanding_gap_count} open gaps, ${overview.snapshot.candidate_action_count} open to-dos`,
+      "",
+      "## Current Conclusions & Proofs",
+    ];
+
+    if (overview.recent_revelations.length === 0) {
+      lines.push("- No conclusions surfaced yet.");
+    } else {
+      for (const revelation of overview.recent_revelations.slice(0, 6)) {
+        lines.push(`- **${revelation.title}** - ${revelation.summary}`);
+        lines.push(`  - Proof links: ${renderProofLinks(revelation)}`);
+      }
+    }
+
+    lines.push("", "## Open Questions");
+    if (overview.focus_questions.length === 0) {
+      lines.push("- No open questions right now.");
+    } else {
+      for (const question of overview.focus_questions) {
+        const docs = inferredDocsForQuestion(question, overview);
+        lines.push(`- **${question.text}** (_priority: ${question.priority}_)`);
+        if (docs.length > 0) {
+          lines.push(
+            `  - Needed documents: ${docs.map((source) => markdownLink(source.title, source.file_path)).join(", ")}`,
+          );
+        } else {
+          lines.push("  - Needed documents: _No source candidates yet._");
+        }
+      }
+    }
+
+    lines.push("", "## Documents / Evidence Needed");
+    if (overview.outstanding_gaps.length === 0) {
+      lines.push("- No unresolved evidence gaps.");
+    } else {
+      for (const gap of overview.outstanding_gaps) {
+        const actionLinks = gap.related_action_ids.map((actionId) =>
+          markdownLink(actionId, `openplanter://overview/action/${encodeURIComponent(actionId)}`),
+        );
+        lines.push(`- **${gap.label}** (_${gap.kind}_ / ${gap.scope})`);
+        if (actionLinks.length > 0) {
+          lines.push(`  - Linked to-do(s): ${actionLinks.join(", ")}`);
+        }
+      }
+    }
+
+    lines.push("", "## Open To-dos");
+    if (overview.candidate_actions.length === 0) {
+      lines.push("- No open to-dos.");
+    } else {
+      for (const action of overview.candidate_actions) {
+        lines.push(
+          `- ${markdownLink(action.label, `openplanter://overview/action/${encodeURIComponent(action.action_id)}`)} (_priority: ${action.priority}_)`,
+        );
+      }
+    }
+
+    return lines.join("\n");
   }
 
   function findElementsByData(
@@ -787,8 +977,21 @@ export function createOverviewPane(): HTMLElement {
       documentTitle = "Wiki document";
       documentHtml = "";
       documentError = "";
+      loadedDocumentDecodesWikiLinks = false;
       loadedDocumentPath = null;
       render();
+      return;
+    }
+
+    if (path === INVESTIGATION_HOME_PATH) {
+      documentStatus = "ready";
+      documentTitle = INVESTIGATION_HOME_TITLE;
+      documentHtml = "";
+      documentError = "";
+      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(path);
+      loadedDocumentPath = path;
+      render();
+      documentViewport.scrollTop = 0;
       return;
     }
 
@@ -797,14 +1000,19 @@ export function createOverviewPane(): HTMLElement {
     documentStatus = "loading";
     documentHtml = "";
     documentError = "";
+    loadedDocumentDecodesWikiLinks = false;
     render();
 
     try {
       const content = await readWikiFile(path);
       if (seq !== docSeq) return;
+      const decodesGeneratedWikiLinks = shouldDecodeGeneratedWikiLinks(path, content);
       documentStatus = "ready";
-      documentHtml = md.render(content);
+      documentHtml = decodesGeneratedWikiLinks
+        ? renderGeneratedInvestigationHomepageMarkdown(md, content)
+        : renderWikiMarkdown(md, content);
       documentError = "";
+      loadedDocumentDecodesWikiLinks = decodesGeneratedWikiLinks;
       loadedDocumentPath = path;
       render();
       interceptDocumentLinks();
@@ -814,6 +1022,7 @@ export function createOverviewPane(): HTMLElement {
       documentStatus = "error";
       documentHtml = "";
       documentError = String(error);
+      loadedDocumentDecodesWikiLinks = false;
       loadedDocumentPath = null;
       render();
     }
@@ -870,8 +1079,34 @@ export function createOverviewPane(): HTMLElement {
       const href = anchor.getAttribute("href");
       if (!href) return;
       anchor.addEventListener("click", (event) => {
+        if (href.startsWith("openplanter://overview/action/")) {
+          event.preventDefault();
+          const actionId = decodeURIComponent(
+            href.slice("openplanter://overview/action/".length),
+          );
+          focusOverviewCard(actionsSection.body, "action-id", actionId);
+          return;
+        }
+        if (href.startsWith("openplanter://overview/gap/")) {
+          event.preventDefault();
+          const gapId = decodeURIComponent(href.slice("openplanter://overview/gap/".length));
+          focusOverviewCard(gapsSection.body, "gap-id", gapId);
+          return;
+        }
+        if (href.startsWith("openplanter://overview/replay/")) {
+          event.preventDefault();
+          const replaySeq = Number.parseInt(
+            decodeURIComponent(href.slice("openplanter://overview/replay/".length)),
+            10,
+          );
+          if (!Number.isNaN(replaySeq)) {
+            focusReplay(replaySeq);
+          }
+          return;
+        }
         const resolvedPath = resolveWikiMarkdownHref(href, {
           baseWikiPath: loadedDocumentPath,
+          decodePercentEncoding: loadedDocumentDecodesWikiLinks,
         });
         if (!resolvedPath) return;
 
@@ -1340,11 +1575,11 @@ export function createOverviewPane(): HTMLElement {
   function renderDocumentNav(overview: InvestigationOverviewView | null): void {
     const selectedPath = appState.get().overviewSelectedWikiPath;
 
-    if (!overview || overview.wiki_nav.sources.length === 0) {
+    if (!overview) {
       documentSelect.innerHTML = "";
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = "No wiki pages available";
+      option.textContent = "No investigation overview available";
       documentSelect.appendChild(option);
       documentSelect.disabled = true;
       return;
@@ -1352,6 +1587,14 @@ export function createOverviewPane(): HTMLElement {
 
     documentSelect.disabled = false;
     documentSelect.innerHTML = "";
+
+    const homeGroup = document.createElement("optgroup");
+    homeGroup.label = "investigation";
+    const homeOption = document.createElement("option");
+    homeOption.value = INVESTIGATION_HOME_PATH;
+    homeOption.textContent = INVESTIGATION_HOME_TITLE;
+    homeGroup.appendChild(homeOption);
+    documentSelect.appendChild(homeGroup);
 
     let currentCategory = "";
     let categoryGroup: HTMLOptGroupElement | null = null;
@@ -1369,13 +1612,35 @@ export function createOverviewPane(): HTMLElement {
       (categoryGroup ?? documentSelect).appendChild(option);
     }
 
-    documentSelect.value = selectedPath ?? overview.wiki_nav.sources[0]?.file_path ?? "";
+    documentSelect.value =
+      selectedPath && (selectedPath === INVESTIGATION_HOME_PATH || findSourceByPath(overview, selectedPath))
+        ? selectedPath
+        : INVESTIGATION_HOME_PATH;
   }
 
   function renderDocument(overview: InvestigationOverviewView | null): void {
+    const selectedPath = appState.get().overviewSelectedWikiPath;
+
+    if (overview && selectedPath === INVESTIGATION_HOME_PATH) {
+      documentTitle = INVESTIGATION_HOME_TITLE;
+      documentStatus = "ready";
+      loadedDocumentPath = INVESTIGATION_HOME_PATH;
+      loadedDocumentDecodesWikiLinks = shouldDecodeGeneratedWikiLinks(INVESTIGATION_HOME_PATH);
+      documentTitleEl.textContent = documentTitle;
+      documentStatusEl.hidden = true;
+      documentContentEl.hidden = false;
+      const homeHtml = renderWikiMarkdown(md, buildInvestigationHomepageMarkdown(overview));
+      if (documentContentEl.innerHTML !== homeHtml) {
+        documentHtml = homeHtml;
+        documentContentEl.innerHTML = homeHtml;
+        interceptDocumentLinks();
+      }
+      return;
+    }
+
     documentTitleEl.textContent = documentTitle;
 
-    if (!overview || !appState.get().overviewSelectedWikiPath) {
+    if (!overview || !selectedPath) {
       documentStatusEl.textContent =
         "Select a wiki page to inspect the underlying document.";
       documentStatusEl.hidden = false;
@@ -1492,6 +1757,7 @@ export function createOverviewPane(): HTMLElement {
   window.addEventListener("session-changed", () => {
     invalidatePendingLoads();
     loadedDocumentPath = null;
+    loadedDocumentDecodesWikiLinks = false;
     documentStatus = "idle";
     documentHtml = "";
     documentTitle = "Wiki document";

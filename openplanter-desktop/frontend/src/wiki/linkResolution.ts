@@ -1,4 +1,5 @@
 const PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+const ENCODED_PATH_DELIMITER_RE = /%(?:2[fF]|5[cC]|3[fF]|23)/;
 
 function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
   if (!baseWikiPath) return null;
@@ -10,9 +11,29 @@ function normalizeBaseWikiPath(baseWikiPath?: string | null): string | null {
   return trimmed;
 }
 
+function decodeWikiPathSegment(segment: string, decodePercentEncoding: boolean): string | null {
+  if (!decodePercentEncoding) return segment;
+  if (ENCODED_PATH_DELIMITER_RE.test(segment)) return null;
+  const withBarePercentsEscaped = segment.replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
+  try {
+    const decoded = decodeURIComponent(withBarePercentsEscaped);
+    if (
+      decoded.includes("/") ||
+      decoded.includes("\\") ||
+      decoded.includes("?") ||
+      decoded.includes("#")
+    ) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return segment;
+  }
+}
+
 export function resolveWikiMarkdownHref(
   href: string,
-  options?: { baseWikiPath?: string | null },
+  options?: { baseWikiPath?: string | null; decodePercentEncoding?: boolean },
 ): string | null {
   const trimmed = href.trim();
   if (!trimmed) return null;
@@ -33,7 +54,9 @@ export function resolveWikiMarkdownHref(
     : [...baseSegments, ...withoutFragment.split("/")];
 
   const normalizedSegments: string[] = [];
-  for (const segment of rawSegments) {
+  for (const rawSegment of rawSegments) {
+    const segment = decodeWikiPathSegment(rawSegment, options?.decodePercentEncoding === true);
+    if (segment == null) return null;
     if (!segment || segment === ".") continue;
     if (segment === "..") {
       if (normalizedSegments.length === 0) return null;
