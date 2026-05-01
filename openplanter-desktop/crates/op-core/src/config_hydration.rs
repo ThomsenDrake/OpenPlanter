@@ -184,6 +184,36 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
         }
     }
 
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_ENABLED"]) {
+        if let Some(enabled) = settings.obsidian_export_enabled {
+            cfg.obsidian_export_enabled = enabled;
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_ROOT"]) {
+        if let Some(root) = settings.obsidian_export_root.as_deref() {
+            cfg.obsidian_export_root = Some(root.into());
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_MODE"]) {
+        if let Some(mode) = settings.obsidian_export_mode.as_deref() {
+            cfg.obsidian_export_mode = mode.to_string();
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR"]) {
+        if let Some(subdir) = settings.obsidian_export_subdir.as_deref() {
+            cfg.obsidian_export_subdir = subdir.to_string();
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_GENERATE_CANVAS"]) {
+        if let Some(generate_canvas) = settings.obsidian_generate_canvas {
+            cfg.obsidian_generate_canvas = generate_canvas;
+        }
+    }
+
     if !has_env_value(&["OPENPLANTER_MODEL"]) {
         let saved_model = if cfg.provider == "auto" {
             settings.default_model.as_deref()

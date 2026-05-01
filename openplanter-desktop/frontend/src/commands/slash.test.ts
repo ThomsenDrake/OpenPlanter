@@ -210,6 +210,44 @@ describe("dispatchSlashCommand", () => {
     expect(result!.lines.some((l) => l.includes("/chrome"))).toBe(true);
   });
 
+  it("help includes obsidian command", async () => {
+    const result = await dispatchSlashCommand("/help");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("/obsidian"))).toBe(true);
+  });
+
+  it("obsidian enable handles quoted vault paths and options", async () => {
+    __setHandler("configure_obsidian_export", ({ request }: any) => {
+      expect(request.enabled).toBe(true);
+      expect(request.root).toBe("/tmp/My Vault");
+      expect(request.mode).toBe("fresh-vault");
+      expect(request.subdir).toBe("Research");
+      expect(request.generateCanvas).toBe(true);
+      return {
+        enabled: true,
+        configured: true,
+        root: "/tmp/My Vault",
+        target_root: "/tmp/My Vault",
+        mode: "fresh_vault",
+        subdir: "Research",
+        generate_canvas: true,
+        warnings: [],
+      };
+    });
+
+    const result = await dispatchSlashCommand(
+      '/obsidian enable "/tmp/My Vault" --mode fresh-vault --subdir Research'
+    );
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Obsidian export enabled"))).toBe(true);
+  });
+
+  it("obsidian enable validates missing flag values", async () => {
+    const result = await dispatchSlashCommand("/obsidian enable /tmp/Vault --mode");
+    expect(result).not.toBeNull();
+    expect(result!.lines.some((l) => l.includes("Missing value for --mode"))).toBe(true);
+  });
+
   it("help includes continuity command", async () => {
     const result = await dispatchSlashCommand("/help");
     expect(result).not.toBeNull();

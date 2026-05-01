@@ -18,6 +18,10 @@ import {
   saveSettings,
   saveCredential,
   getCredentialsStatus,
+  getObsidianExportStatus,
+  configureObsidianExport,
+  exportObsidianInvestigation,
+  openObsidianInvestigation,
   listSessions,
   openSession,
   deleteSession,
@@ -79,6 +83,73 @@ describe("invoke wrappers", () => {
     expect(config.model).toBe("anthropic-foundry/claude-opus-4-6");
     expect(config.zai_plan).toBe("paygo");
     expect(config.web_search_provider).toBe("exa");
+  });
+
+  it("obsidian export wrappers invoke desktop commands", async () => {
+    __setHandler("get_obsidian_export_status", () => ({
+      enabled: true,
+      configured: true,
+      root: "/tmp/Vault",
+      target_root: "/tmp/Vault/OpenPlanter",
+      mode: "existing_vault_folder",
+      subdir: "OpenPlanter",
+      generate_canvas: true,
+      warnings: [],
+    }));
+    __setHandler("configure_obsidian_export", ({ request }: any) => {
+      expect(request.enabled).toBe(true);
+      expect(request.generateCanvas).toBe(false);
+      return {
+        enabled: true,
+        configured: true,
+        root: "/tmp/Vault",
+        target_root: "/tmp/Vault/OpenPlanter",
+        mode: "existing_vault_folder",
+        subdir: "OpenPlanter",
+        generate_canvas: false,
+        warnings: [],
+      };
+    });
+    __setHandler("export_obsidian_investigation", ({ sessionId }: any) => {
+      expect(sessionId).toBe("session-1");
+      return {
+        exported: true,
+        root_path: "/tmp/Vault/OpenPlanter",
+        investigation_dir: "/tmp/Vault/OpenPlanter/Investigations/demo",
+        home_path: "/tmp/Vault/OpenPlanter/Investigations/demo/Home.md",
+        manifest_path: "/tmp/Vault/OpenPlanter/Investigations/demo/Manifest.json",
+        files_written: [],
+        warnings: [],
+      };
+    });
+    __setHandler("open_obsidian_investigation", ({ sessionId }: any) => {
+      expect(sessionId).toBe("session-1");
+      return {
+        opened: true,
+        uri: "obsidian://open?path=%2Ftmp%2FVault%2FOpenPlanter%2FHome.md",
+        export: {
+          exported: true,
+          root_path: "/tmp/Vault/OpenPlanter",
+          investigation_dir: "/tmp/Vault/OpenPlanter/Investigations/demo",
+          home_path: "/tmp/Vault/OpenPlanter/Investigations/demo/Home.md",
+          manifest_path: "/tmp/Vault/OpenPlanter/Investigations/demo/Manifest.json",
+          files_written: [],
+          warnings: [],
+        },
+      };
+    });
+
+    const status = await getObsidianExportStatus();
+    expect(status.enabled).toBe(true);
+    const configured = await configureObsidianExport({
+      enabled: true,
+      generateCanvas: false,
+    });
+    expect(configured.generate_canvas).toBe(false);
+    const exported = await exportObsidianInvestigation("session-1");
+    expect(exported.exported).toBe(true);
+    const opened = await openObsidianInvestigation("session-1");
+    expect(opened.opened).toBe(true);
   });
 
   it("updateConfig sends partial and returns config", async () => {

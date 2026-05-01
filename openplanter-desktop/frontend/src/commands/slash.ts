@@ -11,6 +11,7 @@ import { handleInitCommand } from "./init";
 import { handleContinuityCommand } from "./continuity";
 import { handleRecursionCommand } from "./recursion";
 import { handleMistralCommand, MISTRAL_USAGE } from "./mistral";
+import { handleObsidianCommand, OBSIDIAN_USAGE } from "./obsidian";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -56,6 +57,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `  ${MISTRAL_USAGE.slice(6)}`,
           "  /chrome             Show current Chrome DevTools MCP status",
           `  ${CHROME_USAGE.slice(6)}`,
+          `  ${OBSIDIAN_USAGE}`,
           "  /init status        Show workspace init status",
           "  /init standard      Initialize the current workspace",
           "  /init migrate       Open the migration init panel",
@@ -119,6 +121,7 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           `Reasoning:   ${s.reasoningEffort ?? "off"}`,
           `DocAI key mode: ${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}`,
           ...formatChromeStatusLines(s),
+          `Obsidian:    ${s.obsidianExportEnabled ? `enabled (${s.obsidianExportMode})` : "disabled"}`,
           `Mode:        ${s.recursive ? "recursive" : "flat"}`,
           `Policy:      ${s.recursionPolicy.replace(/_/g, "-")}`,
           `Min depth:   ${s.minSubtaskDepth}`,
@@ -159,6 +162,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/chrome":
       return handleChromeCommand(args);
+
+    case "/obsidian":
+      return handleObsidianCommand(args);
 
     case "/init":
       return handleInitCommand(args);

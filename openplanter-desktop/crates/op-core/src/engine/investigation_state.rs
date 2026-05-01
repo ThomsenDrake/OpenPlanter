@@ -32,6 +32,8 @@ pub struct InvestigationState {
     pub updated_at: String,
     #[serde(default)]
     pub objective: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_investigation_id: Option<String>,
     #[serde(default)]
     pub ontology: Ontology,
     #[serde(default)]
@@ -114,6 +116,7 @@ impl InvestigationState {
             created_at: ts.clone(),
             updated_at: ts,
             objective: String::new(),
+            active_investigation_id: None,
             ontology: Ontology::default(),
             entities: BTreeMap::new(),
             links: BTreeMap::new(),

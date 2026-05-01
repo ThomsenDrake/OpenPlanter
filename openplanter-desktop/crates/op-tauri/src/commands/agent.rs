@@ -428,6 +428,23 @@ pub async fn solve(
                         emitter.emit_trace(&format!(
                             "[solve] failed to persist turn summary; completion_kind={completion_kind}; continuing without continuity update: {err}"
                         ));
+                    } else if cfg.obsidian_export_enabled {
+                        let export_config = crate::commands::obsidian::config_from_agent(&cfg);
+                        match crate::commands::obsidian::export_session_dir_with_config(
+                            &cfg.workspace,
+                            &session_dir,
+                            &export_config,
+                        )
+                        .await
+                        {
+                            Ok(result) => emitter.emit_trace(&format!(
+                                "[obsidian] exported investigation pack to {}",
+                                result.home_path
+                            )),
+                            Err(err) => emitter.emit_trace(&format!(
+                                "[obsidian] failed to export investigation pack; continuing: {err}"
+                            )),
+                        }
                     }
                     if let Some(turn_context) = turn_context_for_inner.as_ref() {
                         let replay_seq_end = ReplayLogger::max_seq(&session_dir)

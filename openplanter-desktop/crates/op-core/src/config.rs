@@ -5,6 +5,11 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::obsidian::{
+    DEFAULT_OBSIDIAN_EXPORT_SUBDIR, OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER,
+    normalize_obsidian_export_mode,
+};
+
 pub const AZURE_FOUNDRY_MODEL_PREFIX: &str = "azure-foundry/";
 pub const ANTHROPIC_FOUNDRY_MODEL_PREFIX: &str = "anthropic-foundry/";
 pub const FOUNDRY_OPENAI_BASE_URL: &str = "https://foundry-proxy.cheetah-koi.ts.net/openai/v1";
@@ -330,6 +335,11 @@ pub struct AgentConfig {
     pub max_search_hits: i64,
     pub max_shell_output_chars: i64,
     pub session_root_dir: String,
+    pub obsidian_export_enabled: bool,
+    pub obsidian_export_root: Option<PathBuf>,
+    pub obsidian_export_mode: String,
+    pub obsidian_export_subdir: String,
+    pub obsidian_generate_canvas: bool,
     pub max_persisted_observations: i64,
     pub max_solve_seconds: i64,
     pub rate_limit_max_retries: i64,
@@ -418,6 +428,11 @@ impl Default for AgentConfig {
             max_search_hits: 200,
             max_shell_output_chars: 16000,
             session_root_dir: ".openplanter".into(),
+            obsidian_export_enabled: false,
+            obsidian_export_root: None,
+            obsidian_export_mode: OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER.into(),
+            obsidian_export_subdir: DEFAULT_OBSIDIAN_EXPORT_SUBDIR.into(),
+            obsidian_generate_canvas: true,
             max_persisted_observations: 400,
             max_solve_seconds: 0,
             rate_limit_max_retries: 12,
@@ -653,6 +668,16 @@ impl AgentConfig {
             max_search_hits: env_int("OPENPLANTER_MAX_SEARCH_HITS", 200),
             max_shell_output_chars: env_int("OPENPLANTER_MAX_SHELL_CHARS", 16000),
             session_root_dir: env_or("OPENPLANTER_SESSION_DIR", ".openplanter"),
+            obsidian_export_enabled: env_bool("OPENPLANTER_OBSIDIAN_EXPORT_ENABLED", false),
+            obsidian_export_root: env_opt("OPENPLANTER_OBSIDIAN_EXPORT_ROOT").map(PathBuf::from),
+            obsidian_export_mode: normalize_obsidian_export_mode(
+                env_opt("OPENPLANTER_OBSIDIAN_EXPORT_MODE").as_deref(),
+            ),
+            obsidian_export_subdir: env_or(
+                "OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR",
+                DEFAULT_OBSIDIAN_EXPORT_SUBDIR,
+            ),
+            obsidian_generate_canvas: env_bool("OPENPLANTER_OBSIDIAN_GENERATE_CANVAS", true),
             max_persisted_observations: env_int("OPENPLANTER_MAX_PERSISTED_OBS", 400),
             max_solve_seconds: env_int("OPENPLANTER_MAX_SOLVE_SECONDS", 0),
             rate_limit_max_retries: env_int("OPENPLANTER_RATE_LIMIT_MAX_RETRIES", 12),

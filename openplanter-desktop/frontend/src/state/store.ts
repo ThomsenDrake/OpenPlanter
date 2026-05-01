@@ -93,6 +93,11 @@ export interface AppState {
   chromeMcpRpcTimeoutSec: number;
   chromeMcpStatus: string;
   chromeMcpStatusDetail: string;
+  obsidianExportEnabled: boolean;
+  obsidianExportRoot: string | null;
+  obsidianExportMode: string;
+  obsidianExportSubdir: string;
+  obsidianGenerateCanvas: boolean;
   sessionId: string | null;
   activeInvestigationId: string | null;
   inputTokens: number;
@@ -151,6 +156,11 @@ export const appState = new Store<AppState>({
   chromeMcpRpcTimeoutSec: 45,
   chromeMcpStatus: "disabled",
   chromeMcpStatusDetail: "Chrome DevTools MCP is disabled.",
+  obsidianExportEnabled: false,
+  obsidianExportRoot: null,
+  obsidianExportMode: "existing_vault_folder",
+  obsidianExportSubdir: "OpenPlanter",
+  obsidianGenerateCanvas: true,
   sessionId: null,
   activeInvestigationId: null,
   inputTokens: 0,

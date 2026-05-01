@@ -28,6 +28,8 @@ CHROME_MCP_CONNECT_TIMEOUT_SEC = 15
 CHROME_MCP_RPC_TIMEOUT_SEC = 45
 VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
 VALID_EMBEDDINGS_PROVIDERS: set[str] = {"voyage", "mistral"}
+VALID_OBSIDIAN_EXPORT_MODES: set[str] = {"fresh_vault", "existing_vault_folder"}
+DEFAULT_OBSIDIAN_EXPORT_SUBDIR = "OpenPlanter"
 
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "azure-foundry/gpt-5.4",
@@ -59,6 +61,21 @@ def normalize_embeddings_provider(value: str | None) -> str:
     if cleaned in VALID_EMBEDDINGS_PROVIDERS:
         return cleaned
     return "voyage"
+
+
+def normalize_obsidian_export_mode(value: str | None) -> str:
+    cleaned = (value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "fresh": "fresh_vault",
+        "vault": "fresh_vault",
+        "existing": "existing_vault_folder",
+        "folder": "existing_vault_folder",
+        "subfolder": "existing_vault_folder",
+    }
+    cleaned = aliases.get(cleaned, cleaned)
+    if cleaned in VALID_OBSIDIAN_EXPORT_MODES:
+        return cleaned
+    return "existing_vault_folder"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -218,6 +235,11 @@ class AgentConfig:
     max_search_hits: int = 200
     max_shell_output_chars: int = 16000
     session_root_dir: str = ".openplanter"
+    obsidian_export_enabled: bool = False
+    obsidian_export_root: Path | None = None
+    obsidian_export_mode: str = "existing_vault_folder"
+    obsidian_export_subdir: str = "OpenPlanter"
+    obsidian_generate_canvas: bool = True
     max_persisted_observations: int = 400
     max_solve_seconds: int = 0
     rate_limit_max_retries: int = 12
@@ -475,6 +497,21 @@ class AgentConfig:
             max_search_hits=int(os.getenv("OPENPLANTER_MAX_SEARCH_HITS", "200")),
             max_shell_output_chars=int(os.getenv("OPENPLANTER_MAX_SHELL_CHARS", "16000")),
             session_root_dir=os.getenv("OPENPLANTER_SESSION_DIR", ".openplanter"),
+            obsidian_export_enabled=_env_bool("OPENPLANTER_OBSIDIAN_EXPORT_ENABLED", False),
+            obsidian_export_root=(
+                Path(root)
+                if (root := os.getenv("OPENPLANTER_OBSIDIAN_EXPORT_ROOT", "").strip())
+                else None
+            ),
+            obsidian_export_mode=normalize_obsidian_export_mode(
+                os.getenv("OPENPLANTER_OBSIDIAN_EXPORT_MODE")
+            ),
+            obsidian_export_subdir=os.getenv(
+                "OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR",
+                DEFAULT_OBSIDIAN_EXPORT_SUBDIR,
+            ).strip()
+            or DEFAULT_OBSIDIAN_EXPORT_SUBDIR,
+            obsidian_generate_canvas=_env_bool("OPENPLANTER_OBSIDIAN_GENERATE_CANVAS", True),
             max_persisted_observations=int(os.getenv("OPENPLANTER_MAX_PERSISTED_OBS", "400")),
             max_solve_seconds=int(os.getenv("OPENPLANTER_MAX_SOLVE_SECONDS", "0")),
             rate_limit_max_retries=int(os.getenv("OPENPLANTER_RATE_LIMIT_MAX_RETRIES", "12")),

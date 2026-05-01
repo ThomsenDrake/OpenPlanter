@@ -53,6 +53,25 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.chrome_mcp_connect_timeout_sec, 21)
             self.assertEqual(loaded.chrome_mcp_rpc_timeout_sec, 61)
 
+    def test_obsidian_settings_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SettingsStore(workspace=root, session_root_dir=".openplanter")
+            settings = PersistentSettings(
+                obsidian_export_enabled=True,
+                obsidian_export_root="/Users/example/Vault",
+                obsidian_export_mode="fresh-vault",
+                obsidian_export_subdir="Research/OpenPlanter",
+                obsidian_generate_canvas=False,
+            )
+            store.save(settings)
+            loaded = store.load()
+            self.assertTrue(loaded.obsidian_export_enabled)
+            self.assertEqual(loaded.obsidian_export_root, "/Users/example/Vault")
+            self.assertEqual(loaded.obsidian_export_mode, "fresh_vault")
+            self.assertEqual(loaded.obsidian_export_subdir, "Research/OpenPlanter")
+            self.assertFalse(loaded.obsidian_generate_canvas)
+
     def test_embeddings_provider_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

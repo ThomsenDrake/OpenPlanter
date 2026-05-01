@@ -247,6 +247,11 @@ export interface ConfigView {
   chrome_mcp_rpc_timeout_sec: number;
   chrome_mcp_status: string;
   chrome_mcp_status_detail: string;
+  obsidian_export_enabled: boolean;
+  obsidian_export_root: string | null;
+  obsidian_export_mode: string;
+  obsidian_export_subdir: string;
+  obsidian_generate_canvas: boolean;
   workspace: string;
   session_id: string | null;
   recursive: boolean;
@@ -272,6 +277,11 @@ export interface PartialConfig {
   chrome_mcp_channel?: string;
   chrome_mcp_connect_timeout_sec?: number;
   chrome_mcp_rpc_timeout_sec?: number;
+  obsidian_export_enabled?: boolean;
+  obsidian_export_root?: string | null;
+  obsidian_export_mode?: string;
+  obsidian_export_subdir?: string;
+  obsidian_generate_canvas?: boolean;
   recursive?: boolean;
   recursion_policy?: string;
   min_subtask_depth?: number;
@@ -312,11 +322,51 @@ export interface PersistentSettings {
   chrome_mcp_channel?: string | null;
   chrome_mcp_connect_timeout_sec?: number | null;
   chrome_mcp_rpc_timeout_sec?: number | null;
+  obsidian_export_enabled?: boolean | null;
+  obsidian_export_root?: string | null;
+  obsidian_export_mode?: string | null;
+  obsidian_export_subdir?: string | null;
+  obsidian_generate_canvas?: boolean | null;
   recursive?: boolean | null;
   recursion_policy?: string | null;
   min_subtask_depth?: number | null;
   max_depth?: number | null;
   default_investigation_id?: string | null;
+}
+
+export interface ObsidianExportStatus {
+  enabled: boolean;
+  configured: boolean;
+  root: string | null;
+  target_root: string | null;
+  mode: string;
+  subdir: string;
+  generate_canvas: boolean;
+  warnings: string[];
+}
+
+export interface ConfigureObsidianExportRequest {
+  enabled?: boolean | null;
+  root?: string | null;
+  mode?: string | null;
+  subdir?: string | null;
+  generateCanvas?: boolean | null;
+}
+
+export interface ObsidianExportResult {
+  exported: boolean;
+  root_path: string;
+  investigation_dir: string;
+  home_path: string;
+  manifest_path: string;
+  files_written: string[];
+  warnings: string[];
+}
+
+export interface OpenObsidianInvestigationResult {
+  opened: boolean;
+  uri: string;
+  export: ObsidianExportResult;
 }
 
 export type CredentialService =
