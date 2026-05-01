@@ -800,6 +800,10 @@ def _markdown_inline_text(value: str) -> str:
 
 
 _LINK_PROTOCOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_MARKDOWN_DESTINATION_UNSAFE_RE = re.compile(
+    r"%(?![0-9A-Fa-f]{2})|[\x00-\x20\"<>\\^`{|}()[\]\x7f]"
+)
+_MARKDOWN_WIKI_DESTINATION_UNSAFE_RE = re.compile(r"%|[\x00-\x20\"<>\\^`{|}()[\]\x7f]")
 
 
 def _investigation_homepage_link_target(target: str) -> str:
@@ -820,13 +824,31 @@ def _investigation_homepage_link_target(target: str) -> str:
     return f"../{relative_target}"
 
 
+def _is_investigation_homepage_wiki_target(target: str) -> bool:
+    if target.startswith(("#", "/", "\\")) or _LINK_PROTOCOL_RE.match(target):
+        return False
+    path_without_fragment = target.split("#", 1)[0]
+    path_without_query = path_without_fragment.split("?", 1)[0]
+    return path_without_query.endswith(".md")
+
+
+def _percent_encode_match(match: re.Match[str]) -> str:
+    return "".join(f"%{byte:02X}" for byte in match.group(0).encode("utf-8", "surrogatepass"))
+
+
+def _encode_markdown_link_target(target: str) -> str:
+    safe_target = _investigation_homepage_link_target(target)
+    unsafe_pattern = (
+        _MARKDOWN_WIKI_DESTINATION_UNSAFE_RE
+        if _is_investigation_homepage_wiki_target(safe_target)
+        else _MARKDOWN_DESTINATION_UNSAFE_RE
+    )
+    return unsafe_pattern.sub(_percent_encode_match, safe_target)
+
+
 def _markdown_link(label: str, target: str) -> str:
     safe_label = _markdown_inline_text(label).replace("[", "\\[").replace("]", "\\]")
-    safe_target = (
-        re.sub(r"\s+", "%20", _investigation_homepage_link_target(target))
-        .replace("(", "%28")
-        .replace(")", "%29")
-    )
+    safe_target = _encode_markdown_link_target(target)
     return f"[{safe_label}]({safe_target})"
 
 

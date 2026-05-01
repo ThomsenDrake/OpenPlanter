@@ -108,6 +108,13 @@ const CURATED_REPLAY_ROLES = new Set([
 const INVESTIGATION_HOME_PATH = "openplanter://investigation-home";
 const INVESTIGATION_HOME_TITLE = "Investigation Home";
 
+function shouldDecodeGeneratedWikiLinks(path: string | null): boolean {
+  return (
+    path === INVESTIGATION_HOME_PATH ||
+    (path?.startsWith("wiki/investigations/") === true && path.endsWith(".md"))
+  );
+}
+
 export function createOverviewPane(): HTMLElement {
   const pane = document.createElement("div");
   pane.className = "overview-pane";
@@ -1116,7 +1123,7 @@ export function createOverviewPane(): HTMLElement {
         }
         const resolvedPath = resolveWikiMarkdownHref(href, {
           baseWikiPath: loadedDocumentPath,
-          decodePercentEncoding: loadedDocumentPath === INVESTIGATION_HOME_PATH,
+          decodePercentEncoding: shouldDecodeGeneratedWikiLinks(loadedDocumentPath),
         });
         if (!resolvedPath) return;
 

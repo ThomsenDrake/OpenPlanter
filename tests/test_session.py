@@ -522,7 +522,7 @@ class SessionRuntimeTests(unittest.TestCase):
                     "id": "cl_contested",
                     "claim_text": "The transfer was approved by the CFO.",
                     "status": "contested",
-                    "support_evidence_ids": ["ev_doc_1"],
+                    "support_evidence_ids": ["ev_doc_1", "ev_doc_3"],
                     "contradiction_evidence_ids": ["ev_doc_2"],
                 },
             }
@@ -536,6 +536,11 @@ class SessionRuntimeTests(unittest.TestCase):
                     "id": "ev_doc_2",
                     "description": "Approval email",
                     "source_uri": "docs/approval-email.md",
+                },
+                "ev_doc_3": {
+                    "id": "ev_doc_3",
+                    "description": "Literal percent file",
+                    "source_uri": "docs/revenue%20growth.md",
                 },
                 "ev_bad": "malformed evidence should not crash homepage generation",
             }
@@ -585,6 +590,7 @@ class SessionRuntimeTests(unittest.TestCase):
                 content,
             )
             self.assertIn("`ev_bad`: ev_bad", content)
+            self.assertIn("[ev_doc_3: Literal percent file](../docs/revenue%2520growth.md)", content)
             self.assertIn("Contradicting citations", content)
             self.assertIn("[ev_doc_2: Approval email](../docs/approval-email.md)", content)
             self.assertIn("## Open Questions and Needed Documents", content)

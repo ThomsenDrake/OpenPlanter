@@ -32,6 +32,15 @@ describe("resolveWikiMarkdownHref", () => {
     ).toBe("wiki/Q1 notes (draft).md");
   });
 
+  it("decodes generated investigation homepage links relative to wiki root", () => {
+    expect(
+      resolveWikiMarkdownHref("../docs/wire%20transfer%20records%28v2%29.md", {
+        baseWikiPath: "wiki/investigations/acme.md",
+        decodePercentEncoding: true,
+      }),
+    ).toBe("wiki/docs/wire transfer records(v2).md");
+  });
+
   it("preserves literal percent-hex text in wiki path segments by default", () => {
     expect(resolveWikiMarkdownHref("wiki/revenue%20growth.md")).toBe(
       "wiki/revenue%20growth.md",
@@ -48,6 +57,15 @@ describe("resolveWikiMarkdownHref", () => {
         decodePercentEncoding: true,
       }),
     ).toBe("wiki/revenue%20growth.md");
+  });
+
+  it("decodes generated percent-encoded literal percent paths", () => {
+    expect(
+      resolveWikiMarkdownHref("../docs/revenue%2520growth.md", {
+        baseWikiPath: "wiki/investigations/acme.md",
+        decodePercentEncoding: true,
+      }),
+    ).toBe("wiki/docs/revenue%20growth.md");
   });
 
   it("rejects non-wiki or unsafe links", () => {

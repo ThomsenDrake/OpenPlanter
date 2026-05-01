@@ -255,17 +255,23 @@ describe("createOverviewPane", () => {
 
   it("adds markdown heading ids for generated to-do fragment links", async () => {
     const generatedPath = "wiki/investigations/acme.md";
+    const decodedTargetPath = "wiki/docs/wire transfer records(v2).md";
+    const readPaths: string[] = [];
     appState.update((state) => ({
       ...state,
       overviewSelectedWikiPath: generatedPath,
     }));
     __setHandler("read_wiki_file", ({ path }: { path: string }) => {
-      expect(path).toBe(generatedPath);
+      readPaths.push(path);
+      if (path !== generatedPath) {
+        return `# ${path}`;
+      }
       return [
         "# Investigation Home",
         "",
         "## Open To-Dos",
         "- [Call bank records team](#todo-todo_2)",
+        "- [Wire records](../docs/wire%20transfer%20records%28v2%29.md)",
         "",
         "## To-Do Details",
         "### TODO todo_2",
@@ -301,6 +307,19 @@ describe("createOverviewPane", () => {
     expect(todoLink?.getAttribute("href")).toBe("#todo-todo_2");
     const todoHeading = pane.querySelector<HTMLElement>('[id="todo-todo_2"]');
     expect(todoHeading?.textContent).toBe("TODO todo_2");
+
+    const wireLink = Array.from(pane.querySelectorAll("a")).find(
+      (anchor) => anchor.textContent === "Wire records",
+    ) as HTMLAnchorElement | undefined;
+    expect(wireLink?.getAttribute("href")).toBe(
+      "../docs/wire%20transfer%20records%28v2%29.md",
+    );
+    wireLink!.click();
+
+    await vi.waitFor(() => {
+      expect(appState.get().overviewSelectedWikiPath).toBe(decodedTargetPath);
+      expect(readPaths).toEqual([generatedPath, decodedTargetPath]);
+    });
   });
 
   it("links investigation home entries to overview cards and replay", async () => {
