@@ -268,20 +268,24 @@ pub fn export_investigation_pack(
             investigation_dir.join("Investigation Map.canvas"),
             serde_json::to_string_pretty(&canvas)?,
         ));
+    } else {
+        remove_generated_file_if_exists(&investigation_dir.join("Investigation Map.canvas"))?;
     }
 
+    let index = render_index(&target_root, &investigation_id, &slug, &generated_at)?;
+    files.push((target_root.join("Index.md"), index));
+
+    let manifest_path = investigation_dir.join("Manifest.json");
     let manifest = render_manifest(
         &investigation_id,
         &session_id,
         &generated_at,
         config,
         &files,
+        &manifest_path,
         &target_root,
     )?;
-    files.push((investigation_dir.join("Manifest.json"), manifest));
-
-    let index = render_index(&target_root, &investigation_id, &slug, &generated_at)?;
-    files.push((target_root.join("Index.md"), index));
+    files.push((manifest_path, manifest));
 
     let mut files_written = Vec::new();
     for (path, content) in &files {
@@ -795,13 +799,17 @@ fn render_manifest(
     generated_at: &str,
     config: &ObsidianExportConfig,
     files: &[(PathBuf, String)],
+    manifest_path: &Path,
     target_root: &Path,
 ) -> Result<String, serde_json::Error> {
-    let relative_files = files
+    let mut relative_files = files
         .iter()
         .filter_map(|(path, _)| path.strip_prefix(target_root).ok())
         .map(|path| path.to_string_lossy().replace('\\', "/"))
         .collect::<Vec<_>>();
+    if let Ok(path) = manifest_path.strip_prefix(target_root) {
+        relative_files.push(path.to_string_lossy().replace('\\', "/"));
+    }
     serde_json::to_string_pretty(&serde_json::json!({
         "schema": "openplanter.obsidian_pack.v1",
         "investigation_id": investigation_id,
@@ -1045,6 +1053,17 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), ObsidianExportError> {
                 })
             }
         }
+    }
+}
+
+fn remove_generated_file_if_exists(path: &Path) -> Result<(), ObsidianExportError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ObsidianExportError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        }),
     }
 }
 
@@ -1382,23 +1401,45 @@ mod tests {
                 .any(|node| node["type"] == "file")
         );
         assert!(Path::new(&result.manifest_path).exists());
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&result.manifest_path).unwrap()).unwrap();
+        let manifest_files = manifest["files"].as_array().unwrap();
+        assert!(
+            manifest_files
+                .iter()
+                .any(|path| path.as_str() == Some("Index.md"))
+        );
+        assert!(manifest_files.iter().any(|path| {
+            path.as_str()
+                .is_some_and(|path| path.ends_with("/Manifest.json"))
+        }));
     }
 
     #[test]
-    fn export_pack_omits_canvas_link_when_canvas_disabled() {
+    fn export_pack_removes_canvas_when_canvas_disabled() {
         let workspace = tempfile::tempdir().unwrap();
         let session_dir = workspace.path().join(".openplanter/sessions/session-1");
         fs::create_dir_all(&session_dir).unwrap();
         let mut state = InvestigationState::new("session-1");
         state.active_investigation_id = Some("Canvas Off".to_string());
-        let config = ObsidianExportConfig {
+        let mut config = ObsidianExportConfig {
             enabled: true,
             root: Some(workspace.path().join("Vault")),
             mode: OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER.to_string(),
             subdir: "OpenPlanter".to_string(),
-            generate_canvas: false,
+            generate_canvas: true,
         };
 
+        let first_result =
+            export_investigation_pack(workspace.path(), &session_dir, &state, &config)
+                .expect("initial export should succeed");
+        assert!(
+            Path::new(&first_result.investigation_dir)
+                .join("Investigation Map.canvas")
+                .exists()
+        );
+
+        config.generate_canvas = false;
         let result = export_investigation_pack(workspace.path(), &session_dir, &state, &config)
             .expect("export should succeed");
         let home = fs::read_to_string(&result.home_path).unwrap();

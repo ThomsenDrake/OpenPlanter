@@ -376,6 +376,10 @@ class SummarizeObservationTests(unittest.TestCase):
 
 
 class ResolveModelNameTests(unittest.TestCase):
+    def test_agent_config_normalizes_obsidian_export_mode(self) -> None:
+        cfg = AgentConfig(workspace=Path("/tmp"), obsidian_export_mode="fresh-vault")
+        self.assertEqual(cfg.obsidian_export_mode, "fresh_vault")
+
     def test_explicit_model_returned(self) -> None:
         cfg = AgentConfig(workspace=Path("/tmp"), provider="openai", model="gpt-4o")
         self.assertEqual(_resolve_model_name(cfg), "gpt-4o")

@@ -274,6 +274,7 @@ class AgentConfig:
         )
         self.chrome_mcp_channel = normalize_chrome_mcp_channel(self.chrome_mcp_channel)
         self.embeddings_provider = normalize_embeddings_provider(self.embeddings_provider)
+        self.obsidian_export_mode = normalize_obsidian_export_mode(self.obsidian_export_mode)
         self.chrome_mcp_connect_timeout_sec = max(1, int(self.chrome_mcp_connect_timeout_sec))
         self.chrome_mcp_rpc_timeout_sec = max(1, int(self.chrome_mcp_rpc_timeout_sec))
         self.recursion_policy = normalize_recursion_policy(self.recursion_policy)
