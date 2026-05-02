@@ -127,6 +127,7 @@ export function createApp(root: HTMLElement): void {
       `<div><span class="label">continuity:</span> <span class="value">${s.continuityMode || "auto"}</span></div>`,
       `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,
       `<div><span class="label">chrome mcp:</span> <span class="value">${s.chromeMcpStatus} (${s.chromeMcpChannel})</span></div>`,
+      `<div><span class="label">obsidian:</span> <span class="value">${s.obsidianExportEnabled ? `on (${s.obsidianExportMode.replace(/_/g, "-")})` : "off"}</span></div>`,
       `<div><span class="label">reasoning:</span> <span class="value">${s.reasoningEffort ?? "off"}</span></div>`,
       `<div><span class="label">mode:</span> <span class="value">${formatRecursionMode(s.recursive, s.recursionPolicy)}</span></div>`,
       `<div><span class="label">min subtask depth:</span> <span class="value">${s.minSubtaskDepth}</span></div>`,

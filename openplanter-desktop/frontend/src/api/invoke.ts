@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConfigView,
+  ConfigureObsidianExportRequest,
   CredentialService,
   CredentialStatusMap,
   ExportSessionHandoffResult,
@@ -14,6 +15,9 @@ import type {
   MigrationInitResultView,
   MigrationSourceInspection,
   ModelInfo,
+  ObsidianExportResult,
+  ObsidianExportStatus,
+  OpenObsidianInvestigationResult,
   OrchestratorSnapshotEvent,
   PartialConfig,
   PersistentSettings,
@@ -73,6 +77,28 @@ export async function saveCredential(
 
 export async function getCredentialsStatus(): Promise<CredentialStatusMap> {
   return invoke("get_credentials_status");
+}
+
+export async function getObsidianExportStatus(): Promise<ObsidianExportStatus> {
+  return invoke("get_obsidian_export_status");
+}
+
+export async function configureObsidianExport(
+  request: ConfigureObsidianExportRequest
+): Promise<ObsidianExportStatus> {
+  return invoke("configure_obsidian_export", { request });
+}
+
+export async function exportObsidianInvestigation(
+  sessionId?: string | null
+): Promise<ObsidianExportResult> {
+  return invoke("export_obsidian_investigation", { sessionId: sessionId ?? null });
+}
+
+export async function openObsidianInvestigation(
+  sessionId?: string | null
+): Promise<OpenObsidianInvestigationResult> {
+  return invoke("open_obsidian_investigation", { sessionId: sessionId ?? null });
 }
 
 export async function listSessions(limit?: number): Promise<SessionInfo[]> {

@@ -86,6 +86,23 @@ const CHROME_CHANNELS: CompletionItem[] = [
   { value: "canary", description: "Target Chrome Canary", children: SAVE_FLAG },
 ];
 
+const OBSIDIAN_MODES: CompletionItem[] = [
+  { value: "fresh-vault", description: "Export directly into a fresh Obsidian vault" },
+  { value: "existing-vault-folder", description: "Export into a folder inside an existing vault" },
+];
+
+const OBSIDIAN_ENABLE_ARGS: CompletionItem[] = [
+  {
+    value: "<vault-path>",
+    description: "Path to a fresh vault or existing vault root",
+    children: [
+      { value: "--mode", description: "Choose the export mode", children: OBSIDIAN_MODES },
+      { value: "--subdir", description: "Folder name inside an existing vault", children: [{ value: "OpenPlanter", description: "Default export folder" }] },
+      { value: "--no-canvas", description: "Skip JSON Canvas generation" },
+    ],
+  },
+];
+
 const MISTRAL_VALUE: CompletionItem[] = [
   { value: "<value>", description: "Workspace API key value" },
 ];
@@ -211,6 +228,17 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
         description: "Set the Chrome release channel",
         children: CHROME_CHANNELS,
       },
+    ],
+  },
+  {
+    value: "/obsidian",
+    description: "Show, configure, export, or open Obsidian investigation packs",
+    children: [
+      { value: "status", description: "Show Obsidian export status" },
+      { value: "enable", description: "Enable generated Obsidian exports", children: OBSIDIAN_ENABLE_ARGS },
+      { value: "disable", description: "Disable generated Obsidian exports" },
+      { value: "export", description: "Export the active investigation pack" },
+      { value: "open", description: "Export and open the active investigation in Obsidian" },
     ],
   },
   {

@@ -8,6 +8,10 @@ use crate::config::{
     normalize_embeddings_provider, normalize_model_alias, normalize_recursion_policy,
     normalize_web_search_provider, normalize_zai_plan,
 };
+use crate::obsidian::{
+    DEFAULT_OBSIDIAN_EXPORT_SUBDIR, normalize_obsidian_export_mode,
+    normalize_obsidian_export_subdir,
+};
 
 const VALID_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
 
@@ -75,6 +79,11 @@ pub struct PersistentSettings {
     pub chrome_mcp_connect_timeout_sec: Option<i64>,
     pub chrome_mcp_rpc_timeout_sec: Option<i64>,
     pub default_investigation_id: Option<String>,
+    pub obsidian_export_enabled: Option<bool>,
+    pub obsidian_export_root: Option<String>,
+    pub obsidian_export_mode: Option<String>,
+    pub obsidian_export_subdir: Option<String>,
+    pub obsidian_generate_canvas: Option<bool>,
 }
 
 impl PersistentSettings {
@@ -171,6 +180,26 @@ impl PersistentSettings {
                 .map(|value| value.max(1)),
             chrome_mcp_rpc_timeout_sec: self.chrome_mcp_rpc_timeout_sec.map(|value| value.max(1)),
             default_investigation_id: trim_opt(&self.default_investigation_id),
+            obsidian_export_enabled: self.obsidian_export_enabled,
+            obsidian_export_root: self
+                .obsidian_export_root
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            obsidian_export_mode: self
+                .obsidian_export_mode
+                .as_deref()
+                .map(|value| normalize_obsidian_export_mode(Some(value))),
+            obsidian_export_subdir: self.obsidian_export_subdir.as_deref().map(|value| {
+                let normalized = normalize_obsidian_export_subdir(Some(value));
+                if normalized.is_empty() {
+                    DEFAULT_OBSIDIAN_EXPORT_SUBDIR.to_string()
+                } else {
+                    normalized
+                }
+            }),
+            obsidian_generate_canvas: self.obsidian_generate_canvas,
         })
     }
 
@@ -214,6 +243,11 @@ impl PersistentSettings {
         );
         add!(chrome_mcp_rpc_timeout_sec, "chrome_mcp_rpc_timeout_sec");
         add!(default_investigation_id, "default_investigation_id");
+        add!(obsidian_export_enabled, "obsidian_export_enabled");
+        add!(obsidian_export_root, "obsidian_export_root");
+        add!(obsidian_export_mode, "obsidian_export_mode");
+        add!(obsidian_export_subdir, "obsidian_export_subdir");
+        add!(obsidian_generate_canvas, "obsidian_generate_canvas");
         payload
     }
 
@@ -267,6 +301,11 @@ impl PersistentSettings {
                 .get("chrome_mcp_rpc_timeout_sec")
                 .and_then(|value| value.as_i64()),
             default_investigation_id: get_str(obj, "default_investigation_id"),
+            obsidian_export_enabled: normalize_bool(obj.get("obsidian_export_enabled"))?,
+            obsidian_export_root: get_str(obj, "obsidian_export_root"),
+            obsidian_export_mode: get_str(obj, "obsidian_export_mode"),
+            obsidian_export_subdir: get_str(obj, "obsidian_export_subdir"),
+            obsidian_generate_canvas: normalize_bool(obj.get("obsidian_generate_canvas"))?,
         };
         settings.normalized()
     }
@@ -391,6 +430,33 @@ mod tests {
         assert_eq!(loaded.web_search_provider, Some("firecrawl".into()));
         assert_eq!(loaded.continuity_mode, Some("continue".into()));
         assert_eq!(loaded.mistral_document_ai_use_shared_key, Some(false));
+    }
+
+    #[test]
+    fn test_obsidian_settings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path(), ".openplanter");
+        let settings = PersistentSettings {
+            obsidian_export_enabled: Some(true),
+            obsidian_export_root: Some("/Users/example/Vault".into()),
+            obsidian_export_mode: Some("fresh-vault".into()),
+            obsidian_export_subdir: Some("Research/OpenPlanter".into()),
+            obsidian_generate_canvas: Some(false),
+            ..Default::default()
+        };
+        store.save(&settings).unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.obsidian_export_enabled, Some(true));
+        assert_eq!(
+            loaded.obsidian_export_root,
+            Some("/Users/example/Vault".into())
+        );
+        assert_eq!(loaded.obsidian_export_mode, Some("fresh_vault".into()));
+        assert_eq!(
+            loaded.obsidian_export_subdir,
+            Some("Research/OpenPlanter".into())
+        );
+        assert_eq!(loaded.obsidian_generate_canvas, Some(false));
     }
 
     #[test]

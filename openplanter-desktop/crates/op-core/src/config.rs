@@ -5,6 +5,11 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::obsidian::{
+    DEFAULT_OBSIDIAN_EXPORT_SUBDIR, OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER,
+    normalize_obsidian_export_mode, normalize_obsidian_export_subdir,
+};
+
 pub const AZURE_FOUNDRY_MODEL_PREFIX: &str = "azure-foundry/";
 pub const ANTHROPIC_FOUNDRY_MODEL_PREFIX: &str = "anthropic-foundry/";
 pub const FOUNDRY_OPENAI_BASE_URL: &str = "https://foundry-proxy.cheetah-koi.ts.net/openai/v1";
@@ -330,6 +335,11 @@ pub struct AgentConfig {
     pub max_search_hits: i64,
     pub max_shell_output_chars: i64,
     pub session_root_dir: String,
+    pub obsidian_export_enabled: bool,
+    pub obsidian_export_root: Option<PathBuf>,
+    pub obsidian_export_mode: String,
+    pub obsidian_export_subdir: String,
+    pub obsidian_generate_canvas: bool,
     pub max_persisted_observations: i64,
     pub max_solve_seconds: i64,
     pub rate_limit_max_retries: i64,
@@ -418,6 +428,11 @@ impl Default for AgentConfig {
             max_search_hits: 200,
             max_shell_output_chars: 16000,
             session_root_dir: ".openplanter".into(),
+            obsidian_export_enabled: false,
+            obsidian_export_root: None,
+            obsidian_export_mode: OBSIDIAN_EXPORT_MODE_EXISTING_FOLDER.into(),
+            obsidian_export_subdir: DEFAULT_OBSIDIAN_EXPORT_SUBDIR.into(),
+            obsidian_generate_canvas: true,
             max_persisted_observations: 400,
             max_solve_seconds: 0,
             rate_limit_max_retries: 12,
@@ -653,6 +668,15 @@ impl AgentConfig {
             max_search_hits: env_int("OPENPLANTER_MAX_SEARCH_HITS", 200),
             max_shell_output_chars: env_int("OPENPLANTER_MAX_SHELL_CHARS", 16000),
             session_root_dir: env_or("OPENPLANTER_SESSION_DIR", ".openplanter"),
+            obsidian_export_enabled: env_bool("OPENPLANTER_OBSIDIAN_EXPORT_ENABLED", false),
+            obsidian_export_root: env_opt("OPENPLANTER_OBSIDIAN_EXPORT_ROOT").map(PathBuf::from),
+            obsidian_export_mode: normalize_obsidian_export_mode(
+                env_opt("OPENPLANTER_OBSIDIAN_EXPORT_MODE").as_deref(),
+            ),
+            obsidian_export_subdir: normalize_obsidian_export_subdir(
+                env_opt("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR").as_deref(),
+            ),
+            obsidian_generate_canvas: env_bool("OPENPLANTER_OBSIDIAN_GENERATE_CANVAS", true),
             max_persisted_observations: env_int("OPENPLANTER_MAX_PERSISTED_OBS", 400),
             max_solve_seconds: env_int("OPENPLANTER_MAX_SOLVE_SECONDS", 0),
             rate_limit_max_retries: env_int("OPENPLANTER_RATE_LIMIT_MAX_RETRIES", 12),
@@ -875,6 +899,7 @@ mod tests {
             "OPENPLANTER_RATE_LIMIT_BACKOFF_MAX_SEC",
             "OPENPLANTER_RATE_LIMIT_RETRY_AFTER_CAP_SEC",
             "OPENPLANTER_ZAI_STREAM_MAX_RETRIES",
+            "OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR",
         ];
         // Save original values
         let saved: Vec<_> = keys.iter().map(|k| (*k, env::var(k).ok())).collect();
@@ -963,6 +988,7 @@ mod tests {
         );
         assert_eq!(cfg.web_search_provider, "exa");
         assert_eq!(cfg.continuity_mode, "auto");
+        assert_eq!(cfg.obsidian_export_subdir, DEFAULT_OBSIDIAN_EXPORT_SUBDIR);
         assert_eq!(cfg.rate_limit_max_retries, 12);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 1.0);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 60.0);
@@ -1033,6 +1059,7 @@ mod tests {
             env::set_var("OPENPLANTER_CONTINUITY_MODE", "continue");
             env::set_var("OPENPLANTER_ZAI_STREAM_MAX_RETRIES", "7");
             env::set_var("OPENPLANTER_TAVILY_BASE_URL", "https://tavily.example");
+            env::set_var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR", "/");
         }
 
         let cfg = AgentConfig::from_env("/tmp");
@@ -1082,6 +1109,7 @@ mod tests {
         assert_eq!(cfg.web_search_provider, "tavily");
         assert_eq!(cfg.continuity_mode, "continue");
         assert_eq!(cfg.tavily_base_url, "https://tavily.example");
+        assert_eq!(cfg.obsidian_export_subdir, DEFAULT_OBSIDIAN_EXPORT_SUBDIR);
         assert_eq!(cfg.rate_limit_max_retries, 5);
         assert_eq!(cfg.rate_limit_backoff_base_sec, 2.5);
         assert_eq!(cfg.rate_limit_backoff_max_sec, 30.0);

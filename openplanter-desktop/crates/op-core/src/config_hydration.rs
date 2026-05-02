@@ -6,6 +6,7 @@ use crate::config::{
     normalize_zai_plan, resolve_openai_api_key, resolve_zai_base_url,
 };
 use crate::credentials::CredentialBundle;
+use crate::obsidian::{normalize_obsidian_export_mode, normalize_obsidian_export_subdir};
 use crate::settings::PersistentSettings;
 
 /// Merge credentials into an AgentConfig.
@@ -184,6 +185,36 @@ pub fn apply_settings_to_config(cfg: &mut AgentConfig, settings: &PersistentSett
         }
     }
 
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_ENABLED"]) {
+        if let Some(enabled) = settings.obsidian_export_enabled {
+            cfg.obsidian_export_enabled = enabled;
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_ROOT"]) {
+        if let Some(root) = settings.obsidian_export_root.as_deref() {
+            cfg.obsidian_export_root = Some(root.into());
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_MODE"]) {
+        if let Some(mode) = settings.obsidian_export_mode.as_deref() {
+            cfg.obsidian_export_mode = normalize_obsidian_export_mode(Some(mode));
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR"]) {
+        if let Some(subdir) = settings.obsidian_export_subdir.as_deref() {
+            cfg.obsidian_export_subdir = normalize_obsidian_export_subdir(Some(subdir));
+        }
+    }
+
+    if !has_env_value(&["OPENPLANTER_OBSIDIAN_GENERATE_CANVAS"]) {
+        if let Some(generate_canvas) = settings.obsidian_generate_canvas {
+            cfg.obsidian_generate_canvas = generate_canvas;
+        }
+    }
+
     if !has_env_value(&["OPENPLANTER_MODEL"]) {
         let saved_model = if cfg.provider == "auto" {
             settings.default_model.as_deref()
@@ -233,6 +264,39 @@ mod tests {
             match saved {
                 Some(value) => env::set_var("OPENPLANTER_CONTINUITY_MODE", value),
                 None => env::remove_var("OPENPLANTER_CONTINUITY_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn apply_settings_to_config_normalizes_obsidian_settings_when_env_missing() {
+        let saved_mode = env::var("OPENPLANTER_OBSIDIAN_EXPORT_MODE").ok();
+        let saved_subdir = env::var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR").ok();
+        unsafe {
+            env::remove_var("OPENPLANTER_OBSIDIAN_EXPORT_MODE");
+            env::remove_var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR");
+        }
+
+        let mut cfg = AgentConfig::default();
+        let settings = PersistentSettings {
+            obsidian_export_mode: Some("fresh-vault".into()),
+            obsidian_export_subdir: Some("/Research/OpenPlanter/".into()),
+            ..Default::default()
+        };
+
+        apply_settings_to_config(&mut cfg, &settings);
+
+        assert_eq!(cfg.obsidian_export_mode, "fresh_vault");
+        assert_eq!(cfg.obsidian_export_subdir, "Research/OpenPlanter");
+
+        unsafe {
+            match saved_mode {
+                Some(value) => env::set_var("OPENPLANTER_OBSIDIAN_EXPORT_MODE", value),
+                None => env::remove_var("OPENPLANTER_OBSIDIAN_EXPORT_MODE"),
+            }
+            match saved_subdir {
+                Some(value) => env::set_var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR", value),
+                None => env::remove_var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR"),
             }
         }
     }

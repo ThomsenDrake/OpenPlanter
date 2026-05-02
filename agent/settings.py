@@ -8,6 +8,8 @@ from pathlib import Path
 VALID_REASONING_EFFORTS: set[str] = {"low", "medium", "high"}
 VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
 VALID_EMBEDDINGS_PROVIDERS: set[str] = {"voyage", "mistral"}
+VALID_OBSIDIAN_EXPORT_MODES: set[str] = {"fresh_vault", "existing_vault_folder"}
+DEFAULT_OBSIDIAN_EXPORT_SUBDIR = "OpenPlanter"
 
 
 def normalize_reasoning_effort(value: str | None) -> str | None:
@@ -67,6 +69,28 @@ def normalize_embeddings_provider(value: str | None) -> str | None:
     return cleaned
 
 
+def normalize_obsidian_export_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().lower().replace("-", "_")
+    if not cleaned:
+        return None
+    aliases = {
+        "fresh": "fresh_vault",
+        "vault": "fresh_vault",
+        "existing": "existing_vault_folder",
+        "folder": "existing_vault_folder",
+        "subfolder": "existing_vault_folder",
+    }
+    cleaned = aliases.get(cleaned, cleaned)
+    if cleaned not in VALID_OBSIDIAN_EXPORT_MODES:
+        raise ValueError(
+            f"Invalid Obsidian export mode '{value}'. Expected one of: "
+            f"{', '.join(sorted(VALID_OBSIDIAN_EXPORT_MODES))}"
+        )
+    return cleaned
+
+
 @dataclass(slots=True)
 class PersistentSettings:
     default_model: str | None = None
@@ -85,6 +109,11 @@ class PersistentSettings:
     chrome_mcp_connect_timeout_sec: int | None = None
     chrome_mcp_rpc_timeout_sec: int | None = None
     default_investigation_id: str | None = None
+    obsidian_export_enabled: bool | None = None
+    obsidian_export_root: str | None = None
+    obsidian_export_mode: str | None = None
+    obsidian_export_subdir: str | None = None
+    obsidian_generate_canvas: bool | None = None
 
     def default_model_for_provider(self, provider: str) -> str | None:
         per_provider = {
@@ -128,6 +157,15 @@ class PersistentSettings:
                 else None
             ),
             default_investigation_id=(self.default_investigation_id or "").strip() or None,
+            obsidian_export_enabled=normalize_bool(self.obsidian_export_enabled),
+            obsidian_export_root=(self.obsidian_export_root or "").strip() or None,
+            obsidian_export_mode=normalize_obsidian_export_mode(self.obsidian_export_mode),
+            obsidian_export_subdir=(
+                ((self.obsidian_export_subdir or "").strip() or DEFAULT_OBSIDIAN_EXPORT_SUBDIR)
+                if self.obsidian_export_subdir is not None
+                else None
+            ),
+            obsidian_generate_canvas=normalize_bool(self.obsidian_generate_canvas),
         )
 
     def to_json(self) -> dict[str, str]:
@@ -164,6 +202,16 @@ class PersistentSettings:
             payload["chrome_mcp_rpc_timeout_sec"] = self.chrome_mcp_rpc_timeout_sec
         if self.default_investigation_id:
             payload["default_investigation_id"] = self.default_investigation_id
+        if self.obsidian_export_enabled is not None:
+            payload["obsidian_export_enabled"] = self.obsidian_export_enabled
+        if self.obsidian_export_root:
+            payload["obsidian_export_root"] = self.obsidian_export_root
+        if self.obsidian_export_mode:
+            payload["obsidian_export_mode"] = self.obsidian_export_mode
+        if self.obsidian_export_subdir:
+            payload["obsidian_export_subdir"] = self.obsidian_export_subdir
+        if self.obsidian_generate_canvas is not None:
+            payload["obsidian_generate_canvas"] = self.obsidian_generate_canvas
         return payload
 
     @classmethod
@@ -197,6 +245,11 @@ class PersistentSettings:
                 else None
             ),
             default_investigation_id=(str(payload.get("default_investigation_id", "")).strip() or None),
+            obsidian_export_enabled=payload.get("obsidian_export_enabled"),
+            obsidian_export_root=(str(payload.get("obsidian_export_root", "")).strip() or None),
+            obsidian_export_mode=(str(payload.get("obsidian_export_mode", "")).strip() or None),
+            obsidian_export_subdir=(str(payload.get("obsidian_export_subdir", "")).strip() or None),
+            obsidian_generate_canvas=payload.get("obsidian_generate_canvas"),
         ).normalized()
 
 

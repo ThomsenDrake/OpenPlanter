@@ -5,6 +5,7 @@ pub mod credentials;
 pub mod engine;
 pub mod events;
 pub mod model;
+pub mod obsidian;
 pub mod orchestrator;
 pub mod prompts;
 pub mod retrieval;

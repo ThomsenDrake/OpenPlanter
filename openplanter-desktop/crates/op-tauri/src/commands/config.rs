@@ -11,6 +11,7 @@ use op_core::credentials::{
     parse_env_file,
 };
 use op_core::events::{ConfigView, ModelInfo, PartialConfig};
+use op_core::obsidian::{normalize_obsidian_export_mode, normalize_obsidian_export_subdir};
 use op_core::retrieval::{RETRIEVAL_MODE, RETRIEVAL_PACKET_VERSION, build_embeddings_status};
 use op_core::settings::{PersistentSettings, SettingsStore};
 use std::collections::HashMap;
@@ -48,6 +49,14 @@ async fn make_config_view(
         chrome_mcp_rpc_timeout_sec: cfg.chrome_mcp_rpc_timeout_sec,
         chrome_mcp_status: chrome_status.status,
         chrome_mcp_status_detail: chrome_status.detail,
+        obsidian_export_enabled: cfg.obsidian_export_enabled,
+        obsidian_export_root: cfg
+            .obsidian_export_root
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        obsidian_export_mode: cfg.obsidian_export_mode.clone(),
+        obsidian_export_subdir: cfg.obsidian_export_subdir.clone(),
+        obsidian_generate_canvas: cfg.obsidian_generate_canvas,
         workspace: cfg.workspace.display().to_string(),
         session_id,
         recursive: cfg.recursive,
@@ -116,6 +125,21 @@ fn merge_settings(
         chrome_mcp_rpc_timeout_sec: incoming
             .chrome_mcp_rpc_timeout_sec
             .or(existing.chrome_mcp_rpc_timeout_sec),
+        obsidian_export_enabled: incoming
+            .obsidian_export_enabled
+            .or(existing.obsidian_export_enabled),
+        obsidian_export_root: incoming
+            .obsidian_export_root
+            .or(existing.obsidian_export_root),
+        obsidian_export_mode: incoming
+            .obsidian_export_mode
+            .or(existing.obsidian_export_mode),
+        obsidian_export_subdir: incoming
+            .obsidian_export_subdir
+            .or(existing.obsidian_export_subdir),
+        obsidian_generate_canvas: incoming
+            .obsidian_generate_canvas
+            .or(existing.obsidian_generate_canvas),
     }
 }
 
@@ -197,6 +221,25 @@ pub async fn update_config(
     }
     if let Some(timeout) = partial.chrome_mcp_rpc_timeout_sec {
         cfg.chrome_mcp_rpc_timeout_sec = timeout.max(1);
+    }
+    if let Some(enabled) = partial.obsidian_export_enabled {
+        cfg.obsidian_export_enabled = enabled;
+    }
+    if let Some(root) = partial.obsidian_export_root {
+        cfg.obsidian_export_root = if root.trim().is_empty() {
+            None
+        } else {
+            Some(root.into())
+        };
+    }
+    if let Some(mode) = partial.obsidian_export_mode {
+        cfg.obsidian_export_mode = normalize_obsidian_export_mode(Some(&mode));
+    }
+    if let Some(subdir) = partial.obsidian_export_subdir {
+        cfg.obsidian_export_subdir = normalize_obsidian_export_subdir(Some(&subdir));
+    }
+    if let Some(generate_canvas) = partial.obsidian_generate_canvas {
+        cfg.obsidian_generate_canvas = generate_canvas;
     }
     let cfg_snapshot = cfg.clone();
     drop(cfg);

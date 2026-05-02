@@ -403,6 +403,11 @@ pub struct ConfigView {
     pub chrome_mcp_rpc_timeout_sec: i64,
     pub chrome_mcp_status: String,
     pub chrome_mcp_status_detail: String,
+    pub obsidian_export_enabled: bool,
+    pub obsidian_export_root: Option<String>,
+    pub obsidian_export_mode: String,
+    pub obsidian_export_subdir: String,
+    pub obsidian_generate_canvas: bool,
     pub workspace: String,
     pub session_id: Option<String>,
     pub recursive: bool,
@@ -434,6 +439,11 @@ pub struct PartialConfig {
     pub chrome_mcp_channel: Option<String>,
     pub chrome_mcp_connect_timeout_sec: Option<i64>,
     pub chrome_mcp_rpc_timeout_sec: Option<i64>,
+    pub obsidian_export_enabled: Option<bool>,
+    pub obsidian_export_root: Option<String>,
+    pub obsidian_export_mode: Option<String>,
+    pub obsidian_export_subdir: Option<String>,
+    pub obsidian_generate_canvas: Option<bool>,
 }
 
 /// Model information for the model list.
