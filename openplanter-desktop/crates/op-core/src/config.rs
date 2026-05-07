@@ -49,6 +49,10 @@ pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>
         ])
     });
 
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
+    LazyLock::new(|| std::sync::Mutex::new(()));
+
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -836,6 +840,7 @@ mod tests {
     /// Tests both default and custom env var loading in sequence.
     #[test]
     fn test_from_env_defaults_and_custom() {
+        let _env_guard = ENV_TEST_LOCK.lock().unwrap();
         let keys = [
             "OPENPLANTER_PROVIDER",
             "OPENPLANTER_MODEL",

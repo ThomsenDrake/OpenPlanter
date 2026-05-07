@@ -919,14 +919,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn runtime_config(workspace: &Path) -> AgentConfig {
-        let mut cfg = AgentConfig::from_env(workspace);
-        cfg.workspace = workspace.to_path_buf();
-        cfg.provider = "auto".to_string();
-        cfg.model = "seed-model".to_string();
-        cfg.api_key = None;
-        cfg.openai_api_key = None;
-        cfg.openai_oauth_token = None;
-        cfg
+        AgentConfig {
+            workspace: workspace.to_path_buf(),
+            provider: "auto".to_string(),
+            model: "seed-model".to_string(),
+            api_key: None,
+            openai_api_key: None,
+            openai_oauth_token: None,
+            ..AgentConfig::default()
+        }
     }
 
     #[test]

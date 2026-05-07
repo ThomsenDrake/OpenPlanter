@@ -236,6 +236,24 @@ class EngineTests(unittest.TestCase):
             result = engine.solve("write hello.txt")
             self.assertEqual(result, "done directly")
 
+    def test_auto_policy_does_not_force_simple_read_then_write_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=2,
+                max_steps_per_call=4,
+                recursive=True,
+                acceptance_criteria=False,
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[ModelTurn(text="done directly", stop_reason="end_turn")]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result = engine.solve("read missing then write")
+            self.assertEqual(result, "done directly")
+
     def test_web_search_action_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

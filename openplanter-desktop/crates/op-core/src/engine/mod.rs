@@ -1068,9 +1068,7 @@ fn lowest_tier_model(model_name: &str) -> (String, Option<String>) {
 
 fn objective_requires_auto_recursion(objective: &str) -> bool {
     let lower = objective.to_ascii_lowercase();
-    let mut score = 0;
-
-    if [
+    let multi_phase = [
         "and then",
         "after",
         "before",
@@ -1084,10 +1082,7 @@ fn objective_requires_auto_recursion(objective: &str) -> bool {
         "end to end",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
-    {
-        score += 1;
-    }
+    .any(|needle| lower.contains(needle));
 
     let has_investigate = [
         "analyze",
@@ -1118,9 +1113,6 @@ fn objective_requires_auto_recursion(objective: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle));
-    if has_investigate && has_mutation {
-        score += 1;
-    }
 
     let mut multi_surface = [
         "across",
@@ -1139,10 +1131,10 @@ fn objective_requires_auto_recursion(objective: &str) -> bool {
         multi_surface = pathlike_tokens >= 2;
     }
     if multi_surface {
-        score += 1;
+        return multi_phase || (has_investigate && has_mutation);
     }
 
-    score >= 2
+    false
 }
 
 fn required_subtask_depth(config: &AgentConfig, objective: &str) -> u32 {
@@ -2492,6 +2484,7 @@ async fn solve_frame(
                 continue;
             }
             let mut rejection_message: Option<String> = None;
+            let mut rejection_trace_label = "final-answer candidate";
             let mut rescue_failure_label = "final_rejection_stall";
             if matches!(
                 classify_final_answer_text(&turn.text, objective),
@@ -2501,12 +2494,14 @@ async fn solve_frame(
                     "Your previous response was process/meta commentary rather than a concrete final answer. Rewrite it from the completed work only: do not call tools, do not create or verify files, and return the direct final deliverable as plain text."
                         .to_string(),
                 );
+                rejection_trace_label = "meta final answer";
                 rescue_failure_label = "meta_rejection_stall";
             } else if investigation_context_active && current_question_reasoning_packet.is_some() {
                 if let Some(issue) = investigation_deliverable_issue(&turn.text, objective) {
                     rejection_message = Some(format!(
                         "Your previous response missed the required investigation deliverable contract ({issue}). Rewrite it from the completed work only with the required report sections or JSON keys, and do not call tools or create new evidence."
                     ));
+                    rejection_trace_label = "investigation deliverable candidate";
                     rescue_failure_label = "insufficient_synthesis_stall";
                 }
             }
@@ -2526,7 +2521,7 @@ async fn solve_frame(
                     false,
                 ));
                 emitter.emit_trace(&format!(
-                    "{step_prefix} rejected final-answer candidate; requesting rewrite-only plain-text completion"
+                    "{step_prefix} rejected {rejection_trace_label}; requesting rewrite-only plain-text completion"
                 ));
                 messages.push(Message::User {
                     content: rejection_message,
@@ -3029,6 +3024,16 @@ mod tests {
             state_delta_signatures: delta_sigs.iter().map(|s| (*s).to_string()).collect(),
             completed_previews: previews.iter().map(|s| (*s).to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn test_auto_recursion_requires_multi_surface_complexity() {
+        assert!(!objective_requires_auto_recursion(
+            "read missing then write"
+        ));
+        assert!(objective_requires_auto_recursion(
+            "analyze frontend and backend and then implement the fix"
+        ));
     }
 
     #[derive(Debug, Clone)]

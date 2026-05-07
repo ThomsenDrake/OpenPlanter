@@ -31,4 +31,4 @@ textual = [
 openplanter-agent = "agent.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["agent*"]
+include = ["agent*", "scripts*"]

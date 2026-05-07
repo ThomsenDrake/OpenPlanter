@@ -164,8 +164,7 @@ export class AutocompleteController {
 
     // If the accepted item has children, re-run update to show next level
     if (hasChildren) {
-      // Use setTimeout to let the textarea value update first
-      setTimeout(() => this.update(newText), 0);
+      this.update(textarea.value || newText);
     } else {
       this.hide();
     }

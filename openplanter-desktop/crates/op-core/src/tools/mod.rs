@@ -733,7 +733,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_config(root: &std::path::Path) -> AgentConfig {
-        AgentConfig::from_env(root)
+        AgentConfig {
+            workspace: root.to_path_buf(),
+            ..AgentConfig::default()
+        }
     }
 
     #[tokio::test]

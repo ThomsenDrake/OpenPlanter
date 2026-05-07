@@ -268,18 +268,14 @@ def _lowest_tier_model(model_name: str) -> tuple[str, str | None]:
 
 
 def _objective_requires_auto_recursion(objective: str) -> bool:
-    score = 0
     lower = objective.lower()
-    if any(pattern.search(lower) for pattern in _MULTI_PHASE_PATTERNS):
-        score += 1
-    if _INVESTIGATE_INTENT_PATTERN.search(lower) and _MUTATION_INTENT_PATTERN.search(lower):
-        score += 1
+    multi_phase = any(pattern.search(lower) for pattern in _MULTI_PHASE_PATTERNS)
+    has_investigate = bool(_INVESTIGATE_INTENT_PATTERN.search(lower))
+    has_mutation = bool(_MUTATION_INTENT_PATTERN.search(lower))
     multi_surface = any(pattern.search(lower) for pattern in _MULTI_SURFACE_PATTERNS)
     if not multi_surface and len(_PATHLIKE_TOKEN_PATTERN.findall(objective)) >= 2:
         multi_surface = True
-    if multi_surface:
-        score += 1
-    return score >= 2
+    return multi_surface and (multi_phase or (has_investigate and has_mutation))
 
 
 ModelFactory = Callable[[str, str | None], "BaseModel"]
