@@ -134,6 +134,11 @@ async function expectGraphPaneVisibleAndStable(page: Page) {
   expect(appMetrics.scrollWidth).toBeLessThanOrEqual(appMetrics.clientWidth + 1);
 }
 
+async function openGraphTab(page: Page) {
+  await page.locator(".investigation-tab", { hasText: "Graph" }).click();
+  await page.waitForSelector(".graph-pane", { timeout: 5000 });
+}
+
 test.describe("Streaming Display", () => {
   test.beforeEach(async ({ page }) => {
     await injectTauriMocks(page);
@@ -318,6 +323,7 @@ test.describe("Streaming Display", () => {
   test("long streamed preview text does not push graph pane off-screen", async ({
     page,
   }) => {
+    await openGraphTab(page);
     const longPreview = `Investigating_${"CentralFlorida".repeat(120)}`;
 
     await sendDelta(page, "thinking", longPreview);
@@ -329,6 +335,7 @@ test.describe("Streaming Display", () => {
   test("long tool call rows do not push graph pane off-screen", async ({
     page,
   }) => {
+    await openGraphTab(page);
     const longCommand = `find_${"central_florida_workspace".repeat(80)}`;
 
     await sendDelta(page, "tool_call_start", "run_shell");

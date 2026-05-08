@@ -13,11 +13,11 @@ Use `harness-engineering.md` as the design and architecture brief. Use this file
 
 ## Status Snapshot
 
-- Last updated: 2026-04-09
+- Last updated: 2026-05-07
 - Overall status: Milestone 1 foundation is in the repo; Milestones 2-5 are still open.
 - Current focus: Move from skeleton orchestration to real task execution primitives.
 - Next recommended slice: `TrackerAdapter` + per-task workspace manager + a manual "Run Issue Once" path before continuous polling.
-- Known repo-wide issue: `cargo test -p op-core` still fails in 3 unrelated streaming tests under `openplanter-desktop/crates/op-core/tests/test_model_streaming.rs`.
+- Known repo-wide issue: test gates are green, but `cargo clippy --workspace -- -D warnings` still fails on existing lint debt across `op-core`.
 
 ## Implementation Anchors
 
@@ -117,10 +117,10 @@ Status: Not started
 - [x] `cargo test -p op-core orchestrator::tests`
 - [x] `cargo check -p op-tauri`
 - [x] `npm test -- --run src/api/events.test.ts src/api/invoke.test.ts`
-- [ ] `cargo test -p op-core` is green
-- [ ] `cargo test --workspace` is green
+- [x] `cargo test -p op-core` is green
+- [x] `cargo test --workspace` is green
 - [ ] `cargo clippy --workspace -- -D warnings`
-- [ ] `npm run test:e2e`
+- [x] `npm run test:e2e`
 
 ## Open Decisions To Carry Forward
 

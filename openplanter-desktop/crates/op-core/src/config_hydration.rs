@@ -245,6 +245,7 @@ mod tests {
 
     #[test]
     fn apply_settings_to_config_sets_continuity_when_env_missing() {
+        let _env_guard = crate::config::ENV_TEST_LOCK.lock().unwrap();
         let saved = env::var("OPENPLANTER_CONTINUITY_MODE").ok();
         unsafe {
             env::remove_var("OPENPLANTER_CONTINUITY_MODE");
@@ -270,6 +271,7 @@ mod tests {
 
     #[test]
     fn apply_settings_to_config_normalizes_obsidian_settings_when_env_missing() {
+        let _env_guard = crate::config::ENV_TEST_LOCK.lock().unwrap();
         let saved_mode = env::var("OPENPLANTER_OBSIDIAN_EXPORT_MODE").ok();
         let saved_subdir = env::var("OPENPLANTER_OBSIDIAN_EXPORT_SUBDIR").ok();
         unsafe {

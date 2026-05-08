@@ -290,7 +290,7 @@ test.describe("Graph Pane", () => {
     await page.locator(".graph-source-drawer-body a", { hasText: "other-file.md" }).click();
 
     await expect(page.locator(".graph-source-drawer.visible")).toBeVisible();
-    await expect(page.locator(".graph-source-drawer-title")).toHaveText("other-file");
+    await expect(page.locator(".graph-source-drawer-title")).toHaveText("other-file.md");
     await expect(page.locator(".graph-source-drawer-body")).toContainText("other-file");
 
     const selectedNodeId = await page.evaluate(() => {
@@ -744,17 +744,16 @@ test.describe("Graph Pane", () => {
     const context = await (await import("@playwright/test")).chromium.launch();
     const page = await (await context.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
 
-    let callCount = 0;
     await page.addInitScript(
       ({ graphData, graphDataNew, config, sessions, credentials }) => {
-        let invokeCount = 0;
+        (window as any).__GRAPH_E2E_USE_NEW_DATA__ = false;
         (window as any).__TAURI_INTERNALS__ = {
           invoke: async (cmd: string, args?: any) => {
             switch (cmd) {
               case "get_graph_data":
-                invokeCount++;
-                // First call returns base data, subsequent calls return new data
-                return invokeCount <= 1 ? graphData : graphDataNew;
+                return (window as any).__GRAPH_E2E_USE_NEW_DATA__
+                  ? graphDataNew
+                  : graphData;
               case "get_investigation_overview":
                 return {
                   session_id: "test-session-001",
@@ -845,6 +844,9 @@ test.describe("Graph Pane", () => {
     expect(initialVisible).toBe(0);
 
     // Click refresh — 2 new nodes appear (visible), old nodes stay hidden
+    await page.evaluate(() => {
+      (window as any).__GRAPH_E2E_USE_NEW_DATA__ = true;
+    });
     await page.locator(".graph-refresh-btn").click();
     await page.waitForTimeout(1000);
 

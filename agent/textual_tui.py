@@ -127,6 +127,7 @@ class ActivityIndicator(Widget):
         self._tool_arg_buf: str = ""
         self._tool_arg_name: str = ""
         self._start_time: float = 0.0
+        self._refresh_timer: Any = None
 
     def start_activity(self, mode: str = "thinking", step_label: str = "") -> None:
         with self._lock:
@@ -241,11 +242,18 @@ class ActivityIndicator(Widget):
         """Called by Textual when mode reactive changes — triggers re-render."""
         try:
             if new_mode != "idle":
-                self._refresh_timer = self.set_interval(1 / 8, self._tick, name="activity_tick")
+                if not self.is_mounted:
+                    return
+                if self._refresh_timer is None:
+                    self._refresh_timer = self.set_interval(
+                        1 / 8,
+                        self._tick,
+                        name="activity_tick",
+                    )
             else:
-                for timer in list(self._timers):
-                    if getattr(timer, "_name", "") == "activity_tick":
-                        timer.stop()
+                if self._refresh_timer is not None:
+                    self._refresh_timer.stop()
+                    self._refresh_timer = None
         except (RuntimeError, AttributeError):
             # No running event loop (e.g. unit test outside Textual App)
             pass

@@ -4,7 +4,7 @@
 /// adapters at it, and verify the full streaming path end-to-end.
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -19,6 +19,9 @@ use op_core::model::openai::OpenAIModel;
 use op_core::model::{BaseModel, Message, RateLimitError};
 
 // ─── Helpers ───
+
+static MODEL_STREAMING_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Collect deltas emitted during a chat_stream call.
 #[derive(Clone)]
@@ -151,6 +154,7 @@ data: [DONE]\n\n";
 
 #[tokio::test]
 async fn test_openai_stream_text() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
     let model = OpenAIModel::new(
         "gpt-4o".to_string(),
@@ -192,6 +196,7 @@ data: [DONE]\n\n";
 
 #[tokio::test]
 async fn test_openai_stream_tool_call() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(OPENAI_SSE_TOOL_CALL).await;
     let model = OpenAIModel::new(
         "gpt-4o".to_string(),
@@ -226,6 +231,7 @@ async fn test_openai_stream_tool_call() {
 
 #[tokio::test]
 async fn test_openai_stream_cancel() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     // Use a server that delays - but we cancel immediately
     let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
     let model = OpenAIModel::new(
@@ -260,6 +266,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
 async fn test_anthropic_stream_text() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
     let model = AnthropicModel::new(
         "claude-sonnet-4-5".to_string(),
@@ -304,6 +311,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
 async fn test_anthropic_stream_thinking() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(ANTHROPIC_SSE_THINKING).await;
     let model = AnthropicModel::new(
         "claude-opus-4-6".to_string(),
@@ -345,6 +353,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
 async fn test_anthropic_stream_tool_call() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(ANTHROPIC_SSE_TOOL).await;
     let model = AnthropicModel::new(
         "claude-sonnet-4-5".to_string(),
@@ -369,6 +378,7 @@ async fn test_anthropic_stream_tool_call() {
 
 #[tokio::test]
 async fn test_anthropic_stream_cancel() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
     let model = AnthropicModel::new(
         "claude-sonnet-4-5".to_string(),
@@ -391,6 +401,7 @@ async fn test_anthropic_stream_cancel() {
 
 #[tokio::test]
 async fn test_openai_chat_non_streaming() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(OPENAI_SSE_SIMPLE).await;
     let model = OpenAIModel::new(
         "gpt-4o".to_string(),
@@ -412,6 +423,7 @@ async fn test_openai_chat_non_streaming() {
 
 #[tokio::test]
 async fn test_anthropic_chat_non_streaming() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_mock_sse_server(ANTHROPIC_SSE_SIMPLE).await;
     let model = AnthropicModel::new(
         "claude-sonnet-4-5".to_string(),
@@ -432,6 +444,7 @@ async fn test_anthropic_chat_non_streaming() {
 
 #[tokio::test]
 async fn test_openai_http_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_error_server(
         401,
         r#"{"error":{"message":"Invalid API key","type":"invalid_request_error"}}"#,
@@ -456,6 +469,7 @@ async fn test_openai_http_error() {
 
 #[tokio::test]
 async fn test_openai_rate_limit_error_includes_retry_after() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_stateful_http_server(vec![MockHttpResponse {
         status: 429,
         content_type: "application/json",
@@ -493,6 +507,7 @@ async fn test_openai_rate_limit_error_includes_retry_after() {
 
 #[tokio::test]
 async fn test_anthropic_http_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     let addr = start_error_server(
         401,
         r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
@@ -517,6 +532,7 @@ async fn test_anthropic_http_error() {
 
 #[tokio::test]
 async fn test_solve_with_mock_anthropic() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -629,6 +645,7 @@ async fn test_solve_with_mock_anthropic() {
 
 #[tokio::test]
 async fn test_solve_with_mock_openai() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -749,6 +766,7 @@ async fn test_solve_with_mock_openai() {
 
 #[tokio::test]
 async fn test_solve_http_error_emits_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -797,6 +815,7 @@ async fn test_solve_http_error_emits_error() {
 
 #[tokio::test]
 async fn test_solve_rate_limit_retry_eventually_completes() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -905,6 +924,7 @@ async fn test_solve_rate_limit_retry_eventually_completes() {
 
 #[tokio::test]
 async fn test_solve_cancel_emits_cancelled() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -958,6 +978,7 @@ async fn test_solve_cancel_emits_cancelled() {
 
 #[tokio::test]
 async fn test_solve_demo_mode_bypasses_llm() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -1003,6 +1024,7 @@ async fn test_solve_demo_mode_bypasses_llm() {
 
 #[tokio::test]
 async fn test_solve_missing_key_emits_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
 
@@ -1203,6 +1225,7 @@ async fn start_stateful_mock_server_with_requests(
 
 #[tokio::test]
 async fn test_solve_multi_step_agentic_loop() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, LoopPhase, StepEvent};
@@ -1392,6 +1415,7 @@ async fn test_solve_multi_step_agentic_loop() {
 
 #[tokio::test]
 async fn test_solve_flushes_final_curator_checkpoint_before_complete() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::LoopMetrics;
@@ -1493,6 +1517,7 @@ async fn test_solve_flushes_final_curator_checkpoint_before_complete() {
 
 #[tokio::test]
 async fn test_solve_flushes_cancelled_checkpoint_before_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, StepEvent};
@@ -1590,6 +1615,7 @@ async fn test_solve_flushes_cancelled_checkpoint_before_error() {
 
 #[tokio::test]
 async fn test_solve_flushes_model_error_checkpoint_before_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::LoopMetrics;
@@ -1697,6 +1723,7 @@ async fn test_solve_flushes_model_error_checkpoint_before_error() {
 
 #[tokio::test]
 async fn test_solve_flushes_tool_loop_cancel_checkpoint_before_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::LoopMetrics;
@@ -1832,6 +1859,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
 async fn test_solve_rejects_meta_final_until_concrete_completion() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, StepEvent};
@@ -1953,6 +1981,7 @@ async fn test_solve_rejects_meta_final_until_concrete_completion() {
 
 #[tokio::test]
 async fn test_solve_allows_structural_meta_for_plan_objectives() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, StepEvent};
@@ -2057,6 +2086,7 @@ async fn test_solve_allows_structural_meta_for_plan_objectives() {
 
 #[tokio::test]
 async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, StepEvent};
@@ -2165,6 +2195,7 @@ async fn test_solve_rejects_process_meta_even_for_plan_objectives() {
 
 #[tokio::test]
 async fn test_solve_uses_separate_context_finalizer_rescue_before_meta_stall() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::{LoopMetrics, StepEvent};
@@ -2309,6 +2340,7 @@ async fn test_solve_uses_separate_context_finalizer_rescue_before_meta_stall() {
 
 #[tokio::test]
 async fn test_solve_preserves_finalization_stall_when_rescue_is_still_meta() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::LoopMetrics;
@@ -2417,6 +2449,7 @@ async fn test_solve_preserves_finalization_stall_when_rescue_is_still_meta() {
 
 #[tokio::test]
 async fn test_solve_uses_finalizer_rescue_after_rewrite_only_violation_stall() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
     use op_core::config::AgentConfig;
     use op_core::engine::{SolveEmitter, solve};
     use op_core::events::LoopMetrics;
