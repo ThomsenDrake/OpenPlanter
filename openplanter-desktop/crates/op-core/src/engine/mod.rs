@@ -1322,7 +1322,7 @@ fn should_emit_recon_guardrail(recon_streak: u32, last_guardrail_streak: u32) ->
 const BUDGET_EXTENSION_WINDOW: usize = 12;
 const MIN_MEANINGFUL_RESULT_CHARS: usize = 24;
 const MIN_EXTENSION_PROGRESS_SIGNALS: usize = 2;
-const FINALIZER_RESCUE_SYSTEM_PROMPT: &str = "You are finishing already-completed work.\nReturn only the direct final deliverable as plain text.\nUse only the supplied objective, reasoning packet, retrieval summary, rejected candidate, and completed-work notes.\nPrefer minimally editing the rejected candidate when it already contains the deliverable.\nWhen the objective is an investigation, preserve the required report sections or JSON keys.\nRemove process commentary, future-tense promises, and next-step language.\nDo not call tools, create or verify files, claim new verification, or invent new work.";
+const FINALIZER_RESCUE_SYSTEM_PROMPT: &str = "You are finishing already-completed work.\nReturn only the direct final deliverable as plain text.\nUse only the supplied objective, reasoning packet, retrieval summary, rejected candidate, and completed-work notes.\nPrefer minimally editing the rejected candidate when it already contains the deliverable.\nWhen the objective is an investigation, preserve the required report sections or JSON keys.\nRemove process commentary, future-tense promises, and next-step language.\nDo not mention this rescue process, the failure label, or the rejected candidate.\nIf the supplied evidence is insufficient, state the known blocked or partial result as the final judgment.\nDo not add TODOs or next steps unless the objective explicitly asks for them.\nDo not call tools, create or verify files, claim new verification, or invent new work.";
 
 #[derive(Debug, Clone)]
 struct StepProgressRecord {
@@ -1663,7 +1663,7 @@ fn build_finalizer_rescue_user_message(
     };
 
     format!(
-        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nLatest question reasoning packet:\n{}\n\nLatest retrieval summary:\n{}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nDeliverable contract:\n{deliverable_contract}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not add new claims, new verification, or new work.",
+        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nLatest question reasoning packet:\n{}\n\nLatest retrieval summary:\n{}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nDeliverable contract:\n{deliverable_contract}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not mention the failure label, rescue process, or rejected candidate. If evidence is insufficient, state the strongest known blocked or partial result. Do not add TODOs, next steps, new claims, new verification, or new work.",
         summarize_question_reasoning_packet(question_reasoning_packet),
         summarize_retrieval_packet(retrieval_packet),
         if rejected_candidate.trim().is_empty() {
@@ -3423,6 +3423,29 @@ mod tests {
         assert!(text.contains("Partial completion for objective: finish the artifact"));
         assert!(text.contains("Termination reason: budget_cap"));
         assert!(text.contains("Wrote 8 chars to artifact.txt"));
+    }
+
+    #[test]
+    fn test_finalizer_rescue_prompt_blocks_process_leakage() {
+        assert!(FINALIZER_RESCUE_SYSTEM_PROMPT.contains("Do not mention this rescue process"));
+        assert!(FINALIZER_RESCUE_SYSTEM_PROMPT.contains("failure label"));
+        assert!(
+            FINALIZER_RESCUE_SYSTEM_PROMPT.contains("state the known blocked or partial result")
+        );
+        assert!(FINALIZER_RESCUE_SYSTEM_PROMPT.contains("Do not add TODOs or next steps"));
+
+        let message = build_finalizer_rescue_user_message(
+            "finish answer",
+            "meta_rejection_stall",
+            "I will finish this next.",
+            &[],
+            None,
+            None,
+            false,
+        );
+        assert!(message.contains("Do not mention the failure label"));
+        assert!(message.contains("state the strongest known blocked or partial result"));
+        assert!(message.contains("Do not add TODOs, next steps"));
     }
 
     #[tokio::test]

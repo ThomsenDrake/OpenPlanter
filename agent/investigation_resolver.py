@@ -10,9 +10,26 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+
+INVESTIGATION_RESOLVER_SYSTEM_PROMPT = """\
+You classify whether a user objective belongs to an existing OpenPlanter investigation.
+
+Return JSON only. Do not include markdown, prose outside JSON, or extra keys.
+Use only investigation IDs provided in the user message. Do not invent IDs.
+
+Decision rules:
+- Choose an existing investigation when the objective is a follow-up on the same
+  subject, entities, sources, questions, evidence, or claims.
+- Choose "new" when the objective starts a distinct investigation that should
+  build its own continuity and evidence trail.
+- Choose "generic" for one-off questions, operational commands, setup work, or
+  objectives that should not be attached to an investigation.
+- Keep confidence calibrated: use lower confidence when the match depends only
+  on broad topical similarity.
+"""
 
 
 @dataclass
@@ -175,14 +192,19 @@ def infer_investigation(
 
     inv_list = "\n".join(inv_lines)
 
-    prompt = f"""Given the user's question/objective and the list of existing investigations, determine which investigation this most likely belongs to, or whether it's a new investigation or a one-off query.
+    prompt = f"""Classify the user's objective against the existing investigations.
 
 User objective: "{objective}"
 
 Available investigations:
 {inv_list}
 
-Respond with ONLY a JSON object (no markdown, no explanation):
+Allowed match values:
+- One of the exact investigation IDs listed above
+- "new"
+- "generic"
+
+Return ONLY this JSON object:
 {{"match": "investigation_id_here" | "new" | "generic", "confidence": 0.9, "reasoning": "brief explanation"}}"""
 
     try:
@@ -309,14 +331,14 @@ def resolve_investigation(
 
         if matched_inv:
             label = matched_inv.get("label", match_value)
-            print(f"\nInvestigation context detected:")
+            print("\nInvestigation context detected:")
             print(f'  → "{label}" (confidence: {confidence:.0%})')
             print(f"  Reason: {reasoning}")
         elif match_value == "new":
-            print(f"\nNew investigation suggested:")
+            print("\nNew investigation suggested:")
             print(f"  Reason: {reasoning}")
         else:
-            print(f"\nGeneric/one-off query suggested:")
+            print("\nGeneric/one-off query suggested:")
             print(f"  Reason: {reasoning}")
 
         print()
@@ -422,7 +444,7 @@ def create_llm_callable(model: Any) -> Callable[[str], str] | None:
     def llm_call(prompt: str) -> str:
         """Call the LLM with a prompt and return the text response."""
         conversation = model.create_conversation(
-            system_prompt="You are a helpful assistant that responds with JSON only.",
+            system_prompt=INVESTIGATION_RESOLVER_SYSTEM_PROMPT,
             initial_user_message=prompt,
         )
         turn = model.complete(conversation)

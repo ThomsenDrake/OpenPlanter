@@ -452,9 +452,9 @@ fn workspace_tool_defs() -> Vec<ToolDef> {
 
 fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
     let acceptance_description = if include_acceptance_criteria {
-        "Required, specific, verifiable checks the child result must satisfy."
+        "Required observable checks the child result must satisfy. Name files, fields, commands, or output properties; avoid vague quality terms."
     } else {
-        "Optional, specific, verifiable checks the child result should satisfy."
+        "Optional observable checks the child result should satisfy. Name files, fields, commands, or output properties; avoid vague quality terms."
     };
     let acceptance_required = if include_acceptance_criteria {
         vec!["objective", "acceptance_criteria"]
@@ -465,13 +465,13 @@ fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "subtask",
-            description: "Delegate a bounded recursive subtask to an equal-tier or lower-tier child agent that can continue using recursive tools.",
+            description: "Delegate a bounded recursive sub-problem to an equal-tier or lower-tier child agent. Use this for separable work that may require its own tool loop or further decomposition; the result is returned as an observation.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "objective": {
                         "type": "string",
-                        "description": "Concrete child objective."
+                        "description": "Concrete child objective, including the artifact, answer, or state change expected."
                     },
                     "acceptance_criteria": {
                         "type": "string",
@@ -492,13 +492,13 @@ fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "execute",
-            description: "Delegate a bounded leaf task to the lowest-tier executor child. Executor children run flat and cannot recurse further.",
+            description: "Delegate a bounded leaf task to the lowest-tier executor child. Use this for direct execution with no further decomposition; executor children run flat and cannot recurse further.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "objective": {
                         "type": "string",
-                        "description": "Concrete leaf objective."
+                        "description": "Concrete leaf objective, including the artifact, answer, or command result expected."
                     },
                     "acceptance_criteria": {
                         "type": "string",
@@ -885,6 +885,57 @@ mod tests {
             .collect();
         assert!(names.contains(&"subtask".to_string()));
         assert!(names.contains(&"execute".to_string()));
+    }
+
+    #[test]
+    fn test_delegation_tool_descriptions_require_observable_results() {
+        let tools = build_tool_defs("openai", &[], true, false, true);
+        let subtask = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "subtask")
+            .unwrap();
+        let execute = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "execute")
+            .unwrap();
+
+        assert!(
+            subtask["function"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("bounded recursive sub-problem")
+        );
+        assert!(
+            subtask["function"]["parameters"]["properties"]["objective"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("artifact, answer, or state change")
+        );
+        assert!(
+            subtask["function"]["parameters"]["properties"]["acceptance_criteria"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("observable checks")
+        );
+
+        assert!(
+            execute["function"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("no further decomposition")
+        );
+        assert!(
+            execute["function"]["parameters"]["properties"]["objective"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("artifact, answer, or command result")
+        );
+        assert!(
+            execute["function"]["parameters"]["properties"]["acceptance_criteria"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("avoid vague quality terms")
+        );
     }
 
     #[test]

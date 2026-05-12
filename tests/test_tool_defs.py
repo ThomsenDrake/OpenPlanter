@@ -50,6 +50,18 @@ class ToolDefinitionsTests(unittest.TestCase):
         self.assertIn("automatically saves", description)
         self.assertIn(".md and .json", description)
 
+    def test_delegation_tool_descriptions_require_observable_results(self) -> None:
+        subtask = next(d for d in TOOL_DEFINITIONS if d["name"] == "subtask")
+        execute = next(d for d in TOOL_DEFINITIONS if d["name"] == "execute")
+
+        self.assertIn("bounded recursive sub-problem", subtask["description"])
+        self.assertIn("artifact, answer, or state change", subtask["parameters"]["properties"]["objective"]["description"])
+        self.assertIn("Observable checks", subtask["parameters"]["properties"]["acceptance_criteria"]["description"])
+
+        self.assertIn("no further decomposition", execute["description"])
+        self.assertIn("artifact, answer, or command result", execute["parameters"]["properties"]["objective"]["description"])
+        self.assertIn("avoid vague quality terms", execute["parameters"]["properties"]["acceptance_criteria"]["description"])
+
 
 class GetToolDefinitionsTests(unittest.TestCase):
     """Tests for get_tool_definitions() filtering."""

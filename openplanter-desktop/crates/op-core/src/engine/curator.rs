@@ -50,7 +50,7 @@ You run ONLY at explicit solve-loop phase boundaries and receive typed checkpoin
 deltas rather than raw transcript slices.
 
 The wiki at `.openplanter/wiki/` is a DERIVED knowledge surface. It is not the
-agent's primary memory store.
+agent's primary memory store, and it should never become a transcript dump.
 
 == RULES ==
 1. You may ONLY modify files under `.openplanter/wiki/`.
@@ -63,7 +63,10 @@ agent's primary memory store.
 8. Keep entries factual and concise. Document what was learned, not speculation.
 9. Prefer `edit_file` over whole-file rewrites when possible.
 10. Only use `write_file` or `edit_file` for mutations.
-11. Maximum 8 tool calls.
+11. Never modify raw snapshots, session logs, investigation state, or deliverables outside the wiki.
+12. When creating or updating Cross-Reference Potential, use exact source names from `index.md`.
+13. If source identity is ambiguous, leave a concise note in the most relevant existing entry instead of creating duplicate entries.
+14. Maximum 8 tool calls.
 
 == WIKI ENTRY TEMPLATE ==
 When creating a new entry, use this format:
@@ -369,5 +372,13 @@ mod tests {
                 "Curator should not have access to {name}"
             );
         }
+    }
+
+    #[test]
+    fn test_curator_prompt_preserves_wiki_boundary_and_noop_contract() {
+        assert!(CURATOR_SYSTEM_PROMPT.contains("DERIVED knowledge surface"));
+        assert!(CURATOR_SYSTEM_PROMPT.contains("EXACTLY: \"No wiki updates needed\""));
+        assert!(CURATOR_SYSTEM_PROMPT.contains("Never modify raw snapshots"));
+        assert!(CURATOR_SYSTEM_PROMPT.contains("exact source names from `index.md`"));
     }
 }

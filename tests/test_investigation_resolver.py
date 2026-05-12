@@ -13,9 +13,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent.investigation_resolver import (
+    INVESTIGATION_RESOLVER_SYSTEM_PROMPT,
     InvestigationChoice,
     create_llm_callable,
     infer_investigation,
@@ -983,10 +982,16 @@ class TestCreateLlmCallable:
 
         assert result == "Response text"
         mock_model.create_conversation.assert_called_once_with(
-            system_prompt="You are a helpful assistant that responds with JSON only.",
+            system_prompt=INVESTIGATION_RESOLVER_SYSTEM_PROMPT,
             initial_user_message="Test prompt",
         )
         mock_model.complete.assert_called_once_with(mock_conversation)
+
+    def test_investigation_resolver_system_prompt_is_bounded_classifier(self) -> None:
+        """System prompt should constrain resolver to exact IDs and JSON output."""
+        assert "Return JSON only" in INVESTIGATION_RESOLVER_SYSTEM_PROMPT
+        assert "Use only investigation IDs provided" in INVESTIGATION_RESOLVER_SYSTEM_PROMPT
+        assert 'Choose "generic" for one-off questions' in INVESTIGATION_RESOLVER_SYSTEM_PROMPT
 
     def test_create_llm_callable_returns_none_for_none_model(self) -> None:
         """Pass None as model. Returns None."""

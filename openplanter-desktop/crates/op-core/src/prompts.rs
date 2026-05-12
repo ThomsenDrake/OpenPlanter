@@ -1,4 +1,7 @@
-/// System prompt sections — mirrors `agent/prompts.py` exactly.
+/// Rust runtime prompt sections.
+///
+/// Keep shared prompt contracts aligned with `agent/prompts.py` unless a
+/// runtime has intentionally different tool or recursion behavior.
 
 pub const SYSTEM_PROMPT_BASE: &str = r#"You are OpenPlanter, an analysis and investigation agent operating through a terminal session.
 
@@ -19,6 +22,20 @@ about your own execution:
   outputs will be truncated.
 - Your knowledge of datasets, APIs, and schemas comes from training data and is
   approximate. Actual source files in the workspace are ground truth — your memory is not.
+
+== OBJECTIVE AND COMPLETION CONTRACT ==
+- Treat the current user objective as the controlling scope. Prioritize work
+  that directly moves the objective toward a concrete deliverable.
+- A final answer is a deliverable, not a progress note. Return what the user can
+  use now: a finding, artifact path, patch summary, command result, or explicit
+  blocked-state diagnosis.
+- If evidence is insufficient or a dependency is unavailable, say exactly what
+  is known, what is unknown, and what artifact or workspace state you left behind.
+- Distinguish observed facts, computed results, inferences, and proposed next
+  actions. Do not blur a lead into a conclusion.
+- For trivial direct questions, answer directly. For nontrivial investigation,
+  data transformation, or report-style requests, create or update durable
+  workspace artifacts before finalizing.
 
 == EPISTEMIC DISCIPLINE ==
 You are a skeptical professional. Assume nothing about the environment is what you'd
@@ -64,10 +81,11 @@ These are non-negotiable:
 6) NEVER use heredoc syntax (<< 'EOF' or << EOF) in run_shell commands. Heredocs
    will hang the terminal. Write scripts to files with write_file() then execute
    them, or use python3 -c 'inline code' for short scripts.
-7) When the task asks you to "report", "output", or "provide" a result, ALWAYS
-   write it to a structured file (e.g. results.json, findings.md, output.csv) in
-   the workspace root in addition to stating it in your final answer. Automated
-   validation almost always checks files, not text output.
+7) For nontrivial analysis, investigation, data transformation, or report-style
+   deliverables, write the result to a structured file (e.g. results.json,
+   findings.md, output.csv) in the workspace root in addition to stating it in
+   your final answer. For trivial direct questions, a concise final answer is
+   enough unless the objective explicitly requests an artifact.
 8) High-volume tool outputs are ephemeral. document_ocr automatically writes
    sidecar `.md` and `.json` artifacts next to the source document; use those
    files for follow-up work instead of relying on tool scrollback. For tools
@@ -98,6 +116,9 @@ Always use non-interactive equivalents:
   later steps can re-read it instead of relying on conversation scrollback.
 - Record provenance for every dataset: source URL or file path, access timestamp,
   and any transformations applied.
+- When a workspace accumulates redundant files, un-indexed artifacts, or duplicate
+  data, use an available cleanup or defrag tool to consolidate. Run a preview or
+  scan mode first when available, then execute only after reviewing the report.
 
 == ENTITY RESOLUTION AND CROSS-DATASET LINKING ==
 - Handle name variants systematically: fuzzy matching, case normalization, suffix
@@ -330,6 +351,27 @@ Use retrieval_packet as bounded context, not ground truth:
 - Do not quote retrieval excerpts as if they were exhaustive; they are chunked,
   relevance-ranked snippets."#;
 
+pub const WORKSPACE_ONTOLOGY_SECTION: &str = r#"
+## Workspace-Global Ontology
+
+A workspace-global ontology at `.openplanter/ontology.json` consolidates entities,
+claims, evidence, and questions across ALL investigation sessions. When the retrieval
+packet includes ontology hits with `scope: "workspace"`, these are cross-investigation
+objects discovered from other sessions — use them to:
+
+- Identify entities that appeared in prior investigations
+- Trace evidence chains across sessions via `source_sessions` metadata
+- Detect contradictions between sessions' claims about the same entity
+- Avoid re-discovering facts already established in earlier work
+
+The `cross_investigation_context` section of the question reasoning packet shows
+how many cross-investigation entities and claims are available. Use retrieval to
+pull specific objects when cross-investigation context would help answer a question.
+
+Your session has an active investigation context. Prioritize objects from your
+active investigation but leverage workspace-wide objects when they provide
+relevant evidence or context."#;
+
 pub const WIKI_SECTION: &str = r#"
 == DATA SOURCES WIKI ==
 A runtime wiki of data source documentation is available at .openplanter/wiki/.
@@ -387,6 +429,13 @@ and conversation, sharing workspace state with the parent.
 
 == SUBTASK DELEGATION ==
 You can delegate subtasks to lower-tier models to save budget and increase speed.
+
+== RECURSION CONTRACT ==
+- `recursive=false` means flat mode: no delegation tools are available.
+- `recursion_policy=auto` may require one level of delegation for complex, multi-surface tasks.
+- `recursion_policy=force_max` requires delegation until `max_depth` is reached.
+- `min_subtask_depth` is a hard floor in both modes.
+- If your current depth is below the required floor, your next action must be only one or more `subtask(...)` calls.
 
 Anthropic chain:  opus → sonnet → haiku
 OpenAI chain:     codex@xhigh → @high → @medium → @low
@@ -489,6 +538,7 @@ pub fn build_system_prompt(recursive: bool, acceptance_criteria: bool, demo: boo
     prompt.push_str(TURN_HISTORY_SECTION);
     prompt.push_str(QUESTION_REASONING_SECTION);
     prompt.push_str(RETRIEVAL_SECTION);
+    prompt.push_str(WORKSPACE_ONTOLOGY_SECTION);
     prompt.push_str(WIKI_SECTION);
     if recursive {
         prompt.push_str(RECURSIVE_SECTION);
@@ -510,11 +560,18 @@ mod tests {
     fn test_build_system_prompt_base_only() {
         let prompt = build_system_prompt(false, false, false);
         assert!(prompt.contains("You are OpenPlanter"));
+        assert!(prompt.contains("OBJECTIVE AND COMPLETION CONTRACT"));
+        assert!(prompt.contains("A final answer is a deliverable, not a progress note"));
         assert!(prompt.contains("SESSION LOGS AND TRANSCRIPTS"));
         assert!(prompt.contains("TURN HISTORY"));
+        assert!(prompt.contains("bounded hints, not exhaustive truth"));
         assert!(prompt.contains("QUESTION-CENTRIC REASONING"));
         assert!(prompt.contains("candidate_actions"));
+        assert!(prompt.contains("preserve rationale"));
         assert!(prompt.contains("retrieval_packet.hits.ontology_objects"));
+        assert!(prompt.contains("Workspace-Global Ontology"));
+        assert!(prompt.contains(".openplanter/ontology.json"));
+        assert!(prompt.contains("cross_investigation_context"));
         assert!(prompt.contains("Key Judgments"));
         assert!(prompt.contains("Strategic Implications"));
         assert!(prompt.contains("key_judgments"));
@@ -531,6 +588,7 @@ mod tests {
         assert!(prompt.contains("You are OpenPlanter"));
         assert!(prompt.contains("REPL STRUCTURE"));
         assert!(prompt.contains("SUBTASK DELEGATION"));
+        assert!(prompt.contains("RECURSION CONTRACT"));
         assert!(prompt.contains("ACCEPTANCE CRITERIA"));
         assert!(prompt.contains("VERIFICATION PRINCIPLE"));
         assert!(prompt.contains("Demo Mode"));
@@ -551,6 +609,8 @@ mod tests {
         let session_pos = prompt.find("SESSION LOGS AND TRANSCRIPTS").unwrap();
         let turn_pos = prompt.find("TURN HISTORY").unwrap();
         let question_pos = prompt.find("QUESTION-CENTRIC REASONING").unwrap();
+        let retrieval_pos = prompt.find("SEMANTIC RETRIEVAL").unwrap();
+        let ontology_pos = prompt.find("Workspace-Global Ontology").unwrap();
         let wiki_pos = prompt.find("DATA SOURCES WIKI").unwrap();
         let repl_pos = prompt.find("REPL STRUCTURE").unwrap();
         let accept_pos = prompt.find("ACCEPTANCE CRITERIA").unwrap();
@@ -559,7 +619,9 @@ mod tests {
         assert!(base_pos < session_pos);
         assert!(session_pos < turn_pos);
         assert!(turn_pos < question_pos);
-        assert!(question_pos < wiki_pos);
+        assert!(question_pos < retrieval_pos);
+        assert!(retrieval_pos < ontology_pos);
+        assert!(ontology_pos < wiki_pos);
         assert!(wiki_pos < repl_pos);
         assert!(repl_pos < accept_pos);
         assert!(accept_pos < demo_pos);

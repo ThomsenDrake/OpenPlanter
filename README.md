@@ -407,6 +407,10 @@ tests/                        Unit and integration tests
 
 ## Development
 
+Prompt contracts span the Python and Rust runtimes; see
+[`docs/prompt-architecture.md`](docs/prompt-architecture.md) before changing
+system prompts, finalizer prompts, curator prompts, or delegation tool schemas.
+
 ### Desktop App
 
 ```bash

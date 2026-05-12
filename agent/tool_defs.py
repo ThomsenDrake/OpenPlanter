@@ -517,13 +517,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "subtask",
-        "description": "Spawn a recursive sub-agent to solve a smaller sub-problem. The result is returned as an observation.",
+        "description": (
+            "Delegate a bounded recursive sub-problem to a child agent. Use this for separable work "
+            "that may require its own tool loop or further decomposition; the result is returned as an observation."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "objective": {
                     "type": "string",
-                    "description": "Clear objective for the sub-agent to accomplish.",
+                    "description": "Concrete child objective, including the artifact, answer, or state change expected.",
                 },
                 "model": {
                     "type": "string",
@@ -536,7 +539,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
                 "acceptance_criteria": {
                     "type": "string",
-                    "description": "Acceptance criteria for judging the subtask result. A lightweight judge evaluates the result against these criteria and appends PASS/FAIL to your observation. Be specific and verifiable.",
+                    "description": "Observable checks for judging the child result. Name files, fields, commands, or output properties; avoid vague quality terms. A lightweight judge appends PASS/FAIL.",
                 },
             },
             "required": ["objective", "acceptance_criteria"],
@@ -547,7 +550,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "execute",
         "description": (
             "Hand an atomic sub-problem to a leaf executor agent with full tool access. "
-            "Use this when the sub-problem requires no further decomposition and can be "
+            "Use this when the sub-problem needs direct execution but no further decomposition and can be "
             "solved directly (e.g. write a file, run tests, apply a patch). The executor "
             "has no subtask or execute tools — it must solve the objective in one pass."
         ),
@@ -556,11 +559,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "properties": {
                 "objective": {
                     "type": "string",
-                    "description": "Clear, specific objective for the executor to accomplish.",
+                    "description": "Concrete leaf objective, including the artifact, answer, or command result expected.",
                 },
                 "acceptance_criteria": {
                     "type": "string",
-                    "description": "Acceptance criteria for judging the executor result. A lightweight judge evaluates the result against these criteria and appends PASS/FAIL to your observation. Be specific and verifiable.",
+                    "description": "Observable checks for judging the executor result. Name files, fields, commands, or output properties; avoid vague quality terms. A lightweight judge appends PASS/FAIL.",
                 },
             },
             "required": ["objective", "acceptance_criteria"],

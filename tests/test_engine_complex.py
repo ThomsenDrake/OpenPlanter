@@ -51,6 +51,12 @@ def _investigation_report(*, strategic: bool = False) -> str:
 class EngineComplexTests(unittest.TestCase):
     """Complex behavior tests for the RLM engine."""
 
+    def test_finalizer_rescue_prompt_blocks_process_leakage(self) -> None:
+        self.assertIn("Do not mention this rescue process", _FINALIZER_RESCUE_SYSTEM_PROMPT)
+        self.assertIn("failure label", _FINALIZER_RESCUE_SYSTEM_PROMPT)
+        self.assertIn("state the known blocked or partial result", _FINALIZER_RESCUE_SYSTEM_PROMPT)
+        self.assertIn("Do not add TODOs or next steps", _FINALIZER_RESCUE_SYSTEM_PROMPT)
+
     # ------------------------------------------------------------------
     # 1. Step budget exhaustion
     # ------------------------------------------------------------------

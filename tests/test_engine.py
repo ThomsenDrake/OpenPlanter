@@ -465,6 +465,9 @@ class REPLPromptTests(unittest.TestCase):
 
     def test_prompt_includes_question_centric_reasoning_rules(self) -> None:
         prompt = _build_system_prompt(recursive=False)
+        self.assertIn("OBJECTIVE AND COMPLETION CONTRACT", prompt)
+        self.assertIn("A final answer is a deliverable, not a progress note", prompt)
+        self.assertIn("For trivial direct questions, answer directly", prompt)
         self.assertIn("QUESTION-CENTRIC REASONING", prompt)
         self.assertIn("supported / contested / unresolved", prompt)
         self.assertIn("Key Judgments", prompt)
@@ -473,7 +476,9 @@ class REPLPromptTests(unittest.TestCase):
         self.assertIn("key_judgments", prompt)
         self.assertIn("candidate_actions", prompt)
         self.assertIn("machine-readable, read-only", prompt)
+        self.assertIn("preserve rationale", prompt)
         self.assertIn("retrieval_packet.hits.ontology_objects", prompt)
+        self.assertIn("bounded hints, not exhaustive truth", prompt)
 
     def test_prompt_includes_ephemeral_output_persistence_rule(self) -> None:
         prompt = _build_system_prompt(recursive=False)

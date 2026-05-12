@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from .config import AgentConfig
 from .investigation_state import build_question_reasoning_packet, load_investigation_state
-from .model import BaseModel, ImageData, ModelError, ModelTurn, RateLimitError, ToolCall, ToolResult
+from .model import BaseModel, ImageData, ModelError, RateLimitError, ToolCall, ToolResult
 from .prompts import build_system_prompt
 from .replay_log import ReplayLogger
 from .retrieval import build_retrieval_packet
@@ -147,6 +147,9 @@ _FINALIZER_RESCUE_SYSTEM_PROMPT = (
     "Prefer minimally editing the rejected candidate when it already contains the deliverable.\n"
     "When the objective is an investigation, preserve the required report sections or JSON keys.\n"
     "Remove process commentary, future-tense promises, and next-step language.\n"
+    "Do not mention this rescue process, the failure label, or the rejected candidate.\n"
+    "If the supplied evidence is insufficient, state the known blocked or partial result as the final judgment.\n"
+    "Do not add TODOs or next steps unless the objective explicitly asks for them.\n"
     "Do not call tools, create or verify files, claim new verification, or invent new work."
 )
 
@@ -789,6 +792,9 @@ class RLMEngine:
             f"Objective: {objective}\n\n"
             f"Acceptance criteria: {acceptance_criteria}\n\n"
             f"Result:\n{truncated}\n\n"
+            "Evaluate only observable evidence present in the result. Treat missing, ambiguous, or "
+            "self-attested verification as insufficient unless the result includes the requested "
+            "file paths, command output, field values, or explicit artifacts.\n"
             "Respond with exactly one line starting with PASS: or FAIL: followed by a brief explanation."
         )
 
@@ -1195,7 +1201,9 @@ class RLMEngine:
             "Rewrite the rejected candidate into the final deliverable only. "
             "Keep required substantive content and formatting, including signatures when they belong in the deliverable. "
             "Remove meta/process/future-tense language. "
-            "Do not add new claims, new verification, or new work."
+            "Do not mention the failure label, rescue process, or rejected candidate. "
+            "If evidence is insufficient, state the strongest known blocked or partial result. "
+            "Do not add TODOs, next steps, new claims, new verification, or new work."
         )
 
     def _attempt_finalizer_rescue(
