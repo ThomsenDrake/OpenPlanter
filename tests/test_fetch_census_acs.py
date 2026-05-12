@@ -23,6 +23,7 @@ import fetch_census_acs
 
 
 TRANSIENT_CENSUS_ERRORS = (urllib.error.URLError, TimeoutError, socket.timeout)
+CENSUS_API_KEY = os.getenv("CENSUS_API_KEY")
 
 
 class TestCensusAcsFetch(unittest.TestCase):
@@ -134,6 +135,10 @@ class TestCensusAcsFetch(unittest.TestCase):
         os.getenv("SKIP_LIVE_TESTS") == "1",
         "Skipping live API test (set SKIP_LIVE_TESTS=0 to run)"
     )
+    @unittest.skipIf(
+        not CENSUS_API_KEY,
+        "Skipping live API test because CENSUS_API_KEY is not set"
+    )
     def test_fetch_census_data_live(self):
         """
         Live test: Fetch real data from Census API.
@@ -148,7 +153,8 @@ class TestCensusAcsFetch(unittest.TestCase):
                 year=2022,  # Use 2022 to ensure data availability
                 dataset="acs5",
                 variables=["B01003_001E"],  # Total population
-                geography="state:*"
+                geography="state:*",
+                api_key=CENSUS_API_KEY,
             )
 
             # Fetch data
@@ -184,6 +190,10 @@ class TestCensusAcsFetch(unittest.TestCase):
         os.getenv("SKIP_LIVE_TESTS") == "1",
         "Skipping live API test (set SKIP_LIVE_TESTS=0 to run)"
     )
+    @unittest.skipIf(
+        not CENSUS_API_KEY,
+        "Skipping live API test because CENSUS_API_KEY is not set"
+    )
     def test_fetch_median_income_live(self):
         """
         Live test: Fetch median household income for Massachusetts counties.
@@ -196,7 +206,8 @@ class TestCensusAcsFetch(unittest.TestCase):
                 dataset="acs5",
                 variables=["B19013_001E"],  # Median household income
                 geography="county:*",
-                state="25"  # Massachusetts
+                state="25",  # Massachusetts
+                api_key=CENSUS_API_KEY,
             )
 
             data = fetch_census_acs.fetch_census_data(url)
@@ -239,6 +250,10 @@ class TestCensusAcsFetch(unittest.TestCase):
         os.getenv("SKIP_LIVE_TESTS") == "1",
         "Skipping live integration test"
     )
+    @unittest.skipIf(
+        not CENSUS_API_KEY,
+        "Skipping live integration test because CENSUS_API_KEY is not set"
+    )
     def test_end_to_end_csv_output(self):
         """
         End-to-end test: Fetch data and write to CSV.
@@ -251,7 +266,8 @@ class TestCensusAcsFetch(unittest.TestCase):
                 year=2022,
                 dataset="acs5",
                 variables=["B01003_001E", "B19013_001E"],
-                geography="state:06"  # California only
+                geography="state:06",  # California only
+                api_key=CENSUS_API_KEY,
             )
 
             # Fetch data

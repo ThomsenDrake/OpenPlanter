@@ -14,7 +14,7 @@
 4. [Mission Statement](#4-mission-statement)
 5. [Core Feature Set](#5-core-feature-set)
 6. [Architecture Ideas](#6-architecture-ideas)
-7. [What Makes Cestus Different](#7-what-makes-openplanter-different)
+7. [What Makes Cestus Different](#7-what-makes-cestus-different)
 8. [Potential Use Cases](#8-potential-use-cases)
 9. [Phased Roadmap](#9-phased-roadmap)
 10. [Existing Open-Source Building Blocks](#10-existing-open-source-building-blocks)
