@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,14 @@ LOW_CONFIDENCE_THRESHOLD = 0.60
 VERY_LOW_CONFIDENCE_THRESHOLD = 0.40
 MAX_CANDIDATE_ACTIONS = 24
 REQUIRED_EVIDENCE_COUNT = 1
+CLAIM_TERMINAL_STATUSES = (
+    "supported",
+    "contested",
+    "unsupported_after_available_sources",
+    "blocked_external",
+    "needs_human_or_prr",
+)
+_CLOSED_CLAIM_STATUSES = set(CLAIM_TERMINAL_STATUSES) | {"retracted", "resolved", "closed"}
 _PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _SUGGESTED_TOOLS = {
     "search": ["web_search", "fetch_url", "search_files", "read_file"],
@@ -318,9 +327,14 @@ def build_question_reasoning_packet(
     unresolved_questions.sort(key=_question_priority_sort_key)
     focus_questions = unresolved_questions[: max(1, max_questions)]
 
-    supported: list[dict[str, Any]] = []
-    contested: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
+    findings_by_status: dict[str, list[dict[str, Any]]] = {
+        "supported": [],
+        "contested": [],
+        "unsupported_after_available_sources": [],
+        "blocked_external": [],
+        "needs_human_or_prr": [],
+        "unresolved": [],
+    }
     contradictions: list[dict[str, Any]] = []
     claim_records: dict[str, dict[str, Any]] = {}
     claim_summaries: dict[str, dict[str, Any]] = {}
@@ -329,7 +343,7 @@ def build_question_reasoning_packet(
         if not isinstance(raw_claim, dict):
             continue
         normalized_claim_id = str(raw_claim.get("id") or claim_id)
-        claim_status = str(raw_claim.get("status") or "unresolved").lower()
+        claim_status = _normalize_claim_status(raw_claim.get("status"))
         support_ids = _id_list(
             raw_claim.get("support_evidence_ids")
             or raw_claim.get("evidence_support_ids")
@@ -364,15 +378,18 @@ def build_question_reasoning_packet(
                 }
             )
 
-        if claim_status == "supported":
-            supported.append(claim_summary)
-        elif claim_status == "contested" or contradiction_ids:
-            contested.append(claim_summary)
+        if claim_status == "contested" or (contradiction_ids and claim_status not in CLAIM_TERMINAL_STATUSES):
+            findings_by_status["contested"].append(claim_summary)
+        elif claim_status in findings_by_status:
+            findings_by_status[claim_status].append(claim_summary)
         else:
-            unresolved.append(claim_summary)
+            findings_by_status["unresolved"].append(claim_summary)
 
     evidence_index: dict[str, dict[str, Any]] = {}
-    for evidence_id in _collect_evidence_ids(focus_questions, supported, contested, unresolved):
+    for evidence_id in _collect_evidence_ids(
+        focus_questions,
+        *findings_by_status.values(),
+    ):
         record = evidence.get(evidence_id)
         if not isinstance(record, dict):
             continue
@@ -440,15 +457,12 @@ def build_question_reasoning_packet(
             "gather_discriminating_evidence",
             "update_claim_status_and_confidence",
             "record_contradictions",
-            "synthesize_supported_contested_unresolved",
+            "synthesize_decision_closure",
         ],
+        "claim_terminal_statuses": list(CLAIM_TERMINAL_STATUSES),
         "focus_question_ids": [item["id"] for item in focus_questions],
         "unresolved_questions": focus_questions,
-        "findings": {
-            "supported": supported,
-            "contested": contested,
-            "unresolved": unresolved,
-        },
+        "findings": findings_by_status,
         "contradictions": contradictions,
         "evidence_index": evidence_index,
         "candidate_actions": candidate_actions,
@@ -587,14 +601,15 @@ def _build_candidate_actions(
                 )
             ),
         }
+        _attach_planning_contract(action)
         if action["id"] not in seen_ids:
             seen_ids.add(action["id"])
             actions.append(action)
 
     for claim_id, claim_summary in claim_summaries.items():
-        claim_status = str(claim_summary.get("status") or "unresolved").lower()
+        claim_status = _normalize_claim_status(claim_summary.get("status"))
         confidence = _parse_confidence(claim_summary.get("confidence"))
-        if claim_status in {"retracted", "resolved", "closed"}:
+        if claim_status in _CLOSED_CLAIM_STATUSES:
             continue
         if not (
             claim_status in {"unresolved", "proposed"}
@@ -669,6 +684,7 @@ def _build_candidate_actions(
                 )
             ),
         }
+        _attach_planning_contract(action)
         if action["id"] not in seen_ids:
             seen_ids.add(action["id"])
             actions.append(action)
@@ -680,6 +696,63 @@ def _build_candidate_actions(
 def _normalize_priority(priority: Any) -> str:
     value = str(priority or "medium").lower()
     return value if value in _PRIORITY_RANK else "medium"
+
+
+def _normalize_claim_status(status: Any) -> str:
+    value = re.sub(r"[^a-z0-9]+", "_", str(status or "unresolved").strip().lower()).strip("_")
+    aliases = {
+        "unsupported": "unsupported_after_available_sources",
+        "unsupported_after_sources": "unsupported_after_available_sources",
+        "unsupported_after_available_source": "unsupported_after_available_sources",
+        "not_supported_by_available_sources": "unsupported_after_available_sources",
+        "blocked": "blocked_external",
+        "external_blocked": "blocked_external",
+        "blocked_by_captcha": "blocked_external",
+        "blocked_by_manual_portal": "blocked_external",
+        "captcha_blocked": "blocked_external",
+        "manual_portal_blocked": "blocked_external",
+        "human_required": "needs_human_or_prr",
+        "needs_human": "needs_human_or_prr",
+        "needs_prr": "needs_human_or_prr",
+        "prr_required": "needs_human_or_prr",
+    }
+    return aliases.get(value, value or "unresolved")
+
+
+def _attach_planning_contract(action: dict[str, Any]) -> None:
+    action["acceptance_criteria"] = _default_acceptance_criteria(action)
+    action["stop_conditions"] = _default_stop_conditions(action)
+
+
+def _default_acceptance_criteria(action: dict[str, Any]) -> list[str]:
+    claim_ids = _id_list(action.get("target_claim_ids"))
+    question_ids = _id_list(action.get("target_question_ids"))
+    sources = _id_list(action.get("required_sources"))
+    criteria: list[str] = []
+    if claim_ids:
+        criteria.append(
+            "Each target claim has one terminal status: "
+            + ", ".join(CLAIM_TERMINAL_STATUSES)
+            + "."
+        )
+        criteria.append("Terminal claim decisions cite support, contradiction, or limiting evidence IDs.")
+    elif question_ids:
+        criteria.append("The target question is resolved or explicitly blocked with linked claim/evidence IDs.")
+    else:
+        criteria.append("The action produces claim-relevant evidence IDs or a terminal blocked/needs-human decision.")
+    if sources:
+        criteria.append("Required sources attempted or satisfied: " + ", ".join(sources[:4]) + ".")
+    return criteria
+
+
+def _default_stop_conditions(action: dict[str, Any]) -> list[str]:
+    claim_ids = _id_list(action.get("target_claim_ids"))
+    target = ", ".join(claim_ids) if claim_ids else "the target question"
+    return [
+        f"Two equivalent source/tool/query attempts for {target} add no new evidence IDs and do not change claim status, confidence, blocker state, or next action.",
+        "A source requires CAPTCHA, manual portal navigation, login-only access, or public-records request; mark blocked_external or needs_human_or_prr and write manual/PRR instructions.",
+        "A terminal claim status can be assigned from available sources; stop gathering and synthesize a conclusion card.",
+    ]
 
 
 def _question_priority(questions: list[dict[str, Any]], question_id: str) -> str | None:

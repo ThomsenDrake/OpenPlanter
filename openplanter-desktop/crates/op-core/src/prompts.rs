@@ -286,8 +286,9 @@ Run this loop until step budget is low or high-priority questions are resolved:
 1) Select the next unresolved question from question_reasoning_packet.focus_question_ids
    or question_reasoning_packet.unresolved_questions.
 2) Gather discriminating evidence targeted at that question.
-3) Update related claims in investigation_state.claims with explicit status
-   (supported / contested / unresolved), confidence, and cited evidence IDs.
+3) Update related claims in investigation_state.claims with explicit terminal
+   status (supported / contested / unsupported_after_available_sources /
+   blocked_external / needs_human_or_prr), confidence, and cited evidence IDs.
 4) Record contradictions explicitly, preserving both supporting and contradictory
    evidence with provenance IDs instead of collapsing disagreement.
 5) Only then synthesize, and repeat for remaining unresolved questions.
@@ -296,6 +297,10 @@ Rules:
 - Ground reasoning in typed state references, not raw transcript quotes. Prefer
   question IDs, claim IDs, evidence IDs, and provenance IDs.
 - Do not mark a claim supported without support evidence IDs.
+- Do not keep a claim open after two equivalent tool batches add no claim-relevant delta.
+- CAPTCHA, manual portal, login-only, and public-records-only blockers are valid
+  terminal conclusions for that slice. Mark them blocked_external or
+  needs_human_or_prr with manual instructions or a PRR path.
 - Do not resolve a question without explicit claim/evidence linkage.
 - Prefer provenance-backed evidence over uncited notes.
 - `question_reasoning_packet.candidate_actions` is a machine-readable, read-only
@@ -315,6 +320,7 @@ Markdown deliverables for investigations MUST include these sections in order:
 - Supported Findings
 - Contested Findings
 - Unresolved Findings
+- Conclusion Cards
 
 If the objective asks for tactics or leverage using cues such as weakness,
 capitalize, opposition, vulnerability, pressure point, risk, contrast,
@@ -326,11 +332,16 @@ JSON deliverables for investigations MUST include:
 - supported_findings
 - contested_findings
 - unresolved_findings
+- conclusion_cards
 
 If the objective is tactic-oriented, JSON deliverables must also include:
 - strategic_implications
 
-Each item should cite the relevant evidence/provenance IDs."#;
+Each item should cite the relevant evidence/provenance IDs.
+
+Each Conclusion Cards entry must include:
+Claim; Status; Confidence; Evidence used; Limiting evidence; What was attempted;
+Why stopping now; Next best action; Human/PRR needed."#;
 
 pub const RETRIEVAL_SECTION: &str = r#"
 == SEMANTIC RETRIEVAL ==
@@ -451,13 +462,16 @@ When to keep at current level:
 - Coordinating analysis across multiple datasets"#;
 
 pub const ACCEPTANCE_CRITERIA_SECTION: &str = r#"
-== ACCEPTANCE CRITERIA ==
-subtask() and execute() each take TWO required parameters:
-  subtask(objective="...", acceptance_criteria="...")
-  execute(objective="...", acceptance_criteria="...")
+== ACCEPTANCE CRITERIA AND STOP CONDITIONS ==
+subtask() and execute() each take THREE required parameters:
+  subtask(objective="...", acceptance_criteria="...", stop_conditions="...")
+  execute(objective="...", acceptance_criteria="...", stop_conditions="...")
 
-Both parameters are REQUIRED. Calls missing acceptance_criteria will be REJECTED.
+All three parameters are REQUIRED. Calls missing acceptance_criteria or stop_conditions will be REJECTED.
 A judge evaluates the child's result against your criteria and appends PASS/FAIL.
+Stop conditions define when the child must stop trying and return a supported,
+contested, unsupported_after_available_sources, blocked_external, or
+needs_human_or_prr conclusion instead of looping.
 
 == VERIFICATION PRINCIPLE ==
 Implementation and verification must be UNCORRELATED. An agent that performs
@@ -465,7 +479,8 @@ an analysis must NOT be the sole verifier of that analysis — its self-assessme
 is inherently biased. Instead, use the IMPLEMENT-THEN-VERIFY pattern:
 
   Step 1: execute(objective="Build entity linkage between datasets A and B...",
-                  acceptance_criteria="...")
+                  acceptance_criteria="...",
+                  stop_conditions="...")
   Step 2: [read the result]
   Step 3: execute(
     objective="VERIFY entity_links.json: run these exact commands and return raw output only:
@@ -474,7 +489,8 @@ is inherently biased. Instead, use the IMPLEMENT-THEN-VERIFY pattern:
       python3 validate_links.py entity_links.json",
     acceptance_criteria="entity_links.json contains 5+ cross-dataset matches;
       each match has source_record, target_record, and confidence fields;
-      validate_links.py reports no errors"
+      validate_links.py reports no errors",
+    stop_conditions="two equivalent source/tool attempts produce no new IDs or require manual login/CAPTCHA"
   )
 
 The verification executor has NO context from the analysis executor. It
@@ -507,17 +523,20 @@ BAD criteria (not independently checkable):
   # Step 1: Analyze (parallel-safe — different output files)
   execute(
     objective="Parse corporate_registry.csv and campaign_finance.csv, resolve entities, write entity_map.json",
-    acceptance_criteria="entity_map.json exists; python3 -c 'import json; d=json.load(open(\"entity_map.json\")); print(len(d))' shows >= 1 entity"
+    acceptance_criteria="entity_map.json exists; python3 -c 'import json; d=json.load(open(\"entity_map.json\")); print(len(d))' shows >= 1 entity",
+    stop_conditions="two equivalent source/tool attempts add no entity IDs or hit manual-only access"
   )
   execute(
     objective="Cross-link entity_map.json with lobbying_disclosures.csv, write cross_links.json",
-    acceptance_criteria="cross_links.json exists; each entry has entity_id, source_dataset, and evidence_chain fields"
+    acceptance_criteria="cross_links.json exists; each entry has entity_id, source_dataset, and evidence_chain fields",
+    stop_conditions="two equivalent source/tool attempts add no cross-links or hit manual-only access"
   )
 
   # Step 2: Read both results, then verify independently
   execute(
     objective="VERIFY: run 'python3 validate_output.py' and return the full output",
-    acceptance_criteria="All validation checks PASSED; no ERROR lines in output"
+    acceptance_criteria="All validation checks PASSED; no ERROR lines in output",
+    stop_conditions="validation output repeats the same blocker twice"
   )"#;
 
 pub const DEMO_SECTION: &str = r#"

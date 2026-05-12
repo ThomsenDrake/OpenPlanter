@@ -704,6 +704,18 @@ const INVESTIGATION_REQUIRED_JSON_KEYS: &[&str] = &[
     "supported_findings",
     "contested_findings",
     "unresolved_findings",
+    "conclusion_cards",
+];
+const CONCLUSION_CARD_MARKDOWN_FIELDS: &[&str] = &[
+    "Claim",
+    "Status",
+    "Confidence",
+    "Evidence used",
+    "Limiting evidence",
+    "What was attempted",
+    "Why stopping now",
+    "Next best action",
+    "Human/PRR needed",
 ];
 
 fn objective_requires_strategic_implications(objective: &str) -> bool {
@@ -780,6 +792,7 @@ fn investigation_required_markdown_sections(objective: &str) -> Vec<&'static str
         "Supported Findings",
         "Contested Findings",
         "Unresolved Findings",
+        "Conclusion Cards",
     ]);
     sections
 }
@@ -874,6 +887,9 @@ fn investigation_deliverable_issue(text: &str, objective: &str) -> Option<String
                     );
                 }
             }
+            if !json_sequence_has_content(obj.get("conclusion_cards")) {
+                return Some("JSON deliverable has an empty `conclusion_cards` field".to_string());
+            }
             return None;
         }
     }
@@ -911,6 +927,21 @@ fn investigation_deliverable_issue(text: &str, objective: &str) -> Option<String
             }
         }
         previous_position = Some(position);
+    }
+
+    let conclusion_body = sections
+        .iter()
+        .find(|(heading, _)| heading.eq_ignore_ascii_case("Conclusion Cards"))
+        .map(|(_, body)| body.as_str())
+        .unwrap_or_default();
+    for field in CONCLUSION_CARD_MARKDOWN_FIELDS {
+        let pattern = format!(r"(?im)\b{}\s*:", regex::escape(field));
+        if !Regex::new(&pattern)
+            .ok()
+            .is_some_and(|regex| regex.is_match(conclusion_body))
+        {
+            return Some(format!("Conclusion Cards section is missing `{field}:`"));
+        }
     }
 
     None
@@ -1041,7 +1072,7 @@ fn build_synthesis_checkpoint_message(objective: &str, packet: &Value) -> String
         .collect::<Vec<_>>();
 
     format!(
-        "Mandatory synthesis checkpoint: stop broadening the search unless a missing source is decisive. Use the evidence already gathered to answer the objective directly.\n\nResolve these focus questions now:\n{}\n\nRequired deliverable structure:\n{}\n\nTranslate major connections into objective-facing judgments. If the evidence is still insufficient, say that explicitly inside Key Judgments or Strategic Implications.",
+        "Mandatory synthesis checkpoint: stop broadening the search unless a missing source is decisive. Use the evidence already gathered to answer the objective directly.\n\nResolve these focus questions now:\n{}\n\nRequired deliverable structure:\n{}\n\nTranslate major connections into objective-facing judgments. If the evidence is still insufficient, say that explicitly inside Key Judgments or Strategic Implications. Use terminal claim statuses and fill the Conclusion Cards fields instead of asking for one more similar search.",
         focus_questions.join("\n"),
         sections.join("\n"),
     )
@@ -1222,7 +1253,7 @@ fn delegation_policy_message(
         "Delegation required: recursion policy requires depth {required_depth} before direct work or finalization. Current depth is {depth}. Your next action must be one or more subtask(objective=..., "
     );
     if acceptance_criteria_enabled {
-        message.push_str("acceptance_criteria=\"...\") calls only.");
+        message.push_str("acceptance_criteria=\"...\", stop_conditions=\"...\") calls only.");
     } else {
         message.push_str("...) calls only.");
     }
@@ -1384,6 +1415,8 @@ struct StepProgressRecord {
     post_finalization_artifact_churn: bool,
     successful_action_signatures: HashSet<String>,
     state_delta_signatures: HashSet<String>,
+    attempt_signatures: HashSet<String>,
+    marginal_evidence_yield: Option<Value>,
     completed_previews: Vec<String>,
 }
 
@@ -1420,6 +1453,426 @@ fn action_signature(name: &str, args: &str) -> String {
     format!("{}|{}", name, normalize_progress_fragment(args, 160))
 }
 
+fn stringify_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct AttemptFingerprint {
+    source: String,
+    tool: String,
+    tactic: String,
+    query: String,
+    target_claim: String,
+}
+
+impl AttemptFingerprint {
+    fn signature(&self) -> String {
+        format!(
+            "source={}|tool={}|tactic={}|query={}|target_claim={}",
+            self.source, self.tool, self.tactic, self.query, self.target_claim
+        )
+    }
+
+    fn signature_with_blocker(&self, blocker_type: &str) -> String {
+        format!(
+            "{}|blocker_type={}",
+            self.signature(),
+            normalize_progress_fragment(blocker_type, 60)
+        )
+    }
+}
+
+fn tool_payload_text(args: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(obj) = args.as_object() {
+        for key in [
+            "query",
+            "address",
+            "url",
+            "urls",
+            "path",
+            "command",
+            "objective",
+        ] {
+            match obj.get(key) {
+                Some(Value::Array(items)) => {
+                    parts.extend(items.iter().map(stringify_value));
+                }
+                Some(value) if !value.is_null() => parts.push(stringify_value(value)),
+                _ => {}
+            }
+        }
+    }
+    if parts.is_empty() {
+        serde_json::to_string(args).unwrap_or_default()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn attempt_source(payload: &str) -> String {
+    let lower = payload.to_ascii_lowercase();
+    let patterns = [
+        ("ocpa", r"\b(?:ocpa|ocpafl|property appraiser)\b"),
+        (
+            "orange_county_clerk",
+            r"\b(?:orange county clerk|myclerk|clerk of courts?)\b",
+        ),
+        (
+            "orange_county_comptroller",
+            r"\b(?:comptroller|official records)\b",
+        ),
+        (
+            "city_of_orlando",
+            r"\b(?:city of orlando|orlando permits?|orlando code)\b",
+        ),
+        ("dbpr_abt", r"\b(?:dbpr|abt|alcoholic beverages|tobacco)\b"),
+    ];
+    for (source, pattern) in patterns {
+        if Regex::new(pattern)
+            .ok()
+            .is_some_and(|regex| regex.is_match(&lower))
+        {
+            return source.to_string();
+        }
+    }
+    if let Some(caps) = Regex::new(r"https?://([^/\s]+)")
+        .ok()
+        .and_then(|regex| regex.captures(payload))
+    {
+        if let Some(host) = caps.get(1) {
+            return host.as_str().to_ascii_lowercase();
+        }
+    }
+    "workspace_or_web".to_string()
+}
+
+fn attempt_tactic(tool_name: &str, payload: &str) -> String {
+    let lower = payload.to_ascii_lowercase();
+    if lower.contains("prr") || lower.contains("public records request") {
+        return "prr_draft".to_string();
+    }
+    if lower.contains("manual") || lower.contains("handoff") {
+        return "manual_handoff".to_string();
+    }
+    if tool_name == "fetch_url"
+        && Regex::new(r"\b(api|arcgis|graphql|rest|query)\b")
+            .ok()
+            .is_some_and(|regex| regex.is_match(&lower))
+    {
+        return "direct_api".to_string();
+    }
+    if tool_name == "run_shell"
+        && Regex::new(r"\b(curl|http|api|jq)\b")
+            .ok()
+            .is_some_and(|regex| regex.is_match(&lower))
+    {
+        return "direct_api".to_string();
+    }
+    if matches!(tool_name, "web_search" | "fetch_url") {
+        return "browser_search".to_string();
+    }
+    if matches!(
+        tool_name,
+        "search_files" | "list_files" | "read_file" | "read_artifact" | "list_artifacts"
+    ) {
+        return "workspace_lookup".to_string();
+    }
+    tool_name.to_string()
+}
+
+fn attempt_query(args: &Value, payload: &str) -> String {
+    if let Some(obj) = args.as_object() {
+        for key in ["address", "query", "url", "path", "command"] {
+            if let Some(value) = obj.get(key).and_then(Value::as_str) {
+                if !value.trim().is_empty() {
+                    return normalize_progress_fragment(value, 120);
+                }
+            }
+        }
+        if let Some(urls) = obj.get("urls").and_then(Value::as_array) {
+            if !urls.is_empty() {
+                return normalize_progress_fragment(
+                    &urls
+                        .iter()
+                        .map(stringify_value)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    120,
+                );
+            }
+        }
+    }
+    normalize_progress_fragment(payload, 120)
+}
+
+fn first_string_in_value(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .find_map(|item| Some(stringify_value(item)).filter(|text| !text.trim().is_empty())),
+        Some(value) if !value.is_null() => Some(stringify_value(value)),
+        _ => None,
+    }
+}
+
+fn target_claim_from_args_or_packet(args: &Value, packet: Option<&Value>) -> String {
+    if let Some(obj) = args.as_object() {
+        for key in [
+            "target_claim",
+            "target_claim_id",
+            "claim_id",
+            "claim_ids",
+            "target_claim_ids",
+        ] {
+            if let Some(value) = first_string_in_value(obj.get(key)) {
+                return value;
+            }
+        }
+    }
+    if let Some(packet) = packet.and_then(Value::as_object) {
+        if let Some(action) = packet
+            .get("candidate_actions")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+        {
+            if let Some(value) = first_string_in_value(action.get("target_claim_ids")) {
+                return value;
+            }
+        }
+        if let Some(question) = packet
+            .get("unresolved_questions")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+        {
+            if let Some(value) = first_string_in_value(question.get("claim_ids")) {
+                return value;
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn attempt_fingerprint(
+    tool_call: &crate::model::ToolCall,
+    packet: Option<&Value>,
+) -> Option<AttemptFingerprint> {
+    if matches!(tool_call.name.as_str(), "think" | "subtask" | "execute") {
+        return None;
+    }
+    let args = serde_json::from_str::<Value>(&tool_call.arguments).unwrap_or(Value::Null);
+    let payload = tool_payload_text(&args);
+    let query = attempt_query(&args, &payload);
+    if query.is_empty() {
+        return None;
+    }
+    Some(AttemptFingerprint {
+        source: attempt_source(&payload),
+        tool: tool_call.name.clone(),
+        tactic: attempt_tactic(&tool_call.name, &payload),
+        query,
+        target_claim: target_claim_from_args_or_packet(&args, packet),
+    })
+}
+
+fn attempt_blocker_type(result: &ToolResult) -> String {
+    let normalized = normalize_progress_fragment(&result.content, 240);
+    if normalized.contains("captcha") {
+        "captcha".to_string()
+    } else if normalized.contains("manual")
+        || normalized.contains("browser")
+        || normalized.contains("portal")
+    {
+        "manual_portal".to_string()
+    } else if normalized.contains("login") || normalized.contains("sign in") {
+        "login_required".to_string()
+    } else if normalized.contains("rate limit") || normalized.contains("429") {
+        "rate_limited".to_string()
+    } else if normalized.contains("no results") || normalized.contains("not found") {
+        "no_results".to_string()
+    } else if result.is_error || normalized.starts_with("blocked") {
+        "tool_blocked".to_string()
+    } else {
+        "attempted".to_string()
+    }
+}
+
+fn blocked_repeated_attempt_result(
+    tool_call: &crate::model::ToolCall,
+    fingerprint: &AttemptFingerprint,
+) -> ToolResult {
+    ToolResult::error(format!(
+        "BLOCKED: repeated attempt fingerprint reached the stop condition for tool call {}. {}. Select a materially different tactic (direct API, manual handoff, or PRR draft) or synthesize the current conclusion.",
+        tool_call.id,
+        fingerprint.signature()
+    ))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClaimSnapshot {
+    evidence_ids: HashSet<String>,
+    statuses: HashMap<String, String>,
+    confidences: HashMap<String, String>,
+    blockers: HashSet<String>,
+    next_actions: HashSet<String>,
+}
+
+fn collect_evidence_ids_from_value(value: Option<&Value>, ids: &mut HashSet<String>) {
+    match value {
+        Some(Value::String(text)) if !text.trim().is_empty() => {
+            ids.insert(text.trim().to_string());
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                collect_evidence_ids_from_value(Some(item), ids);
+            }
+        }
+        Some(Value::Object(map)) => {
+            for key in ["id", "evidence_id", "uri", "path", "source_id"] {
+                collect_evidence_ids_from_value(map.get(key), ids);
+            }
+            for key in [
+                "evidence_ids",
+                "supporting_evidence_ids",
+                "source_ids",
+                "sources",
+            ] {
+                collect_evidence_ids_from_value(map.get(key), ids);
+            }
+        }
+        Some(value) if !value.is_null() => {
+            let text = stringify_value(value);
+            if !text.trim().is_empty() {
+                ids.insert(text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn packet_claim_snapshot(packet: Option<&Value>) -> ClaimSnapshot {
+    let mut snapshot = ClaimSnapshot::default();
+    let Some(packet) = packet.and_then(Value::as_object) else {
+        return snapshot;
+    };
+
+    if let Some(index) = packet.get("evidence_index").and_then(Value::as_object) {
+        snapshot.evidence_ids.extend(index.keys().cloned());
+    }
+
+    if let Some(findings) = packet.get("findings").and_then(Value::as_object) {
+        for group in [
+            "supported",
+            "contested",
+            "unsupported_after_available_sources",
+            "blocked_external",
+            "needs_human_or_prr",
+            "unresolved",
+        ] {
+            let Some(items) = findings.get(group).and_then(Value::as_array) else {
+                continue;
+            };
+            for item in items {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let claim_id = obj
+                    .get("id")
+                    .or_else(|| obj.get("claim_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                snapshot
+                    .statuses
+                    .insert(claim_id.clone(), group.to_string());
+                if let Some(confidence) = obj.get("confidence") {
+                    snapshot
+                        .confidences
+                        .insert(claim_id, stringify_value(confidence));
+                }
+                for key in [
+                    "evidence_ids",
+                    "supporting_evidence_ids",
+                    "contradicting_evidence_ids",
+                    "limiting_evidence_ids",
+                    "source_ids",
+                    "sources",
+                ] {
+                    collect_evidence_ids_from_value(obj.get(key), &mut snapshot.evidence_ids);
+                }
+            }
+        }
+    }
+
+    if let Some(actions) = packet.get("candidate_actions").and_then(Value::as_array) {
+        for action in actions {
+            let Some(obj) = action.as_object() else {
+                continue;
+            };
+            let action_signature = serde_json::to_string(&serde_json::json!({
+                "id": obj.get("id"),
+                "action_type": obj.get("action_type"),
+                "target_claim_ids": obj.get("target_claim_ids"),
+                "required_sources": obj.get("required_sources"),
+            }))
+            .unwrap_or_default();
+            if !action_signature.is_empty() {
+                snapshot.next_actions.insert(action_signature);
+            }
+            collect_evidence_ids_from_value(obj.get("evidence_gap_refs"), &mut snapshot.blockers);
+        }
+    }
+
+    snapshot
+}
+
+fn compute_marginal_evidence_yield(before: Option<&Value>, after: Option<&Value>) -> Value {
+    let before = packet_claim_snapshot(before);
+    let after = packet_claim_snapshot(after);
+    let mut new_evidence_ids: Vec<String> = after
+        .evidence_ids
+        .difference(&before.evidence_ids)
+        .cloned()
+        .collect();
+    new_evidence_ids.sort();
+    let claim_status_changed = before.statuses != after.statuses;
+    let confidence_changed = before.confidences != after.confidences;
+    let blocker_resolved = before
+        .blockers
+        .iter()
+        .any(|blocker| !after.blockers.contains(blocker));
+    let next_action_changed = before.next_actions != after.next_actions;
+    let claim_relevant_delta = !new_evidence_ids.is_empty()
+        || claim_status_changed
+        || confidence_changed
+        || blocker_resolved
+        || next_action_changed;
+
+    serde_json::json!({
+        "new_evidence_ids_added": new_evidence_ids,
+        "new_evidence_id_count": after.evidence_ids.difference(&before.evidence_ids).count(),
+        "claim_status_changed": claim_status_changed,
+        "confidence_changed": confidence_changed,
+        "blocker_resolved": blocker_resolved,
+        "next_action_changed": next_action_changed,
+        "claim_relevant_delta": claim_relevant_delta,
+    })
+}
+
+fn decision_closure_checkpoint_message(yield_payload: &Value) -> String {
+    format!(
+        "Mandatory synthesis checkpoint: two consecutive tool batches produced no claim-relevant marginal evidence yield.\n\nLatest marginal evidence yield:\n{}\n\nRequired deliverable structure:\n## Key Judgments\n## Supported Findings\n## Contested Findings\n## Unresolved Findings\n## Conclusion Cards\n\nStop expanding the same search pattern. Synthesize decision closure now: assign each claim one of supported, contested, unsupported_after_available_sources, blocked_external, or needs_human_or_prr; write Conclusion Cards; and create at most three successor tasks marked agent_ready, human_required, or prr_required.",
+        serde_json::to_string_pretty(yield_payload).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
 fn build_step_progress_record(
     tool_calls: &[crate::model::ToolCall],
     observations: &[(String, String, String, String, bool)],
@@ -1443,6 +1896,8 @@ fn build_step_progress_record(
         post_finalization_artifact_churn: false,
         successful_action_signatures: HashSet::new(),
         state_delta_signatures: HashSet::new(),
+        attempt_signatures: HashSet::new(),
+        marginal_evidence_yield: None,
         completed_previews: Vec::new(),
     };
     for (_, name, args, content, is_error) in observations {
@@ -1486,6 +1941,8 @@ fn special_step_progress_record(
         post_finalization_artifact_churn,
         successful_action_signatures: HashSet::new(),
         state_delta_signatures: HashSet::new(),
+        attempt_signatures: HashSet::new(),
+        marginal_evidence_yield: None,
         completed_previews: Vec::new(),
     }
 }
@@ -1642,39 +2099,40 @@ fn build_partial_completion_text(
     let mut next_actions = Vec::new();
     if loop_metrics.termination_reason == "budget_no_progress" {
         next_actions.push(
-            "Stop repeating the stalled loop and resume with a narrower next slice or a different tactic."
+            "agent_ready: Synthesize the completed findings into conclusion cards before any new evidence gathering."
                 .to_string(),
         );
     }
     if loop_metrics.termination_reason == "budget_cap" {
         next_actions.push(
-            "Resume from the saved state and focus on finishing the deliverable instead of reopening the full search space."
+            "agent_ready: Select one narrower successor task from the stopped objective; do not reopen the full search space."
                 .to_string(),
         );
     }
     if loop_metrics.termination_reason == "finalization_stall" {
         next_actions.push(
-            "Stop retrying tool-based rewrites and return the strongest existing deliverable in plain text."
+            "agent_ready: Rewrite the conclusion cards from completed work only; do not call more tools."
                 .to_string(),
         );
     }
-    next_actions.push(format!(
-        "Continue the objective with the strongest completed lead: {objective}"
-    ));
     next_actions.push(
-        "Turn the completed work below into a concrete artifact or summary before doing more exploration."
+        "human_required: If a portal, CAPTCHA, login, or manual lookup blocks automation, write exact handoff instructions."
+            .to_string(),
+    );
+    next_actions.push(
+        "prr_required: If records cannot be accessed automatically, draft the smallest public-records request for the missing source."
             .to_string(),
     );
 
     format!(
-        "Partial completion for objective: {objective}\nStopped after {} steps with {} budget extension(s). Termination reason: {}.\n\nCompleted work:\n{}\n\nRemaining work:\n- Finish the deliverable using the completed work below and avoid repeating the stalled loop.\n\nSuggested next actions:\n{}",
+        "Partial completion for objective: {objective}\nStopped after {} steps with {} budget extension(s). Termination reason: {}.\n\nCompleted work:\n{}\n\nConclusion card required now:\n- Claim: (active claim ID or objective slice)\n- Status: supported / contested / unsupported_after_available_sources / blocked_external / needs_human_or_prr\n- Confidence: (current confidence)\n- Evidence used: (evidence IDs or completed-work notes)\n- Limiting evidence: (missing/contradictory/blocking evidence)\n- What was attempted: (tool/source summary)\n- Why stopping now: (budget, repeated attempt, blocker, or terminal decision)\n- Next best action: (one successor task)\n- Human/PRR needed: (yes/no and why)\n\nRemaining work:\n- Close this run with a conclusion card, then choose exactly one successor task before continuing.\n- Do not resume this same broad objective. Select one successor task below.\n\nSuccessor tasks (choose one before continuing):\n{}",
         loop_metrics.steps,
         loop_metrics.extensions_granted,
         loop_metrics.termination_reason,
         completed_block,
         next_actions
             .iter()
-            .take(4)
+            .take(3)
             .map(|item| format!("- {item}"))
             .collect::<Vec<_>>()
             .join("\n")
@@ -1703,16 +2161,16 @@ fn build_finalizer_rescue_user_message(
         && question_reasoning_packet.is_some()
     {
         if objective_requires_strategic_implications(objective) {
-            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Strategic Implications\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Strategic Implications\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\n- ## Conclusion Cards\nIf you return JSON instead, include non-empty `key_judgments`, `strategic_implications`, and `conclusion_cards` fields plus supported/contested/unresolved finding arrays."
         } else {
-            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\nIf you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+            "Return an investigation deliverable with these Markdown sections in order:\n- ## Key Judgments\n- ## Supported Findings\n- ## Contested Findings\n- ## Unresolved Findings\n- ## Conclusion Cards\nIf you return JSON instead, include non-empty `key_judgments` and `conclusion_cards` fields plus supported/contested/unresolved finding arrays."
         }
     } else {
         "Return the direct final deliverable that best satisfies the objective. Do not add investigation-only report sections unless the objective explicitly calls for them."
     };
 
     format!(
-        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nLatest question reasoning packet:\n{}\n\nLatest retrieval summary:\n{}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nDeliverable contract:\n{deliverable_contract}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not mention the failure label, rescue process, or rejected candidate. If evidence is insufficient, state the strongest known blocked or partial result. Do not add TODOs, next steps, new claims, new verification, or new work.",
+        "Objective:\n{objective}\n\nFailure label: {failure_label}\n\nLatest question reasoning packet:\n{}\n\nLatest retrieval summary:\n{}\n\nRejected final-answer candidate:\n{}\n\nCompleted-work notes:\n{completed_work}\n\nDeliverable contract:\n{deliverable_contract}\n\nRewrite the rejected candidate into the final deliverable only. Keep required substantive content and formatting, including signatures when they belong in the deliverable. Remove meta/process/future-tense language. Do not mention the failure label, rescue process, or rejected candidate. If evidence is insufficient, state the strongest known blocked or partial result. Every conclusion card must include Claim, Status, Confidence, Evidence used, Limiting evidence, What was attempted, Why stopping now, Next best action, and Human/PRR needed. Do not add TODOs, next steps, new claims, new verification, or new work.",
         summarize_question_reasoning_packet(question_reasoning_packet),
         summarize_retrieval_packet(retrieval_packet),
         if rejected_candidate.trim().is_empty() {
@@ -2039,6 +2497,24 @@ fn judge_acceptance(criteria: &str, output: &str) -> String {
     format!("{verdict}: {}", result.reasoning)
 }
 
+fn objective_with_task_contract(
+    objective: &str,
+    acceptance_criteria: &str,
+    stop_conditions: &str,
+) -> String {
+    let mut parts = vec![objective.to_string()];
+    if !acceptance_criteria.trim().is_empty() {
+        parts.push(format!(
+            "Acceptance criteria:\n{}",
+            acceptance_criteria.trim()
+        ));
+    }
+    if !stop_conditions.trim().is_empty() {
+        parts.push(format!("Stop conditions:\n{}", stop_conditions.trim()));
+    }
+    parts.join("\n\n")
+}
+
 fn build_subtask_config(
     config: &AgentConfig,
     current_model_name: &str,
@@ -2123,6 +2599,18 @@ async fn execute_recursive_tool_call(
             tool_call.name
         ));
     }
+    let stop_conditions = args
+        .get("stop_conditions")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if config.acceptance_criteria && stop_conditions.is_empty() {
+        return ToolResult::error(format!(
+            "{} requires stop_conditions when acceptance criteria mode is enabled. Provide concrete stop rules for repeated attempts, blockers, manual handoffs, or PRRs.",
+            tool_call.name
+        ));
+    }
 
     let max_depth = config.max_depth.max(0) as u32;
     if depth >= max_depth {
@@ -2148,8 +2636,9 @@ async fn execute_recursive_tool_call(
         }
     };
     let executor_mode = tool_call.name == "execute";
+    let child_objective = objective_with_task_contract(objective, &criteria, &stop_conditions);
     let outcome = solve_frame(
-        objective,
+        &child_objective,
         &child_config,
         emitter,
         cancel,
@@ -2313,6 +2802,9 @@ async fn solve_frame(
     let mut rewrite_only_violations = 0u32;
     let mut last_rejected_final_candidate: Option<String> = None;
     let mut synthesis_checkpoint_sent = false;
+    let mut claim_no_delta_streak = 0u32;
+    let mut attempt_counts: HashMap<String, u32> = HashMap::new();
+    let mut attempt_blockers: HashMap<String, HashSet<String>> = HashMap::new();
     let mut active_step_budget = config.max_steps_per_call.max(1) as usize;
     let max_total_steps = active_step_budget
         + if config.budget_extension_enabled {
@@ -2709,7 +3201,27 @@ async fn solve_frame(
                 "{} executing tool: {} ({})",
                 step_prefix, tool_call.name, tool_call.id
             ));
-            let result = tools.execute(&tool_call.name, &tool_call.arguments).await;
+            let fingerprint = current_question_reasoning_packet
+                .as_ref()
+                .and_then(|packet| attempt_fingerprint(&tool_call, Some(packet)));
+            let result = if let Some(fingerprint) = fingerprint.as_ref() {
+                let attempt_count = attempt_counts
+                    .get(&fingerprint.signature())
+                    .copied()
+                    .unwrap_or(0);
+                if attempt_count >= 2 {
+                    emitter.emit_trace(&format!(
+                        "{} blocked repeated attempt fingerprint: {}",
+                        step_prefix,
+                        fingerprint.signature()
+                    ));
+                    blocked_repeated_attempt_result(&tool_call, fingerprint)
+                } else {
+                    tools.execute(&tool_call.name, &tool_call.arguments).await
+                }
+            } else {
+                tools.execute(&tool_call.name, &tool_call.arguments).await
+            };
             if result.is_error {
                 emitter.emit_trace(&format!(
                     "{} tool {} error: {}",
@@ -2717,6 +3229,14 @@ async fn solve_frame(
                     tool_call.name,
                     safe_prefix(&result.content, 200)
                 ));
+            }
+            if let Some(fingerprint) = fingerprint.as_ref() {
+                let signature = fingerprint.signature();
+                *attempt_counts.entry(signature.clone()).or_insert(0) += 1;
+                attempt_blockers
+                    .entry(signature)
+                    .or_default()
+                    .insert(attempt_blocker_type(&result));
             }
             indexed_observations.push((
                 index,
@@ -2822,11 +3342,73 @@ async fn solve_frame(
                 content: "Soft guardrail: you've spent multiple consecutive steps in read/list/search mode without producing artifacts. Move to implementation now: edit files, run targeted validation, and return concrete outputs. If recent OCR/transcription/API results may be needed again, persist them to workspace files now instead of relying on scrollback.".to_string(),
             });
         }
-        step_records.push(build_step_progress_record(
-            &turn.tool_calls,
-            &tool_observations,
-            phase.clone(),
-        ));
+        let mut step_record =
+            build_step_progress_record(&turn.tool_calls, &tool_observations, phase.clone());
+        for (tool_call, (_, _, _, content, is_error)) in
+            turn.tool_calls.iter().zip(tool_observations.iter())
+        {
+            if let Some(fingerprint) = current_question_reasoning_packet
+                .as_ref()
+                .and_then(|packet| attempt_fingerprint(tool_call, Some(packet)))
+            {
+                let observed_result = ToolResult {
+                    content: content.clone(),
+                    is_error: *is_error,
+                };
+                step_record.attempt_signatures.insert(
+                    fingerprint.signature_with_blocker(&attempt_blocker_type(&observed_result)),
+                );
+            }
+        }
+        if depth == 0 && investigation_context_active && current_question_reasoning_packet.is_some()
+        {
+            let before_packet = current_question_reasoning_packet.clone();
+            if let Some(session_dir) = session_dir_path.as_deref() {
+                maybe_refresh_reasoning_context_if_needed(
+                    config,
+                    session_dir,
+                    objective,
+                    &mut current_question_reasoning_packet,
+                    &mut current_retrieval_packet,
+                    &mut last_reasoning_state_mtime_ns,
+                    &cancel,
+                    emitter,
+                    &mut messages,
+                )
+                .await;
+            }
+            let yield_payload = compute_marginal_evidence_yield(
+                before_packet.as_ref(),
+                current_question_reasoning_packet.as_ref(),
+            );
+            let has_delta = yield_payload
+                .get("claim_relevant_delta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if has_delta {
+                claim_no_delta_streak = 0;
+            } else {
+                claim_no_delta_streak += 1;
+            }
+            step_record.marginal_evidence_yield = Some(yield_payload.clone());
+            emitter.emit_trace(&format!(
+                "{step_prefix} marginal evidence yield: {}",
+                serde_json::to_string(&yield_payload).unwrap_or_else(|_| "{}".to_string())
+            ));
+            if claim_no_delta_streak >= 2
+                && !synthesis_checkpoint_sent
+                && current_question_reasoning_packet.is_some()
+            {
+                synthesis_checkpoint_sent = true;
+                messages.push(Message::User {
+                    content: decision_closure_checkpoint_message(&yield_payload),
+                });
+                emitter.emit_trace(&format!(
+                    "{step_prefix} injected mandatory decision-closure synthesis checkpoint"
+                ));
+            }
+        }
+        step_records.push(step_record);
         emitter.emit_loop_health(
             depth,
             step as u32,
@@ -2850,26 +3432,6 @@ async fn solve_frame(
             loop_phase: Some(phase),
             loop_metrics: Some(loop_metrics.clone()),
         });
-
-        let has_successful_artifact = turn.tool_calls.iter().zip(tool_observations.iter()).any(
-            |(tool_call, (_, _, _, _, is_error))| is_artifact_tool(&tool_call.name) && !*is_error,
-        );
-        if depth == 0 && has_successful_artifact {
-            if let Some(session_dir) = session_dir_path.as_deref() {
-                maybe_refresh_reasoning_context_if_needed(
-                    config,
-                    session_dir,
-                    objective,
-                    &mut current_question_reasoning_packet,
-                    &mut current_retrieval_packet,
-                    &mut last_reasoning_state_mtime_ns,
-                    &cancel,
-                    emitter,
-                    &mut messages,
-                )
-                .await;
-            }
-        }
 
         let should_trigger_synthesis_checkpoint = depth == 0
             && !synthesis_checkpoint_sent
@@ -3102,6 +3664,8 @@ mod tests {
             post_finalization_artifact_churn: false,
             successful_action_signatures: action_sigs.iter().map(|s| (*s).to_string()).collect(),
             state_delta_signatures: delta_sigs.iter().map(|s| (*s).to_string()).collect(),
+            attempt_signatures: HashSet::new(),
+            marginal_evidence_yield: None,
             completed_previews: previews.iter().map(|s| (*s).to_string()).collect(),
         }
     }
@@ -4451,7 +5015,18 @@ mod tests {
             "strategic_implications": [{"summary": "Use contrast messaging", "confidence": "medium"}],
             "supported_findings": [],
             "contested_findings": [],
-            "unresolved_findings": []
+            "unresolved_findings": [],
+            "conclusion_cards": [{
+                "claim": "cl_1",
+                "status": "supported",
+                "confidence": "medium",
+                "evidence_used": ["ev_1"],
+                "limiting_evidence": [],
+                "what_was_attempted": "reviewed normalized evidence",
+                "why_stopping_now": "terminal status assigned",
+                "next_best_action": "none",
+                "human_prr_needed": "no"
+            }]
         });
 
         assert_eq!(
@@ -4481,7 +5056,7 @@ mod tests {
 
     #[test]
     fn test_investigation_markdown_validation_is_case_insensitive() {
-        let deliverable = "## key judgments\n- Judgment.\n## supported findings\n- Support.\n## contested findings\n- None.\n## unresolved findings\n- None.";
+        let deliverable = "## key judgments\n- Judgment.\n## supported findings\n- Support.\n## contested findings\n- None.\n## unresolved findings\n- None.\n## conclusion cards\nClaim: cl_1\nStatus: supported\nConfidence: medium\nEvidence used: ev_1\nLimiting evidence: none\nWhat was attempted: reviewed normalized evidence\nWhy stopping now: terminal status assigned\nNext best action: none\nHuman/PRR needed: no";
 
         assert_eq!(
             investigation_deliverable_issue(deliverable, "Investigate this candidate"),
@@ -4491,7 +5066,7 @@ mod tests {
 
     #[test]
     fn test_investigation_markdown_validation_accepts_extra_heading_whitespace() {
-        let deliverable = "##  Key Judgments\n- Judgment.\n##\tSupported Findings\n- Support.\n##  Contested Findings\n- None.\n##\tUnresolved Findings\n- None.";
+        let deliverable = "##  Key Judgments\n- Judgment.\n##\tSupported Findings\n- Support.\n##  Contested Findings\n- None.\n##\tUnresolved Findings\n- None.\n## Conclusion Cards\nClaim: cl_1\nStatus: supported\nConfidence: medium\nEvidence used: ev_1\nLimiting evidence: none\nWhat was attempted: reviewed normalized evidence\nWhy stopping now: terminal status assigned\nNext best action: none\nHuman/PRR needed: no";
 
         assert_eq!(
             investigation_deliverable_issue(deliverable, "Investigate this candidate"),

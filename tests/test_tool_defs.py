@@ -57,10 +57,14 @@ class ToolDefinitionsTests(unittest.TestCase):
         self.assertIn("bounded recursive sub-problem", subtask["description"])
         self.assertIn("artifact, answer, or state change", subtask["parameters"]["properties"]["objective"]["description"])
         self.assertIn("Observable checks", subtask["parameters"]["properties"]["acceptance_criteria"]["description"])
+        self.assertIn("stop", subtask["parameters"]["properties"]["stop_conditions"]["description"].lower())
+        self.assertIn("stop_conditions", subtask["parameters"]["required"])
 
         self.assertIn("no further decomposition", execute["description"])
         self.assertIn("artifact, answer, or command result", execute["parameters"]["properties"]["objective"]["description"])
         self.assertIn("avoid vague quality terms", execute["parameters"]["properties"]["acceptance_criteria"]["description"])
+        self.assertIn("stop", execute["parameters"]["properties"]["stop_conditions"]["description"].lower())
+        self.assertIn("stop_conditions", execute["parameters"]["required"])
 
 
 class GetToolDefinitionsTests(unittest.TestCase):

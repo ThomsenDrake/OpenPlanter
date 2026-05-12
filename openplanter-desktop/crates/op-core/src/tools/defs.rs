@@ -457,7 +457,7 @@ fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
         "Optional observable checks the child result should satisfy. Name files, fields, commands, or output properties; avoid vague quality terms."
     };
     let acceptance_required = if include_acceptance_criteria {
-        vec!["objective", "acceptance_criteria"]
+        vec!["objective", "acceptance_criteria", "stop_conditions"]
     } else {
         vec!["objective"]
     };
@@ -476,6 +476,10 @@ fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
                     "acceptance_criteria": {
                         "type": "string",
                         "description": acceptance_description
+                    },
+                    "stop_conditions": {
+                        "type": "string",
+                        "description": "Concrete conditions that require the child to stop and return a conclusion instead of continuing. Include repeated-attempt, blocker, manual handoff, or PRR triggers."
                     },
                     "model": {
                         "type": "string",
@@ -503,6 +507,10 @@ fn delegation_tool_defs(include_acceptance_criteria: bool) -> Vec<ToolDef> {
                     "acceptance_criteria": {
                         "type": "string",
                         "description": acceptance_description
+                    },
+                    "stop_conditions": {
+                        "type": "string",
+                        "description": "Concrete conditions that require the executor to stop and return a conclusion instead of continuing. Include repeated-attempt, blocker, manual handoff, or PRR triggers."
                     }
                 },
                 "required": acceptance_required,
@@ -917,6 +925,12 @@ mod tests {
                 .unwrap()
                 .contains("observable checks")
         );
+        assert!(
+            subtask["function"]["parameters"]["properties"]["stop_conditions"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("stop")
+        );
 
         assert!(
             execute["function"]["description"]
@@ -935,6 +949,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("avoid vague quality terms")
+        );
+        assert!(
+            execute["function"]["parameters"]["properties"]["stop_conditions"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("stop")
         );
     }
 

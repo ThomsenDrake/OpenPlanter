@@ -44,6 +44,18 @@ def _investigation_report(*, strategic: bool = False) -> str:
         "## Supported Findings\n- supported-1: Evidence-backed finding.",
         "## Contested Findings\n- None.",
         "## Unresolved Findings\n- None.",
+        (
+            "## Conclusion Cards\n"
+            "- Claim: cl_1\n"
+            "  Status: supported\n"
+            "  Confidence: medium\n"
+            "  Evidence used: ev_1\n"
+            "  Limiting evidence: none\n"
+            "  What was attempted: typed evidence review\n"
+            "  Why stopping now: terminal claim status assigned\n"
+            "  Next best action: none\n"
+            "  Human/PRR needed: no"
+        ),
     ])
     return "\n\n".join(sections)
 

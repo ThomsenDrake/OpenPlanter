@@ -541,8 +541,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Observable checks for judging the child result. Name files, fields, commands, or output properties; avoid vague quality terms. A lightweight judge appends PASS/FAIL.",
                 },
+                "stop_conditions": {
+                    "type": "string",
+                    "description": "Concrete conditions that require the child to stop and return a conclusion instead of continuing. Include repeated-attempt, blocker, manual handoff, or PRR triggers.",
+                },
             },
-            "required": ["objective", "acceptance_criteria"],
+            "required": ["objective", "acceptance_criteria", "stop_conditions"],
             "additionalProperties": False,
         },
     },
@@ -565,8 +569,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Observable checks for judging the executor result. Name files, fields, commands, or output properties; avoid vague quality terms. A lightweight judge appends PASS/FAIL.",
                 },
+                "stop_conditions": {
+                    "type": "string",
+                    "description": "Concrete conditions that require the executor to stop and return a conclusion instead of continuing. Include repeated-attempt, blocker, manual handoff, or PRR triggers.",
+                },
             },
-            "required": ["objective", "acceptance_criteria"],
+            "required": ["objective", "acceptance_criteria", "stop_conditions"],
             "additionalProperties": False,
         },
     },
@@ -642,16 +650,18 @@ def _merge_dynamic_definitions(
 
 
 def _strip_acceptance_criteria(defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove acceptance_criteria property from subtask/execute schemas."""
+    """Remove acceptance_criteria and stop_conditions from subtask/execute schemas."""
     import copy
     result = []
     for d in defs:
         if d["name"] in ("subtask", "execute"):
             d = copy.deepcopy(d)
             d["parameters"]["properties"].pop("acceptance_criteria", None)
+            d["parameters"]["properties"].pop("stop_conditions", None)
             req = d["parameters"].get("required", [])
-            if "acceptance_criteria" in req:
-                d["parameters"]["required"] = [r for r in req if r != "acceptance_criteria"]
+            d["parameters"]["required"] = [
+                r for r in req if r not in {"acceptance_criteria", "stop_conditions"}
+            ]
         result.append(d)
     return result
 

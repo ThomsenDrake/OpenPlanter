@@ -159,7 +159,7 @@ Atomic proposition that may be supported or contradicted.
 
 - `text`, `claim_type` (`factual`, `attribution`, `quantitative`, etc.)
 - `subject_refs[]` (entity/link IDs)
-- `status` (`proposed`, `supported`, `contested`, `retracted`)
+- `status` (`proposed`, `supported`, `contested`, `unsupported_after_available_sources`, `blocked_external`, `needs_human_or_prr`, `retracted`)
 - `evidence_support_ids[]`, `evidence_contra_ids[]`
 - provenance + confidence
 
@@ -236,9 +236,10 @@ Shared representation for confidence + rationale.
 1. All referenced IDs MUST exist.
 2. `updated_at >= created_at`.
 3. Closed objects (`resolved/rejected/retracted`) MUST include closure metadata (`closed_at`, `closed_reason`).
-4. Claim status transition to `supported` requires at least one support evidence reference.
-5. Evidence used by claims MUST include provenance.
-6. Confidence profile referenced by object MUST exist (or explicit `null` if unknown is allowed by configuration).
+4. Claim run terminal states (`supported`, `contested`, `unsupported_after_available_sources`, `blocked_external`, `needs_human_or_prr`) MUST cite support, contradiction, limiting evidence, or blocker metadata.
+5. Claim status transition to `supported` requires at least one support evidence reference.
+6. Evidence used by claims MUST include provenance.
+7. Confidence profile referenced by object MUST exist (or explicit `null` if unknown is allowed by configuration).
 
 ## 5. Lifecycle Model
 
@@ -396,4 +397,3 @@ Recommended modules:
 - [ ] Add compatibility projection writer to legacy `state.json`
 - [ ] Add schema validation + fixtures + parity tests
 - [ ] Update prompt/context assembly to consume typed state slices
-

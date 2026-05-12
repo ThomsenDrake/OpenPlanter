@@ -139,6 +139,18 @@ _INVESTIGATION_REQUIRED_JSON_KEYS = (
     "supported_findings",
     "contested_findings",
     "unresolved_findings",
+    "conclusion_cards",
+)
+_CONCLUSION_CARD_MARKDOWN_FIELDS = (
+    "Claim",
+    "Status",
+    "Confidence",
+    "Evidence used",
+    "Limiting evidence",
+    "What was attempted",
+    "Why stopping now",
+    "Next best action",
+    "Human/PRR needed",
 )
 _FINALIZER_RESCUE_SYSTEM_PROMPT = (
     "You are finishing already-completed work.\n"
@@ -166,7 +178,17 @@ def _has_reasoning_packet_content(packet: dict[str, Any] | None) -> bool:
         return True
     if not isinstance(findings, dict):
         return False
-    return any(findings.get(key) for key in ("supported", "contested", "unresolved"))
+    return any(
+        findings.get(key)
+        for key in (
+            "supported",
+            "contested",
+            "unsupported_after_available_sources",
+            "blocked_external",
+            "needs_human_or_prr",
+            "unresolved",
+        )
+    )
 
 
 def _objective_requires_strategic_implications(objective: str) -> bool:
@@ -348,7 +370,33 @@ class StepProgressRecord:
     post_finalization_artifact_churn: bool = False
     successful_action_signatures: set[str] = field(default_factory=set)
     state_delta_signatures: set[str] = field(default_factory=set)
+    attempt_signatures: set[str] = field(default_factory=set)
+    marginal_evidence_yield: dict[str, Any] = field(default_factory=dict)
     completed_previews: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AttemptFingerprint:
+    source: str
+    tool: str
+    tactic: str
+    query: str
+    target_claim: str
+
+    @property
+    def signature(self) -> str:
+        return "|".join(
+            (
+                f"source={self.source}",
+                f"tool={self.tool}",
+                f"tactic={self.tactic}",
+                f"query={self.query}",
+                f"target_claim={self.target_claim}",
+            )
+        )
+
+    def signature_with_blocker(self, blocker_type: str) -> str:
+        return f"{self.signature}|blocker_type={_normalize_progress_fragment(blocker_type, max_len=60)}"
 
 
 def _normalize_progress_fragment(text: str, max_len: int = 120) -> str:
@@ -363,6 +411,140 @@ def _action_signature(name: str, args: dict[str, Any]) -> str:
     payload = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     payload = payload[:160]
     return f"{name}|{payload}"
+
+
+def _tool_payload_text(args: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("query", "address", "url", "urls", "path", "command", "objective"):
+        value = args.get(key)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if item is not None)
+        elif value is not None:
+            parts.append(str(value))
+    if not parts:
+        parts.append(json.dumps(args, sort_keys=True, ensure_ascii=True))
+    return " ".join(parts)
+
+
+def _attempt_source(payload: str) -> str:
+    lower = payload.lower()
+    source_patterns = (
+        ("ocpa", r"\b(?:ocpa|ocpafl|property appraiser)\b"),
+        ("orange_county_clerk", r"\b(?:orange county clerk|myclerk|clerk of courts?)\b"),
+        ("orange_county_comptroller", r"\b(?:comptroller|official records)\b"),
+        ("city_of_orlando", r"\b(?:city of orlando|orlando permits?|orlando code)\b"),
+        ("dbpr_abt", r"\b(?:dbpr|abt|alcoholic beverages|tobacco)\b"),
+    )
+    for source, pattern in source_patterns:
+        if re.search(pattern, lower):
+            return source
+    host = re.search(r"https?://([^/\s]+)", payload)
+    if host:
+        return host.group(1).lower()
+    return "workspace_or_web"
+
+
+def _attempt_tactic(tool_name: str, payload: str) -> str:
+    lower = payload.lower()
+    if "prr" in lower or "public records request" in lower:
+        return "prr_draft"
+    if "manual" in lower or "handoff" in lower:
+        return "manual_handoff"
+    if tool_name == "fetch_url" and re.search(r"\b(api|arcgis|graphql|rest|query)\b", lower):
+        return "direct_api"
+    if tool_name == "run_shell" and re.search(r"\b(curl|http|api|jq)\b", lower):
+        return "direct_api"
+    if tool_name in {"web_search", "fetch_url"}:
+        return "browser_search"
+    if tool_name in {"search_files", "list_files", "read_file", "read_artifact", "list_artifacts"}:
+        return "workspace_lookup"
+    return tool_name
+
+
+def _attempt_query(args: dict[str, Any], payload: str) -> str:
+    for key in ("address", "query", "url", "path", "command"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_progress_fragment(value, max_len=120)
+    urls = args.get("urls")
+    if isinstance(urls, list) and urls:
+        return _normalize_progress_fragment(" ".join(str(url) for url in urls), max_len=120)
+    return _normalize_progress_fragment(payload, max_len=120)
+
+
+def _target_claim_from_args_or_packet(
+    args: dict[str, Any],
+    packet: dict[str, Any] | None,
+) -> str:
+    for key in ("target_claim", "target_claim_id", "claim_id"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    claim_ids = args.get("claim_ids") or args.get("target_claim_ids")
+    if isinstance(claim_ids, list) and claim_ids:
+        return str(claim_ids[0])
+    if isinstance(packet, dict):
+        for action in packet.get("candidate_actions", [])[:1]:
+            if isinstance(action, dict):
+                ids = action.get("target_claim_ids")
+                if isinstance(ids, list) and ids:
+                    return str(ids[0])
+        for question in packet.get("unresolved_questions", [])[:1]:
+            if isinstance(question, dict):
+                ids = question.get("claim_ids")
+                if isinstance(ids, list) and ids:
+                    return str(ids[0])
+    return "unknown"
+
+
+def _attempt_fingerprint(
+    tool_call: ToolCall,
+    packet: dict[str, Any] | None,
+) -> AttemptFingerprint | None:
+    if tool_call.name in {"think", "subtask", "execute"}:
+        return None
+    args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+    payload = _tool_payload_text(args)
+    query = _attempt_query(args, payload)
+    if not query:
+        return None
+    return AttemptFingerprint(
+        source=_attempt_source(payload),
+        tool=tool_call.name,
+        tactic=_attempt_tactic(tool_call.name, payload),
+        query=query,
+        target_claim=_target_claim_from_args_or_packet(args, packet),
+    )
+
+
+def _attempt_blocker_type(result: ToolResult) -> str:
+    normalized = _normalize_progress_fragment(result.content, max_len=240)
+    if "captcha" in normalized:
+        return "captcha"
+    if "manual" in normalized or "browser" in normalized or "portal" in normalized:
+        return "manual_portal"
+    if "login" in normalized or "sign in" in normalized:
+        return "login_required"
+    if "rate limit" in normalized or "429" in normalized:
+        return "rate_limited"
+    if "no results" in normalized or "not found" in normalized:
+        return "no_results"
+    if result.is_error or normalized.startswith("blocked"):
+        return "tool_blocked"
+    return "attempted"
+
+
+def _blocked_repeated_attempt_result(tool_call: ToolCall, fingerprint: AttemptFingerprint) -> ToolResult:
+    return ToolResult(
+        tool_call_id=tool_call.id,
+        name=tool_call.name,
+        content=(
+            "BLOCKED: repeated attempt fingerprint reached the stop condition. "
+            f"{fingerprint.signature}. Select a materially different tactic "
+            "(direct API, manual handoff, or PRR draft) or synthesize the current conclusion."
+        ),
+        is_error=True,
+    )
 
 
 def _looks_like_failed_tool_result(name: str, result: ToolResult) -> bool:
@@ -547,9 +729,11 @@ def _suggest_next_actions(
     if "finalization_churn" in blockers:
         actions.append("Rewrite the answer from completed work only instead of calling more tools or creating more files.")
     if recent_previews:
-        actions.append("Turn the completed findings below into a concrete artifact or summary before resuming deeper work.")
-    actions.append(f"Resume the objective with a narrower next slice: {objective}")
-    return actions[:4]
+        actions.append("agent_ready: Synthesize the completed findings into conclusion cards before any new evidence gathering.")
+    actions.append(f"agent_ready: Select one narrower successor task derived from the stopped objective, not the broad objective itself: {objective}")
+    actions.append("human_required: If a portal, CAPTCHA, login, or manual lookup blocks automation, write exact handoff instructions.")
+    actions.append("prr_required: If records cannot be accessed automatically, draft the smallest public-records request for the missing source.")
+    return actions[:3]
 
 
 def _collect_recent_completed_previews(
@@ -566,6 +750,122 @@ def _collect_recent_completed_previews(
     return recent_previews
 
 
+def _packet_claim_snapshot(packet: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(packet, dict):
+        return {
+            "evidence_ids": set(),
+            "status_by_claim": {},
+            "confidence_by_claim": {},
+            "blocker_ids": set(),
+            "action_signatures": set(),
+        }
+    findings = packet.get("findings", {}) if isinstance(packet.get("findings"), dict) else {}
+    evidence_ids = set(str(item) for item in packet.get("evidence_index", {}).keys())
+    status_by_claim: dict[str, str] = {}
+    confidence_by_claim: dict[str, str] = {}
+    for status, items in findings.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            claim_id = str(item.get("id") or "").strip()
+            if not claim_id:
+                continue
+            status_by_claim[claim_id] = str(item.get("status") or status)
+            confidence_by_claim[claim_id] = json.dumps(item.get("confidence"), sort_keys=True, ensure_ascii=True)
+            evidence_ids.update(str(eid) for eid in item.get("support_evidence_ids", []) if eid is not None)
+            evidence_ids.update(str(eid) for eid in item.get("contradiction_evidence_ids", []) if eid is not None)
+            evidence_ids.update(str(eid) for eid in item.get("evidence_ids", []) if eid is not None)
+
+    blocker_ids: set[str] = set()
+    action_signatures: set[str] = set()
+    for action in packet.get("candidate_actions", []):
+        if not isinstance(action, dict):
+            continue
+        action_signatures.add(
+            json.dumps(
+                {
+                    "id": action.get("id"),
+                    "action_type": action.get("action_type"),
+                    "target_claim_ids": action.get("target_claim_ids"),
+                    "required_sources": action.get("required_sources"),
+                },
+                sort_keys=True,
+                ensure_ascii=True,
+            )
+        )
+        for gap in action.get("evidence_gap_refs", []):
+            if isinstance(gap, dict) and gap.get("gap_id"):
+                blocker_ids.add(str(gap["gap_id"]))
+    return {
+        "evidence_ids": evidence_ids,
+        "status_by_claim": status_by_claim,
+        "confidence_by_claim": confidence_by_claim,
+        "blocker_ids": blocker_ids,
+        "action_signatures": action_signatures,
+    }
+
+
+def _compute_marginal_evidence_yield(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any]:
+    before_snapshot = _packet_claim_snapshot(before)
+    after_snapshot = _packet_claim_snapshot(after)
+    new_evidence_ids = sorted(after_snapshot["evidence_ids"] - before_snapshot["evidence_ids"])
+    status_changed = before_snapshot["status_by_claim"] != after_snapshot["status_by_claim"]
+    confidence_changed = before_snapshot["confidence_by_claim"] != after_snapshot["confidence_by_claim"]
+    blocker_resolved = bool(before_snapshot["blocker_ids"] - after_snapshot["blocker_ids"])
+    next_action_changed = before_snapshot["action_signatures"] != after_snapshot["action_signatures"]
+    claim_relevant_delta = any(
+        (
+            new_evidence_ids,
+            status_changed,
+            confidence_changed,
+            blocker_resolved,
+            next_action_changed,
+        )
+    )
+    return {
+        "new_evidence_ids_added": new_evidence_ids,
+        "new_evidence_id_count": len(new_evidence_ids),
+        "claim_status_changed": status_changed,
+        "confidence_changed": confidence_changed,
+        "blocker_resolved": blocker_resolved,
+        "next_action_changed": next_action_changed,
+        "claim_relevant_delta": claim_relevant_delta,
+    }
+
+
+def _decision_closure_checkpoint_message(yield_payload: dict[str, Any]) -> str:
+    return (
+        "Mandatory synthesis checkpoint: two consecutive tool batches produced no claim-relevant delta. "
+        "Stop broadening the search and synthesize now. Assign each active claim one terminal status "
+        "(supported, contested, unsupported_after_available_sources, blocked_external, or needs_human_or_prr), "
+        "include a conclusion card, and create at most three successor tasks marked agent_ready, human_required, "
+        "or prr_required. Do not repeat the same source/tool/query tactic unless the next tactic is materially different.\n\n"
+        "Required deliverable structure:\n"
+        "## Key Judgments\n"
+        "## Supported Findings\n"
+        "## Contested Findings\n"
+        "## Unresolved Findings\n"
+        "## Conclusion Cards\n\n"
+        f"Latest marginal evidence yield:\n{json.dumps(yield_payload, indent=2, ensure_ascii=True)}"
+    )
+
+
+def _objective_with_task_contract(objective: str, acceptance_criteria: str, stop_conditions: str) -> str:
+    if not acceptance_criteria and not stop_conditions:
+        return objective
+    parts = [objective]
+    if acceptance_criteria:
+        parts.append(f"Acceptance criteria:\n{acceptance_criteria}")
+    if stop_conditions:
+        parts.append(f"Stop conditions:\n{stop_conditions}")
+    return "\n\n".join(parts)
+
+
 def _render_partial_completion(
     objective: str,
     loop_metrics: dict[str, Any],
@@ -577,13 +877,9 @@ def _render_partial_completion(
     completed = recent_previews or ["The run gathered additional context but did not converge on a final artifact before the bounded limit."]
     reason = str(loop_metrics.get("termination_reason", "budget_no_progress"))
     if reason == "finalization_stall":
-        remaining = "Rewrite the final answer from the completed work below only. Do not call more tools or create more files."
+        remaining = "Close this run with conclusion cards from the completed work only. Do not call more tools or create more files."
     else:
-        remaining = (
-            "Finish the deliverable using the completed work below and avoid repeating the stalled loop."
-            if recent_previews
-            else "Finish the deliverable with a narrower plan or a different tactic."
-        )
+        remaining = "Close this run with a conclusion card, then choose exactly one successor task before continuing."
     header = (
         f"Partial completion for objective: {objective}\n"
         f"Stopped after {int(loop_metrics.get('steps', 0))} steps "
@@ -596,9 +892,20 @@ def _render_partial_completion(
         f"{header}\n\n"
         "Completed work:\n"
         f"{completed_block}\n\n"
+        "Conclusion card required now:\n"
+        "- Claim: (active claim ID or objective slice)\n"
+        "- Status: supported / contested / unsupported_after_available_sources / blocked_external / needs_human_or_prr\n"
+        "- Confidence: (current confidence)\n"
+        "- Evidence used: (evidence IDs or completed-work notes)\n"
+        "- Limiting evidence: (missing/contradictory/blocking evidence)\n"
+        "- What was attempted: (tool/source summary)\n"
+        "- Why stopping now: (budget, repeated attempt, blocker, or terminal decision)\n"
+        "- Next best action: (one successor task)\n"
+        "- Human/PRR needed: (yes/no and why)\n\n"
         "Remaining work:\n"
-        f"- {remaining}\n\n"
-        "Suggested next actions:\n"
+        f"- {remaining}\n"
+        "- Do not resume this same broad objective. Select one successor task below.\n\n"
+        "Successor tasks (choose one before continuing):\n"
         f"{next_actions_block}"
     )
 
@@ -677,7 +984,7 @@ class RLMEngine:
             "Your next action must be exactly one subtask(objective=..., "
         )
         if self.config.acceptance_criteria:
-            requirement += 'acceptance_criteria="...").'
+            requirement += 'acceptance_criteria="...", stop_conditions="...").'
         else:
             requirement += "...)."
         return requirement
@@ -904,7 +1211,7 @@ class RLMEngine:
         sections = ["Key Judgments"]
         if _objective_requires_strategic_implications(objective):
             sections.append("Strategic Implications")
-        sections.extend(["Supported Findings", "Contested Findings", "Unresolved Findings"])
+        sections.extend(["Supported Findings", "Contested Findings", "Unresolved Findings", "Conclusion Cards"])
         return sections
 
     def _investigation_deliverable_issue(self, text: str, objective: str) -> str | None:
@@ -924,6 +1231,8 @@ class RLMEngine:
                     return "JSON deliverable is missing `strategic_implications`"
                 if not _json_sequence_has_content(parsed_json.get("strategic_implications")):
                     return "JSON deliverable has an empty `strategic_implications` field"
+            if not _json_sequence_has_content(parsed_json.get("conclusion_cards")):
+                return "JSON deliverable has an empty `conclusion_cards` field"
             return None
 
         section_positions: dict[str, int] = {}
@@ -934,6 +1243,11 @@ class RLMEngine:
             section_positions[heading] = match.start()
             if not _markdown_section_body(stripped, heading):
                 return f"Markdown deliverable has an empty `## {heading}` section"
+
+        conclusion_body = _markdown_section_body(stripped, "Conclusion Cards")
+        for field in _CONCLUSION_CARD_MARKDOWN_FIELDS:
+            if not re.search(rf"(?im)\b{re.escape(field)}\s*:", conclusion_body):
+                return f"Conclusion Cards section is missing `{field}:`"
 
         ordered_sections = self._investigation_required_sections(objective)
         for left, right in zip(ordered_sections, ordered_sections[1:]):
@@ -1052,7 +1366,8 @@ class RLMEngine:
             "Required deliverable structure:\n"
             f"{chr(10).join(sections)}\n\n"
             "Translate major connections into objective-facing judgments. "
-            "If the evidence is still insufficient, say that explicitly inside Key Judgments or Strategic Implications."
+            "If the evidence is still insufficient, say that explicitly inside Key Judgments or Strategic Implications. "
+            "Use terminal claim statuses and fill the Conclusion Cards fields instead of asking for one more similar search."
         )
 
     def _build_refreshed_reasoning_user_message(
@@ -1170,7 +1485,8 @@ class RLMEngine:
                     "- ## Supported Findings\n"
                     "- ## Contested Findings\n"
                     "- ## Unresolved Findings\n"
-                    "If you return JSON instead, include non-empty `key_judgments` and `strategic_implications` fields plus supported/contested/unresolved finding arrays."
+                    "- ## Conclusion Cards\n"
+                    "If you return JSON instead, include non-empty `key_judgments`, `strategic_implications`, and `conclusion_cards` fields plus supported/contested/unresolved finding arrays."
                 )
             else:
                 deliverable_contract = (
@@ -1179,7 +1495,8 @@ class RLMEngine:
                     "- ## Supported Findings\n"
                     "- ## Contested Findings\n"
                     "- ## Unresolved Findings\n"
-                    "If you return JSON instead, include a non-empty `key_judgments` field plus supported/contested/unresolved finding arrays."
+                    "- ## Conclusion Cards\n"
+                    "If you return JSON instead, include non-empty `key_judgments` and `conclusion_cards` fields plus supported/contested/unresolved finding arrays."
                 )
         else:
             deliverable_contract = (
@@ -1203,6 +1520,8 @@ class RLMEngine:
             "Remove meta/process/future-tense language. "
             "Do not mention the failure label, rescue process, or rejected candidate. "
             "If evidence is insufficient, state the strongest known blocked or partial result. "
+            "Every conclusion card must include Claim, Status, Confidence, Evidence used, Limiting evidence, "
+            "What was attempted, Why stopping now, Next best action, and Human/PRR needed. "
             "Do not add TODOs, next steps, new claims, new verification, or new work."
         )
 
@@ -1424,6 +1743,8 @@ class RLMEngine:
             "extension_eligible_checks": 0,
             "extension_denials_no_progress": 0,
             "extension_denials_cap": 0,
+            "claim_no_delta_streak": 0,
+            "decision_closure_checkpoints": 0,
             "termination_reason": "",
         }
         step_records: list[StepProgressRecord] = []
@@ -1433,6 +1754,9 @@ class RLMEngine:
         finalizer_rescue_used = False
         last_rejected_final_candidate = ""
         synthesis_checkpoint_sent = False
+        claim_no_delta_streak = 0
+        attempt_counts: dict[str, int] = {}
+        attempt_blockers: dict[str, set[str]] = {}
         active_step_budget = self.config.max_steps_per_call
         max_total_steps = self.config.max_steps_per_call + (
             self.config.budget_extension_block_steps * self.config.budget_extension_max_blocks
@@ -1864,12 +2188,26 @@ class RLMEngine:
             indexed_results: dict[int, tuple[ToolResult, bool]] = {}
 
             for idx, tc in sequential:
-                result_entry, is_final_entry = self._run_one_tool(
-                    tc=tc, depth=depth, step=step, objective=objective,
-                    context=context, on_event=on_event, on_step=on_step,
-                    deadline=deadline, current_model=model,
-                    replay_logger=replay_logger,
+                fingerprint = (
+                    _attempt_fingerprint(tc, current_question_reasoning_packet)
+                    if current_question_reasoning_packet is not None
+                    else None
                 )
+                if fingerprint is not None and attempt_counts.get(fingerprint.signature, 0) >= 2:
+                    result_entry = _blocked_repeated_attempt_result(tc, fingerprint)
+                    is_final_entry = False
+                else:
+                    result_entry, is_final_entry = self._run_one_tool(
+                        tc=tc, depth=depth, step=step, objective=objective,
+                        context=context, on_event=on_event, on_step=on_step,
+                        deadline=deadline, current_model=model,
+                        replay_logger=replay_logger,
+                    )
+                    if fingerprint is not None:
+                        attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
+                        attempt_blockers.setdefault(fingerprint.signature, set()).add(
+                            _attempt_blocker_type(result_entry)
+                        )
                 indexed_results[idx] = (result_entry, is_final_entry)
                 if is_final_entry:
                     final_answer = result_entry.content
@@ -1878,12 +2216,23 @@ class RLMEngine:
             if parallel and final_answer is None:
                 group_id = f"d{depth}-s{step}-{time.monotonic_ns()}"
                 use_parallel_owner = len(parallel) > 1
+                runnable_parallel: list[tuple[int, ToolCall, AttemptFingerprint | None]] = []
+                for idx, tc in parallel:
+                    fingerprint = (
+                        _attempt_fingerprint(tc, current_question_reasoning_packet)
+                        if current_question_reasoning_packet is not None
+                        else None
+                    )
+                    if fingerprint is not None and attempt_counts.get(fingerprint.signature, 0) >= 2:
+                        indexed_results[idx] = (_blocked_repeated_attempt_result(tc, fingerprint), False)
+                    else:
+                        runnable_parallel.append((idx, tc, fingerprint))
                 begin_group = getattr(self.tools, "begin_parallel_write_group", None)
                 end_group = getattr(self.tools, "end_parallel_write_group", None)
                 if callable(begin_group):
                     begin_group(group_id)
                 try:
-                    with ThreadPoolExecutor(max_workers=len(parallel)) as pool:
+                    with ThreadPoolExecutor(max_workers=max(1, len(runnable_parallel))) as pool:
                         futures = {
                             pool.submit(
                                 self._run_one_tool,
@@ -1893,13 +2242,18 @@ class RLMEngine:
                                 replay_logger=replay_logger,
                                 parallel_group_id=group_id,
                                 parallel_owner=(f"{tc.id or 'tc'}:{idx}" if use_parallel_owner else None),
-                            ): idx
-                            for idx, tc in parallel
+                            ): (idx, fingerprint)
+                            for idx, tc, fingerprint in runnable_parallel
                         }
                         for future in futures:
-                            idx = futures[future]
+                            idx, fingerprint = futures[future]
                             result_entry, is_final_entry = future.result()
                             indexed_results[idx] = (result_entry, is_final_entry)
+                            if fingerprint is not None:
+                                attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
+                                attempt_blockers.setdefault(fingerprint.signature, set()).add(
+                                    _attempt_blocker_type(result_entry)
+                                )
                 finally:
                     if callable(end_group):
                         end_group(group_id)
@@ -1965,14 +2319,18 @@ class RLMEngine:
                 if has_recon and all(name in _RECON_TOOL_NAMES for name in tc_names)
                 else "iterate"
             )
-            step_records.append(
-                _build_step_progress_record(
-                    step=step,
-                    phase=phase_name,
-                    tool_calls=turn.tool_calls,
-                    results=results,
-                )
+            step_record = _build_step_progress_record(
+                step=step,
+                phase=phase_name,
+                tool_calls=turn.tool_calls,
+                results=results,
             )
+            if current_question_reasoning_packet is not None:
+                step_record.attempt_signatures = {
+                    fingerprint.signature_with_blocker(_attempt_blocker_type(result))
+                    for tc, result in zip(turn.tool_calls, results)
+                    if (fingerprint := _attempt_fingerprint(tc, current_question_reasoning_packet)) is not None
+                }
 
             if (
                 final_answer is None
@@ -2026,15 +2384,11 @@ class RLMEngine:
 
             model.append_tool_results(conversation, results)
 
-            has_successful_artifact = any(
-                tc.name in _ARTIFACT_TOOL_NAMES and not _looks_like_failed_tool_result(tc.name, result)
-                for tc, result in zip(turn.tool_calls, results)
-            )
             if (
                 depth == 0
                 and investigation_context_active
-                and has_successful_artifact
             ):
+                before_packet = current_question_reasoning_packet
                 (
                     current_question_reasoning_packet,
                     current_retrieval_packet,
@@ -2047,6 +2401,46 @@ class RLMEngine:
                     retrieval_packet=current_retrieval_packet,
                     last_state_mtime_ns=last_reasoning_state_mtime_ns,
                     on_event=on_event,
+                )
+                yield_payload = _compute_marginal_evidence_yield(
+                    before_packet,
+                    current_question_reasoning_packet,
+                )
+                step_record.marginal_evidence_yield = yield_payload
+                loop_metrics["last_marginal_evidence_yield"] = yield_payload
+                if yield_payload["claim_relevant_delta"]:
+                    claim_no_delta_streak = 0
+                else:
+                    claim_no_delta_streak += 1
+                loop_metrics["claim_no_delta_streak"] = claim_no_delta_streak
+                self._emit(
+                    f"[d{depth}/s{step}] marginal evidence yield: {json.dumps(yield_payload, sort_keys=True)}",
+                    on_event,
+                )
+
+            step_records.append(step_record)
+
+            if (
+                final_answer is None
+                and depth == 0
+                and investigation_context_active
+                and claim_no_delta_streak >= 2
+                and not synthesis_checkpoint_sent
+                and _has_reasoning_packet_content(current_question_reasoning_packet)
+            ):
+                synthesis_checkpoint_sent = True
+                loop_metrics["decision_closure_checkpoints"] = int(
+                    loop_metrics.get("decision_closure_checkpoints", 0)
+                ) + 1
+                self._append_user_message(
+                    conversation,
+                    _decision_closure_checkpoint_message(
+                        loop_metrics.get("last_marginal_evidence_yield", {})
+                    ),
+                )
+                self._emit(
+                    f"[d{depth}/s{step}] forced decision-closure synthesis after two no-delta tool batches",
+                    on_event,
                 )
 
             should_trigger_synthesis_checkpoint = (
@@ -2556,6 +2950,12 @@ class RLMEngine:
                     "subtask requires acceptance_criteria when acceptance criteria mode is enabled. "
                     "Provide specific, verifiable criteria for judging the result."
                 )
+            stop_conditions = str(args.get("stop_conditions", "") or "").strip()
+            if self.config.acceptance_criteria and not stop_conditions:
+                return False, (
+                    "subtask requires stop_conditions when acceptance criteria mode is enabled. "
+                    "Provide concrete stop rules for repeated attempts, blockers, manual handoffs, or PRRs."
+                )
 
             # Sub-model routing
             requested_model_name = args.get("model")
@@ -2590,8 +2990,9 @@ class RLMEngine:
                 replay_logger.child(depth, step, owner=child_conversation_owner)
                 if replay_logger else None
             )
+            child_objective = _objective_with_task_contract(objective, criteria, stop_conditions)
             subtask_result = self._solve_recursive(
-                objective=objective,
+                objective=child_objective,
                 depth=depth + 1,
                 context=context,
                 on_event=on_event,
@@ -2619,6 +3020,12 @@ class RLMEngine:
                 return False, (
                     "execute requires acceptance_criteria when acceptance criteria mode is enabled. "
                     "Provide specific, verifiable criteria for judging the result."
+                )
+            stop_conditions = str(args.get("stop_conditions", "") or "").strip()
+            if self.config.acceptance_criteria and not stop_conditions:
+                return False, (
+                    "execute requires stop_conditions when acceptance criteria mode is enabled. "
+                    "Provide concrete stop rules for repeated attempts, blockers, manual handoffs, or PRRs."
                 )
             if depth >= self.config.max_depth:
                 return False, "Max recursion depth reached; cannot run execute."
@@ -2649,8 +3056,9 @@ class RLMEngine:
                 replay_logger.child(depth, step, owner=child_conversation_owner)
                 if replay_logger else None
             )
+            child_objective = _objective_with_task_contract(objective, criteria, stop_conditions)
             exec_result = self._solve_recursive(
-                objective=objective,
+                objective=child_objective,
                 depth=depth + 1,
                 context=context,
                 on_event=on_event,

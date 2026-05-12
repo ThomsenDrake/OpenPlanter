@@ -66,7 +66,17 @@ def _has_reasoning_content(packet: dict[str, Any]) -> bool:
         return True
     if not isinstance(findings, dict):
         return False
-    return any(findings.get(key) for key in ("supported", "contested", "unresolved"))
+    return any(
+        findings.get(key)
+        for key in (
+            "supported",
+            "contested",
+            "unsupported_after_available_sources",
+            "blocked_external",
+            "needs_human_or_prr",
+            "unresolved",
+        )
+    )
 
 
 def _result_status(result: str, loop_metrics: dict[str, Any]) -> str:

@@ -11,6 +11,13 @@ const VERY_LOW_CONFIDENCE_THRESHOLD: f64 = 0.40;
 const MAX_CANDIDATE_ACTIONS: usize = 24;
 const REQUIRED_EVIDENCE_COUNT: usize = 1;
 const PLANNER_GENERATED_BY: &str = "question_reasoning_packet.v1";
+const CLAIM_TERMINAL_STATUSES: &[&str] = &[
+    "supported",
+    "contested",
+    "unsupported_after_available_sources",
+    "blocked_external",
+    "needs_human_or_prr",
+];
 const LEGACY_KNOWN_KEYS: &[&str] = &[
     "session_id",
     "saved_at",
@@ -376,6 +383,9 @@ pub fn build_question_reasoning_packet(
 
     let mut supported = Vec::new();
     let mut contested = Vec::new();
+    let mut unsupported_after_available_sources = Vec::new();
+    let mut blocked_external = Vec::new();
+    let mut needs_human_or_prr = Vec::new();
     let mut unresolved = Vec::new();
     let mut contradictions = Vec::new();
 
@@ -383,11 +393,7 @@ pub fn build_question_reasoning_packet(
         let Some(claim) = raw_claim.as_object() else {
             continue;
         };
-        let claim_status = claim
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unresolved")
-            .to_ascii_lowercase();
+        let claim_status = normalize_claim_status(claim.get("status"));
         let support_ids = claim_support_evidence_ids(claim, max_evidence_per_item);
         let contradiction_ids = claim_contradiction_evidence_ids(claim, max_evidence_per_item);
         let has_contradictions = !contradiction_ids.is_empty();
@@ -419,17 +425,31 @@ pub fn build_question_reasoning_packet(
 
         if claim_status == "supported" {
             supported.push(claim_summary);
-        } else if claim_status == "contested" || has_contradictions {
+        } else if claim_status == "contested"
+            || (has_contradictions && !is_terminal_claim_status(&claim_status))
+        {
             contested.push(claim_summary);
+        } else if claim_status == "unsupported_after_available_sources" {
+            unsupported_after_available_sources.push(claim_summary);
+        } else if claim_status == "blocked_external" {
+            blocked_external.push(claim_summary);
+        } else if claim_status == "needs_human_or_prr" {
+            needs_human_or_prr.push(claim_summary);
         } else {
             unresolved.push(claim_summary);
         }
     }
 
     let mut evidence_index = Map::new();
-    for evidence_id in
-        collect_evidence_ids(&[&unresolved_questions, &supported, &contested, &unresolved])
-    {
+    for evidence_id in collect_evidence_ids(&[
+        &unresolved_questions,
+        &supported,
+        &contested,
+        &unsupported_after_available_sources,
+        &blocked_external,
+        &needs_human_or_prr,
+        &unresolved,
+    ]) {
         let Some(record) = state.evidence.get(&evidence_id).and_then(Value::as_object) else {
             continue;
         };
@@ -457,13 +477,17 @@ pub fn build_question_reasoning_packet(
             "gather_discriminating_evidence",
             "update_claim_status_and_confidence",
             "record_contradictions",
-            "synthesize_supported_contested_unresolved",
+            "synthesize_decision_closure",
         ],
+        "claim_terminal_statuses": CLAIM_TERMINAL_STATUSES,
         "focus_question_ids": focus_question_ids,
         "unresolved_questions": unresolved_questions,
         "findings": {
             "supported": supported,
             "contested": contested,
+            "unsupported_after_available_sources": unsupported_after_available_sources,
+            "blocked_external": blocked_external,
+            "needs_human_or_prr": needs_human_or_prr,
             "unresolved": unresolved,
         },
         "contradictions": contradictions,
@@ -500,7 +524,16 @@ pub fn has_reasoning_content(packet: &Value) -> bool {
     obj.get("findings")
         .and_then(Value::as_object)
         .is_some_and(|findings| {
-            ["supported", "contested", "unresolved"].iter().any(|key| {
+            [
+                "supported",
+                "contested",
+                "unsupported_after_available_sources",
+                "blocked_external",
+                "needs_human_or_prr",
+                "unresolved",
+            ]
+            .iter()
+            .any(|key| {
                 findings
                     .get(*key)
                     .and_then(Value::as_array)
@@ -590,7 +623,7 @@ fn build_candidate_actions(
         );
         let action_id = format!("ca_q_{question_id}");
         if seen.insert(action_id.clone()) {
-            actions.push(serde_json::json!({
+            let mut action = serde_json::json!({
                 "id": action_id,
                 "action_type": action_type,
                 "status": "proposed",
@@ -619,7 +652,9 @@ fn build_candidate_actions(
                 "evidence_gap_refs": evidence_gap_refs,
                 "ontology_object_refs": ontology_object_refs,
                 "generated_by": PLANNER_GENERATED_BY,
-            }));
+            });
+            attach_planning_contract(&mut action);
+            actions.push(action);
         }
     }
 
@@ -628,7 +663,7 @@ fn build_candidate_actions(
             continue;
         };
         let claim_status = claim_status(claim);
-        if matches!(claim_status.as_str(), "retracted" | "resolved" | "closed") {
+        if is_terminal_claim_status(&claim_status) {
             continue;
         }
         let confidence = claim_confidence(claim);
@@ -684,7 +719,7 @@ fn build_candidate_actions(
         let priority = claim_candidate_priority(&claim_status, confidence);
         let action_id = format!("ca_c_{claim_id}");
         if seen.insert(action_id.clone()) {
-            actions.push(serde_json::json!({
+            let mut action = serde_json::json!({
                 "id": action_id,
                 "action_type": "verify_claim",
                 "status": "proposed",
@@ -713,7 +748,9 @@ fn build_candidate_actions(
                 "evidence_gap_refs": evidence_gap_refs,
                 "ontology_object_refs": ontology_object_refs,
                 "generated_by": PLANNER_GENERATED_BY,
-            }));
+            });
+            attach_planning_contract(&mut action);
+            actions.push(action);
         }
     }
 
@@ -769,11 +806,44 @@ fn claim_candidate_priority(claim_status: &str, confidence: Option<f64>) -> &'st
 }
 
 fn claim_status(claim: &Map<String, Value>) -> String {
-    claim
-        .get("status")
+    normalize_claim_status(claim.get("status"))
+}
+
+fn normalize_claim_status(value: Option<&Value>) -> String {
+    let raw = value
         .and_then(Value::as_str)
         .unwrap_or("unresolved")
         .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    let normalized = raw
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    match normalized.as_str() {
+        "unsupported"
+        | "unsupported_after_sources"
+        | "unsupported_after_available_source"
+        | "not_supported_by_available_sources" => "unsupported_after_available_sources".to_string(),
+        "blocked"
+        | "external_blocked"
+        | "blocked_by_captcha"
+        | "blocked_by_manual_portal"
+        | "captcha_blocked"
+        | "manual_portal_blocked" => "blocked_external".to_string(),
+        "human_required" | "needs_human" | "needs_prr" | "prr_required" => {
+            "needs_human_or_prr".to_string()
+        }
+        "" => "unresolved".to_string(),
+        _ => normalized,
+    }
+}
+
+fn is_terminal_claim_status(status: &str) -> bool {
+    CLAIM_TERMINAL_STATUSES.contains(&status)
+        || matches!(status, "retracted" | "resolved" | "closed")
 }
 
 fn claim_confidence(claim: &Map<String, Value>) -> Option<f64> {
@@ -782,6 +852,71 @@ fn claim_confidence(claim: &Map<String, Value>) -> Option<f64> {
             .get("confidence")
             .or_else(|| claim.get("confidence_score")),
     )
+}
+
+fn attach_planning_contract(action: &mut Value) {
+    let acceptance_criteria = default_acceptance_criteria(action);
+    let stop_conditions = default_stop_conditions(action);
+    if let Some(obj) = action.as_object_mut() {
+        obj.insert(
+            "acceptance_criteria".to_string(),
+            serde_json::json!(acceptance_criteria),
+        );
+        obj.insert(
+            "stop_conditions".to_string(),
+            serde_json::json!(stop_conditions),
+        );
+    }
+}
+
+fn default_acceptance_criteria(action: &Value) -> Vec<String> {
+    let claim_ids = id_list(action.get("target_claim_ids"));
+    let question_ids = id_list(action.get("target_question_ids"));
+    let sources = id_list(action.get("required_sources"));
+    let mut criteria = Vec::new();
+    if !claim_ids.is_empty() {
+        criteria.push(format!(
+            "Each target claim has one terminal status: {}.",
+            CLAIM_TERMINAL_STATUSES.join(", ")
+        ));
+        criteria.push(
+            "Terminal claim decisions cite support, contradiction, or limiting evidence IDs."
+                .to_string(),
+        );
+    } else if !question_ids.is_empty() {
+        criteria.push(
+            "The target question is resolved or explicitly blocked with linked claim/evidence IDs."
+                .to_string(),
+        );
+    } else {
+        criteria.push(
+            "The action produces claim-relevant evidence IDs or a terminal blocked/needs-human decision."
+                .to_string(),
+        );
+    }
+    if !sources.is_empty() {
+        criteria.push(format!(
+            "Required sources attempted or satisfied: {}.",
+            sources.into_iter().take(4).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    criteria
+}
+
+fn default_stop_conditions(action: &Value) -> Vec<String> {
+    let claim_ids = id_list(action.get("target_claim_ids"));
+    let target = if claim_ids.is_empty() {
+        "the target question".to_string()
+    } else {
+        claim_ids.join(", ")
+    };
+    vec![
+        format!(
+            "Two equivalent source/tool/query attempts for {target} add no new evidence IDs and do not change claim status, confidence, blocker state, or next action."
+        ),
+        "A source requires CAPTCHA, manual portal navigation, login-only access, or public-records request; mark blocked_external or needs_human_or_prr and write manual/PRR instructions.".to_string(),
+        "A terminal claim status can be assigned from available sources; stop gathering and synthesize a conclusion card.".to_string(),
+    ]
 }
 
 fn find_question_record<'a>(
@@ -1718,21 +1853,15 @@ mod tests {
             Value::String("ca_q_q_2".to_string())
         );
         assert_eq!(
-            packet["candidate_actions"][2]["reason_codes"],
-            serde_json::json!(["claim_low_confidence"])
-        );
-        assert_eq!(
-            packet["candidate_actions"][2]["evidence_gap_refs"][0]["kind"],
-            Value::String("low_confidence".to_string())
-        );
-        assert_eq!(
-            packet["candidate_actions"][3]["id"],
+            packet["candidate_actions"][2]["id"],
             Value::String("ca_c_cl_3".to_string())
         );
         assert_eq!(
-            packet["candidate_actions"][3]["evidence_gap_refs"][0]["kind"],
+            packet["candidate_actions"][2]["evidence_gap_refs"][0]["kind"],
             Value::String("missing_counter_evidence".to_string())
         );
+        assert!(packet["candidate_actions"][2]["acceptance_criteria"].is_array());
+        assert!(packet["candidate_actions"][2]["stop_conditions"].is_array());
         assert!(has_reasoning_content(&packet));
     }
 
@@ -2111,21 +2240,17 @@ mod tests {
             .expect("question action");
         let claim_action = actions
             .iter()
-            .find(|action| action.get("id") == Some(&Value::String("ca_c_cl_alias".to_string())))
-            .expect("claim action");
+            .find(|action| action.get("id") == Some(&Value::String("ca_c_cl_alias".to_string())));
 
         assert_eq!(
             question_action["required_sources"],
             serde_json::json!(["https://contra.test", "https://support.test"])
         );
-        assert_eq!(
-            claim_action["required_sources"],
-            serde_json::json!(["https://contra.test", "https://support.test"])
-        );
+        assert!(claim_action.is_none());
     }
 
     #[test]
-    fn candidate_actions_skip_resolved_and_closed_claims() {
+    fn candidate_actions_skip_terminal_and_closed_claims() {
         let mut state = InvestigationState::new("sid");
         state.claims.insert(
             "cl_resolved".to_string(),
@@ -2156,11 +2281,21 @@ mod tests {
             }),
         );
         state.claims.insert(
+            "cl_supported_low".to_string(),
+            serde_json::json!({
+                "id": "cl_supported_low",
+                "claim_text": "Low-confidence but terminal supported claim",
+                "status": "supported",
+                "confidence": 0.2,
+                "support_evidence_ids": ["ev_supported_low"],
+            }),
+        );
+        state.claims.insert(
             "cl_control".to_string(),
             serde_json::json!({
                 "id": "cl_control",
-                "claim_text": "Low-confidence supported claim",
-                "status": "supported",
+                "claim_text": "Low-confidence proposed claim",
+                "status": "proposed",
                 "confidence": 0.2,
                 "support_evidence_ids": ["ev_control"],
             }),
@@ -2179,6 +2314,7 @@ mod tests {
         assert!(!ids.contains(&"ca_c_cl_resolved".to_string()));
         assert!(!ids.contains(&"ca_c_cl_closed".to_string()));
         assert!(!ids.contains(&"ca_c_cl_retracted".to_string()));
+        assert!(!ids.contains(&"ca_c_cl_supported_low".to_string()));
     }
 
     #[test]

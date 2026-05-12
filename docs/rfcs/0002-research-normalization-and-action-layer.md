@@ -97,14 +97,17 @@ All runtimes MUST use RFC 0001 status vocabularies when persisting canonical obj
 
 #### Canonical claim statuses
 
-Claims MUST use:
+Claim runs MUST close each active claim with one terminal decision status:
 
-- `proposed`
 - `supported`
 - `contested`
-- `retracted`
+- `unsupported_after_available_sources`
+- `blocked_external`
+- `needs_human_or_prr`
 
-This RFC does **not** introduce `disputed` or `rejected` as canonical claim statuses.
+`proposed` MAY be used only as an intake or draft state before a claim run starts. It MUST NOT remain as the final status for an active claim run. `retracted` remains a historical closure state for withdrawn claims, but normal investigation output should use the terminal decision statuses above.
+
+This RFC does **not** introduce `disputed` or `rejected` as canonical claim statuses. Source blockers such as CAPTCHA, login-only/manual portals, or PRR-only access are valid terminal conclusions for the affected claim slice via `blocked_external` or `needs_human_or_prr`; they are not permission to retry the same probe indefinitely.
 
 #### Canonical question statuses
 
@@ -375,6 +378,9 @@ Claims generated from normalized evidence MUST persist as RFC 0001 `claims` and 
 
 - `supported` requires at least one support evidence reference;
 - `contested` is used when contradictory evidence materially exists;
+- `unsupported_after_available_sources` is used when available public records do not support the claim after required sources and stop conditions have been satisfied;
+- `blocked_external` is used when automation cannot advance because the next source requires CAPTCHA, login-only/manual portal work, or an equivalent external blocker;
+- `needs_human_or_prr` is used when the next productive step is human/manual lookup or a public-records request;
 - `retracted` is used when the claim should no longer participate in active reasoning.
 
 ### 9.2 Question creation triggers
@@ -452,9 +458,9 @@ Task:
       estimated_cost: <normalized scalar or structured estimate>
       payoff_score: <normalized scalar>
     suggested_tools: [web_search, fetch_url, read_file, ...]
-    acceptance_criteria:
+    acceptance_criteria:   # required for every task
       - <completion criterion>
-    stop_conditions:
+    stop_conditions:       # required for every task
       - <stop condition>
     generated_by: <planner component + version>
     generated_at: <UTC>

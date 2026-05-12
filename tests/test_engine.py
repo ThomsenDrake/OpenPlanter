@@ -29,6 +29,18 @@ def _investigation_report(*, strategic: bool = False) -> str:
         "## Supported Findings\n- supported-1: Evidence-backed finding.",
         "## Contested Findings\n- None.",
         "## Unresolved Findings\n- None.",
+        (
+            "## Conclusion Cards\n"
+            "- Claim: cl_1\n"
+            "  Status: supported\n"
+            "  Confidence: medium\n"
+            "  Evidence used: ev_1\n"
+            "  Limiting evidence: none\n"
+            "  What was attempted: typed evidence review\n"
+            "  Why stopping now: terminal claim status assigned\n"
+            "  Next best action: none\n"
+            "  Human/PRR needed: no"
+        ),
     ])
     return "\n\n".join(sections)
 
@@ -309,6 +321,53 @@ class EngineTests(unittest.TestCase):
                 "expected policy block observation in context",
             )
 
+    def test_claim_run_blocks_repeated_attempt_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "source.txt").write_text("same evidence\n", encoding="utf-8")
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=6, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("read_file", path="source.txt")]),
+                    ModelTurn(tool_calls=[_tc("read_file", path="source.txt")]),
+                    ModelTurn(tool_calls=[_tc("read_file", path="source.txt")]),
+                    ModelTurn(text=_investigation_report(), stop_reason="end_turn"),
+                ]
+            )
+            packet = {
+                "reasoning_mode": "question_centric",
+                "focus_question_ids": ["q_1"],
+                "unresolved_questions": [{"id": "q_1", "question": "Open question", "claim_ids": ["cl_1"]}],
+                "findings": {
+                    "supported": [],
+                    "contested": [],
+                    "unsupported_after_available_sources": [],
+                    "blocked_external": [],
+                    "needs_human_or_prr": [],
+                    "unresolved": [{"id": "cl_1", "claim": "Needs decision"}],
+                },
+                "contradictions": [],
+                "evidence_index": {},
+                "candidate_actions": [
+                    {
+                        "id": "ca_q_q_1",
+                        "action_type": "verify_claim",
+                        "status": "proposed",
+                        "target_claim_ids": ["cl_1"],
+                    }
+                ],
+            }
+
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, ctx = engine.solve_with_context("Investigate the subject", question_reasoning_packet=packet)
+
+            self.assertEqual(result, _investigation_report())
+            self.assertTrue(
+                any("repeated attempt fingerprint reached the stop condition" in obs for obs in ctx.observations),
+                "expected claim-run repeated attempt stop observation",
+            )
+
     def test_meta_text_not_accepted_as_final_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -469,7 +528,8 @@ class REPLPromptTests(unittest.TestCase):
         self.assertIn("A final answer is a deliverable, not a progress note", prompt)
         self.assertIn("For trivial direct questions, answer directly", prompt)
         self.assertIn("QUESTION-CENTRIC REASONING", prompt)
-        self.assertIn("supported / contested / unresolved", prompt)
+        self.assertIn("supported / contested / unsupported_after_available_sources", prompt)
+        self.assertIn("blocked_external / needs_human_or_prr", prompt)
         self.assertIn("Key Judgments", prompt)
         self.assertIn("Strategic Implications", prompt)
         self.assertIn("Supported Findings", prompt)

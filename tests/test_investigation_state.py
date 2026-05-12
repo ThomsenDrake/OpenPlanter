@@ -271,7 +271,7 @@ class QuestionReasoningPacketTests(unittest.TestCase):
         self.assertIn("ev_3", packet["evidence_index"])
         self.assertEqual(
             [action["id"] for action in packet["candidate_actions"]],
-            ["ca_q_q_1", "ca_q_q_2", "ca_c_cl_2", "ca_c_cl_3"],
+            ["ca_q_q_1", "ca_q_q_2", "ca_c_cl_3"],
         )
         self.assertEqual(packet["candidate_actions"][0]["required_sources"], ["s1", "s3"])
         self.assertEqual(
@@ -280,13 +280,11 @@ class QuestionReasoningPacketTests(unittest.TestCase):
         )
         self.assertEqual(
             packet["candidate_actions"][2]["evidence_gap_refs"][0]["kind"],
-            "low_confidence",
-        )
-        self.assertEqual(
-            packet["candidate_actions"][3]["evidence_gap_refs"][0]["kind"],
             "missing_counter_evidence",
         )
-        self.assertEqual(packet["candidate_actions"][3]["required_sources"], ["s4"])
+        self.assertEqual(packet["candidate_actions"][2]["required_sources"], ["s4"])
+        self.assertIn("acceptance_criteria", packet["candidate_actions"][0])
+        self.assertIn("stop_conditions", packet["candidate_actions"][0])
         self.assertTrue(packet["candidate_actions"][0]["ontology_object_refs"])
 
     def test_build_question_reasoning_packet_emits_candidate_actions_for_missing_evidence(self) -> None:
