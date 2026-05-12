@@ -18,6 +18,7 @@ from agent.engine import (
     _compute_marginal_evidence_yield,
     _record_attempt_yield,
     _should_block_repeated_attempt,
+    _target_claim_from_args_or_packet,
 )
 from agent.prompts import build_system_prompt as _build_system_prompt
 from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel, ToolResult
@@ -430,7 +431,69 @@ class EngineTests(unittest.TestCase):
             claim_relevant_delta=True,
             attempt_low_yield_counts=counts,
         )
+        self.assertTrue(_should_block_repeated_attempt(fingerprint, counts))
+
+        _record_attempt_yield(
+            {fingerprint.signature},
+            claim_relevant_delta=True,
+            attempt_low_yield_counts=counts,
+        )
         self.assertFalse(_should_block_repeated_attempt(fingerprint, counts))
+
+    def test_attempt_fingerprint_target_claim_uses_unambiguous_packet_claim(self) -> None:
+        packet = {
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"],
+                }
+            ]
+        }
+
+        claim_id = _target_claim_from_args_or_packet({"query": "OCPA 1016 N Mills"}, packet)
+
+        self.assertEqual(claim_id, "cl_1")
+
+    def test_attempt_fingerprint_target_claim_matches_candidate_action_text(self) -> None:
+        packet = {
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"],
+                },
+                {
+                    "id": "ca_2",
+                    "description": "Gather Clerk instruments for 1024 N Mills",
+                    "target_claim_ids": ["cl_2"],
+                },
+            ]
+        }
+
+        claim_id = _target_claim_from_args_or_packet({"query": "1024 N Mills"}, packet)
+
+        self.assertEqual(claim_id, "cl_2")
+
+    def test_attempt_fingerprint_target_claim_stays_unknown_when_ambiguous(self) -> None:
+        packet = {
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"],
+                },
+                {
+                    "id": "ca_2",
+                    "description": "Gather Clerk instruments for 1024 N Mills",
+                    "target_claim_ids": ["cl_2"],
+                },
+            ]
+        }
+
+        claim_id = _target_claim_from_args_or_packet({"query": "Orange County public records"}, packet)
+
+        self.assertEqual(claim_id, "unknown")
 
     def test_marginal_evidence_yield_tolerates_non_mapping_evidence_index(self) -> None:
         payload = {

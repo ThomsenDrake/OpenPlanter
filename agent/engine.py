@@ -472,6 +472,62 @@ def _attempt_query(args: dict[str, Any], payload: str) -> str:
     return _normalize_progress_fragment(payload, max_len=120)
 
 
+def _claim_id_values(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if item is not None and str(item).strip()]
+    return []
+
+
+def _append_unique_claim_ids(values: list[str], claim_ids: list[str]) -> None:
+    for claim_id in claim_ids:
+        if claim_id not in values:
+            values.append(claim_id)
+
+
+def _packet_claim_candidates(packet: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for action in packet.get("candidate_actions", []):
+        if isinstance(action, dict):
+            _append_unique_claim_ids(candidates, _claim_id_values(action.get("target_claim_ids")))
+    for question in packet.get("unresolved_questions", []):
+        if isinstance(question, dict):
+            _append_unique_claim_ids(candidates, _claim_id_values(question.get("claim_ids")))
+    findings = packet.get("findings")
+    if isinstance(findings, dict):
+        for entries in findings.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for key in ("id", "claim_id", "target_claim", "target_claim_id"):
+                    _append_unique_claim_ids(candidates, _claim_id_values(entry.get(key)))
+                _append_unique_claim_ids(candidates, _claim_id_values(entry.get("claim_ids")))
+    return candidates
+
+
+def _packet_claim_matches_payload(packet: dict[str, Any], query: str) -> list[str]:
+    if not query:
+        return []
+    matches: list[str] = []
+    for key, id_key in (("candidate_actions", "target_claim_ids"), ("unresolved_questions", "claim_ids")):
+        for entry in packet.get(key, []):
+            if not isinstance(entry, dict):
+                continue
+            claim_ids = _claim_id_values(entry.get(id_key))
+            if not claim_ids:
+                continue
+            entry_text = _normalize_progress_fragment(
+                json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+                max_len=1000,
+            )
+            if query in entry_text:
+                _append_unique_claim_ids(matches, claim_ids)
+    return matches
+
+
 def _target_claim_from_args_or_packet(
     args: dict[str, Any],
     packet: dict[str, Any] | None,
@@ -484,16 +540,14 @@ def _target_claim_from_args_or_packet(
     if isinstance(claim_ids, list) and claim_ids:
         return str(claim_ids[0])
     if isinstance(packet, dict):
-        for action in packet.get("candidate_actions", [])[:1]:
-            if isinstance(action, dict):
-                ids = action.get("target_claim_ids")
-                if isinstance(ids, list) and ids:
-                    return str(ids[0])
-        for question in packet.get("unresolved_questions", [])[:1]:
-            if isinstance(question, dict):
-                ids = question.get("claim_ids")
-                if isinstance(ids, list) and ids:
-                    return str(ids[0])
+        payload = _tool_payload_text(args)
+        query = _attempt_query(args, payload)
+        matches = _packet_claim_matches_payload(packet, query)
+        if len(matches) == 1:
+            return matches[0]
+        candidates = _packet_claim_candidates(packet)
+        if len(candidates) == 1:
+            return candidates[0]
     return "unknown"
 
 
@@ -560,11 +614,11 @@ def _record_attempt_yield(
     claim_relevant_delta: bool,
     attempt_low_yield_counts: dict[str, int],
 ) -> None:
-    if claim_relevant_delta:
-        attempt_low_yield_counts.clear()
-        return
     for signature in attempt_signatures:
-        attempt_low_yield_counts[signature] = attempt_low_yield_counts.get(signature, 0) + 1
+        if claim_relevant_delta:
+            attempt_low_yield_counts.pop(signature, None)
+        else:
+            attempt_low_yield_counts[signature] = attempt_low_yield_counts.get(signature, 0) + 1
 
 
 def _looks_like_failed_tool_result(name: str, result: ToolResult) -> bool:
@@ -2211,7 +2265,7 @@ class RLMEngine:
                 parallel = []
 
             indexed_results: dict[int, tuple[ToolResult, bool]] = {}
-            executed_attempt_signatures: set[str] = set()
+            batch_attempt_signatures: set[str] = set()
 
             for idx, tc in sequential:
                 fingerprint = (
@@ -2219,6 +2273,8 @@ class RLMEngine:
                     if current_question_reasoning_packet is not None
                     else None
                 )
+                if fingerprint is not None:
+                    batch_attempt_signatures.add(fingerprint.signature)
                 if fingerprint is not None and _should_block_repeated_attempt(
                     fingerprint,
                     attempt_low_yield_counts,
@@ -2232,12 +2288,11 @@ class RLMEngine:
                         deadline=deadline, current_model=model,
                         replay_logger=replay_logger,
                     )
-                    if fingerprint is not None:
-                        executed_attempt_signatures.add(fingerprint.signature)
-                        attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
-                        attempt_blockers.setdefault(fingerprint.signature, set()).add(
-                            _attempt_blocker_type(result_entry)
-                        )
+                if fingerprint is not None:
+                    attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
+                    attempt_blockers.setdefault(fingerprint.signature, set()).add(
+                        _attempt_blocker_type(result_entry)
+                    )
                 indexed_results[idx] = (result_entry, is_final_entry)
                 if is_final_entry:
                     final_answer = result_entry.content
@@ -2253,11 +2308,18 @@ class RLMEngine:
                         if current_question_reasoning_packet is not None
                         else None
                     )
+                    if fingerprint is not None:
+                        batch_attempt_signatures.add(fingerprint.signature)
                     if fingerprint is not None and _should_block_repeated_attempt(
                         fingerprint,
                         attempt_low_yield_counts,
                     ):
-                        indexed_results[idx] = (_blocked_repeated_attempt_result(tc, fingerprint), False)
+                        result_entry = _blocked_repeated_attempt_result(tc, fingerprint)
+                        indexed_results[idx] = (result_entry, False)
+                        attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
+                        attempt_blockers.setdefault(fingerprint.signature, set()).add(
+                            _attempt_blocker_type(result_entry)
+                        )
                     else:
                         runnable_parallel.append((idx, tc, fingerprint))
                 begin_group = getattr(self.tools, "begin_parallel_write_group", None)
@@ -2283,7 +2345,6 @@ class RLMEngine:
                             result_entry, is_final_entry = future.result()
                             indexed_results[idx] = (result_entry, is_final_entry)
                             if fingerprint is not None:
-                                executed_attempt_signatures.add(fingerprint.signature)
                                 attempt_counts[fingerprint.signature] = attempt_counts.get(fingerprint.signature, 0) + 1
                                 attempt_blockers.setdefault(fingerprint.signature, set()).add(
                                     _attempt_blocker_type(result_entry)
@@ -2443,7 +2504,7 @@ class RLMEngine:
                 step_record.marginal_evidence_yield = yield_payload
                 loop_metrics["last_marginal_evidence_yield"] = yield_payload
                 _record_attempt_yield(
-                    executed_attempt_signatures,
+                    batch_attempt_signatures,
                     claim_relevant_delta=bool(yield_payload["claim_relevant_delta"]),
                     attempt_low_yield_counts=attempt_low_yield_counts,
                 )

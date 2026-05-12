@@ -1621,6 +1621,100 @@ fn first_string_in_value(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn string_values_in_value(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(text)) if !text.trim().is_empty() => vec![text.trim().to_string()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|value| !value.is_null())
+            .map(stringify_value)
+            .filter(|text| !text.trim().is_empty())
+            .collect(),
+        Some(value) if !value.is_null() => {
+            let text = stringify_value(value);
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![text.trim().to_string()]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn append_unique_claim_ids(values: &mut Vec<String>, claim_ids: Vec<String>) {
+    for claim_id in claim_ids {
+        if !values.contains(&claim_id) {
+            values.push(claim_id);
+        }
+    }
+}
+
+fn packet_claim_candidates(packet: &Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(actions) = packet.get("candidate_actions").and_then(Value::as_array) {
+        for action in actions {
+            append_unique_claim_ids(
+                &mut candidates,
+                string_values_in_value(action.get("target_claim_ids")),
+            );
+        }
+    }
+    if let Some(questions) = packet.get("unresolved_questions").and_then(Value::as_array) {
+        for question in questions {
+            append_unique_claim_ids(
+                &mut candidates,
+                string_values_in_value(question.get("claim_ids")),
+            );
+        }
+    }
+    if let Some(findings) = packet.get("findings").and_then(Value::as_object) {
+        for entries in findings.values().filter_map(Value::as_array) {
+            for entry in entries {
+                for key in ["id", "claim_id", "target_claim", "target_claim_id"] {
+                    append_unique_claim_ids(
+                        &mut candidates,
+                        string_values_in_value(entry.get(key)),
+                    );
+                }
+                append_unique_claim_ids(
+                    &mut candidates,
+                    string_values_in_value(entry.get("claim_ids")),
+                );
+            }
+        }
+    }
+    candidates
+}
+
+fn packet_claim_matches_payload(packet: &Value, query: &str) -> Vec<String> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for (collection_key, id_key) in [
+        ("candidate_actions", "target_claim_ids"),
+        ("unresolved_questions", "claim_ids"),
+    ] {
+        if let Some(entries) = packet.get(collection_key).and_then(Value::as_array) {
+            for entry in entries {
+                let claim_ids = string_values_in_value(entry.get(id_key));
+                if claim_ids.is_empty() {
+                    continue;
+                }
+                let entry_text = normalize_progress_fragment(
+                    &serde_json::to_string(entry).unwrap_or_default(),
+                    1000,
+                );
+                if entry_text.contains(query) {
+                    append_unique_claim_ids(&mut matches, claim_ids);
+                }
+            }
+        }
+    }
+    matches
+}
+
 fn target_claim_from_args_or_packet(args: &Value, packet: Option<&Value>) -> String {
     if let Some(obj) = args.as_object() {
         for key in [
@@ -1635,26 +1729,16 @@ fn target_claim_from_args_or_packet(args: &Value, packet: Option<&Value>) -> Str
             }
         }
     }
-    if let Some(packet) = packet.and_then(Value::as_object) {
-        if let Some(action) = packet
-            .get("candidate_actions")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(Value::as_object)
-        {
-            if let Some(value) = first_string_in_value(action.get("target_claim_ids")) {
-                return value;
-            }
+    if let Some(packet) = packet {
+        let payload = tool_payload_text(args);
+        let query = attempt_query(args, &payload);
+        let matches = packet_claim_matches_payload(packet, &query);
+        if matches.len() == 1 {
+            return matches[0].clone();
         }
-        if let Some(question) = packet
-            .get("unresolved_questions")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(Value::as_object)
-        {
-            if let Some(value) = first_string_in_value(question.get("claim_ids")) {
-                return value;
-            }
+        let candidates = packet_claim_candidates(packet);
+        if candidates.len() == 1 {
+            return candidates[0].clone();
         }
     }
     "unknown".to_string()
@@ -1731,14 +1815,14 @@ fn record_attempt_yield(
     claim_relevant_delta: bool,
     attempt_low_yield_counts: &mut HashMap<String, u32>,
 ) {
-    if claim_relevant_delta {
-        attempt_low_yield_counts.clear();
-        return;
-    }
     for signature in attempt_signatures {
-        *attempt_low_yield_counts
-            .entry(signature.clone())
-            .or_insert(0) += 1;
+        if claim_relevant_delta {
+            attempt_low_yield_counts.remove(signature);
+        } else {
+            *attempt_low_yield_counts
+                .entry(signature.clone())
+                .or_insert(0) += 1;
+        }
     }
 }
 
@@ -3222,7 +3306,7 @@ async fn solve_frame(
 
         let mut indexed_observations: Vec<(usize, String, String, String, String, bool)> =
             Vec::new();
-        let mut executed_attempt_signatures: HashSet<String> = HashSet::new();
+        let mut batch_attempt_signatures: HashSet<String> = HashSet::new();
         let mut delegated = Vec::new();
         for tc in turn.tool_calls.iter().cloned().enumerate() {
             let (index, tool_call) = tc;
@@ -3254,6 +3338,9 @@ async fn solve_frame(
             let fingerprint = current_question_reasoning_packet
                 .as_ref()
                 .and_then(|packet| attempt_fingerprint(&tool_call, Some(packet)));
+            if let Some(fingerprint) = fingerprint.as_ref() {
+                batch_attempt_signatures.insert(fingerprint.signature());
+            }
             let result = if let Some(fingerprint) = fingerprint.as_ref() {
                 if should_block_repeated_attempt(fingerprint, &attempt_low_yield_counts) {
                     emitter.emit_trace(&format!(
@@ -3263,7 +3350,6 @@ async fn solve_frame(
                     ));
                     blocked_repeated_attempt_result(&tool_call, fingerprint)
                 } else {
-                    executed_attempt_signatures.insert(fingerprint.signature());
                     tools.execute(&tool_call.name, &tool_call.arguments).await
                 }
             } else {
@@ -3433,7 +3519,7 @@ async fn solve_frame(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             record_attempt_yield(
-                &executed_attempt_signatures,
+                &batch_attempt_signatures,
                 has_delta,
                 &mut attempt_low_yield_counts,
             );
@@ -5202,7 +5288,80 @@ mod tests {
             "source=city|tool=fetch_url|tactic=direct_api|query=new|target_claim=cl_2".to_string(),
         );
         record_attempt_yield(&other_signatures, true, &mut counts);
+        assert!(should_block_repeated_attempt(&fingerprint, &counts));
+
+        record_attempt_yield(&signatures, true, &mut counts);
         assert!(!should_block_repeated_attempt(&fingerprint, &counts));
+    }
+
+    #[test]
+    fn test_attempt_fingerprint_target_claim_uses_unambiguous_packet_claim() {
+        let packet = serde_json::json!({
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"]
+                }
+            ]
+        });
+
+        let claim_id = target_claim_from_args_or_packet(
+            &serde_json::json!({"query": "OCPA 1016 N Mills"}),
+            Some(&packet),
+        );
+
+        assert_eq!(claim_id, "cl_1");
+    }
+
+    #[test]
+    fn test_attempt_fingerprint_target_claim_matches_candidate_action_text() {
+        let packet = serde_json::json!({
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"]
+                },
+                {
+                    "id": "ca_2",
+                    "description": "Gather Clerk instruments for 1024 N Mills",
+                    "target_claim_ids": ["cl_2"]
+                }
+            ]
+        });
+
+        let claim_id = target_claim_from_args_or_packet(
+            &serde_json::json!({"query": "1024 N Mills"}),
+            Some(&packet),
+        );
+
+        assert_eq!(claim_id, "cl_2");
+    }
+
+    #[test]
+    fn test_attempt_fingerprint_target_claim_stays_unknown_when_ambiguous() {
+        let packet = serde_json::json!({
+            "candidate_actions": [
+                {
+                    "id": "ca_1",
+                    "description": "Gather OCPA evidence for 1016 N Mills",
+                    "target_claim_ids": ["cl_1"]
+                },
+                {
+                    "id": "ca_2",
+                    "description": "Gather Clerk instruments for 1024 N Mills",
+                    "target_claim_ids": ["cl_2"]
+                }
+            ]
+        });
+
+        let claim_id = target_claim_from_args_or_packet(
+            &serde_json::json!({"query": "Orange County public records"}),
+            Some(&packet),
+        );
+
+        assert_eq!(claim_id, "unknown");
     }
 
     #[test]
