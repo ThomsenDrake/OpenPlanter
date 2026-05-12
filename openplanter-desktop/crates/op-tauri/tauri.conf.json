@@ -1,7 +1,7 @@
 {
   "productName": "Cestus",
   "version": "0.1.0",
-  "identifier": "com.cestus.desktop",
+  "identifier": "com.openplanter.desktop",
   "build": {
     "frontendDist": "../../frontend/dist",
     "devUrl": "http://localhost:5173",

@@ -8,6 +8,7 @@ Cestus is the current product name. Some legacy `OpenPlanter` identifiers remain
 - `OPENPLANTER_*` environment variables remain supported configuration keys, including `OPENPLANTER_WORKSPACE`.
 - `openplanter.session.v2`, `openplanter.trace.*`, `openplanter.session_handoff.v1`, `openplanter.obsidian_pack.v1`, and `openplanter.core` remain protocol/schema identifiers.
 - `openplanter://...` frontend deep links and `openplanter.revelation|...` IDs remain internal link contracts.
+- `com.openplanter.desktop` remains the Tauri application identifier so installed desktop apps update in place and keep existing app data.
 - `openplanter-agent` remains a Python console-script alias for compatibility; `cestus-agent` is the primary command.
 - `openplanter-desktop/` remains the source directory name until a separate repository/path migration is planned.
 - Current external repository URLs still point at `OpenPlanter` remotes until the GitHub repositories are renamed.
