@@ -238,6 +238,15 @@ data: {\"type\":\"response.function_call_arguments.done\",\"response_id\":\"resp
 data: {\"type\":\"response.output_item.done\",\"response_id\":\"resp_123\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_123\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"test.txt\\\"}\"}}\n\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"usage\":{\"input_tokens\":21,\"output_tokens\":6},\"output\":[]}}\n\n";
 
+const OPENAI_RESPONSES_SSE_FAILED: &str = "\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_failed\",\"usage\":null}}\n\n\
+data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"error\":{\"message\":\"Responses API stream failed\"}}}\n\n";
+
+const OPENAI_RESPONSES_SSE_TEXT: &str = "\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_ok\",\"usage\":null}}\n\n\
+data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_ok\",\"delta\":\"Recovered\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1},\"output\":[]}}\n\n";
+
 #[tokio::test]
 async fn test_openai_responses_stream_tool_call_for_gpt55_reasoning() {
     let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
@@ -292,6 +301,37 @@ async fn test_openai_responses_stream_tool_call_for_gpt55_reasoning() {
         .collect::<Vec<_>>()
         .join("");
     assert_eq!(tool_args, "{\"path\":\"test.txt\"}");
+}
+
+#[tokio::test]
+async fn test_openai_responses_stream_failed_is_structured_transient_error() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
+    let addr = start_mock_sse_server(OPENAI_RESPONSES_SSE_FAILED).await;
+    let model = OpenAIModel::new(
+        "gpt-5.5".to_string(),
+        "openai".to_string(),
+        format!("http://{addr}"),
+        "test-key".to_string(),
+        Some("xhigh".to_string()),
+        HashMap::new(),
+    );
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {"name": "read_file", "parameters": {"type": "object"}}
+    })];
+
+    let cancel = CancellationToken::new();
+    let error = model
+        .chat_stream(&simple_messages(), &tools, &|_| {}, &cancel)
+        .await
+        .expect_err("responses stream failure should be retryable");
+
+    let transient = error
+        .downcast_ref::<ProviderTransientError>()
+        .expect("expected ProviderTransientError");
+    assert_eq!(transient.status_code, None);
+    assert_eq!(transient.provider.as_deref(), Some("openai"));
+    assert!(transient.message.contains("Responses API stream failed"));
 }
 
 #[tokio::test]
@@ -1019,6 +1059,120 @@ async fn test_solve_rate_limit_retry_eventually_completes() {
         recorded
             .iter()
             .any(|event| matches!(event, Ev::Complete(text) if text == "Hello world")),
+        "expected the solve to complete after retry, got: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|event| matches!(event, Ev::Error(_))),
+        "did not expect an error after retry success, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_solve_responses_stream_failure_retries_and_completes() {
+    let _test_guard = MODEL_STREAMING_TEST_LOCK.lock().await;
+    use op_core::config::AgentConfig;
+    use op_core::engine::{SolveEmitter, solve};
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum Ev {
+        Trace(String),
+        Complete(String),
+        Error(String),
+    }
+
+    struct RetryEmitter {
+        events: Arc<Mutex<Vec<Ev>>>,
+    }
+
+    impl SolveEmitter for RetryEmitter {
+        fn emit_trace(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev::Trace(message.to_string()));
+        }
+
+        fn emit_delta(&self, _: DeltaEvent) {}
+
+        fn emit_step(&self, _: StepEvent) {}
+
+        fn emit_complete(
+            &self,
+            result: &str,
+            _loop_metrics: Option<op_core::events::LoopMetrics>,
+            _completion: Option<op_core::events::CompletionMeta>,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev::Complete(result.to_string()));
+        }
+
+        fn emit_error(&self, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(Ev::Error(message.to_string()));
+        }
+    }
+
+    let addr = start_stateful_http_server(vec![
+        MockHttpResponse {
+            status: 200,
+            content_type: "text/event-stream",
+            body: OPENAI_RESPONSES_SSE_FAILED,
+            headers: vec![("cache-control", "no-cache")],
+        },
+        MockHttpResponse {
+            status: 200,
+            content_type: "text/event-stream",
+            body: OPENAI_RESPONSES_SSE_TEXT,
+            headers: vec![("cache-control", "no-cache")],
+        },
+    ])
+    .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = RetryEmitter {
+        events: events.clone(),
+    };
+
+    let cfg = AgentConfig {
+        provider: "openai".into(),
+        model: "gpt-5.5".into(),
+        openai_api_key: Some("test-key".into()),
+        openai_base_url: format!("http://{addr}"),
+        base_url: format!("http://{addr}"),
+        reasoning_effort: Some("xhigh".into()),
+        rate_limit_max_retries: 1,
+        rate_limit_backoff_base_sec: 0.0,
+        rate_limit_backoff_max_sec: 0.0,
+        rate_limit_retry_after_cap_sec: 0.0,
+        demo: false,
+        ..Default::default()
+    };
+
+    let cancel = CancellationToken::new();
+    solve("Test", &cfg, &emitter, cancel).await;
+
+    let recorded = events.lock().unwrap().clone();
+    assert!(
+        recorded.iter().any(|event| {
+            matches!(event, Ev::Trace(message) if message.contains("provider transient error") && message.contains("retry 1/1"))
+        }),
+        "expected a retry trace after the stream failure, got: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().any(|event| {
+            matches!(event, Ev::Trace(message) if message.contains("recovered after 1 transient retry"))
+        }),
+        "expected a retry recovery trace, got: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|event| matches!(event, Ev::Complete(text) if text == "Recovered")),
         "expected the solve to complete after retry, got: {recorded:?}"
     );
     assert!(

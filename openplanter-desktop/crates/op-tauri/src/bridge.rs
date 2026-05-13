@@ -85,6 +85,25 @@ fn classify_error(message: &str) -> FailureInfo {
             http_status: Some(status),
         };
     }
+    if lowered.contains("responses api stream failed")
+        || (lowered.contains("stream error") && lowered.contains("responses api"))
+    {
+        return FailureInfo {
+            code: "provider_transient".to_string(),
+            category: "transient".to_string(),
+            phase: "model_completion".to_string(),
+            retryable: true,
+            message: format!(
+                "{message} The model provider stream failed after OpenPlanter preserved the current trace; retry or resume from the latest checkpoint."
+            ),
+            details: serde_json::json!({"source": "responses_api_stream"}),
+            resumable: Some(true),
+            user_visible: Some(true),
+            provider: None,
+            provider_code: Some("responses_api_stream_failed".to_string()),
+            http_status: None,
+        };
+    }
     if lowered.contains("429")
         || lowered.contains("rate limit")
         || lowered.contains("too many requests")
@@ -159,6 +178,25 @@ fn degraded_failure(result: &str, completion: Option<&CompletionMeta>) -> Failur
         .map(|completion| completion.reason.as_str())
         .filter(|reason| !reason.is_empty())
         .unwrap_or("partial_result");
+    if reason == "model_transient_exhausted" {
+        return FailureInfo {
+            code: "provider_transient".to_string(),
+            category: "transient".to_string(),
+            phase: "model_completion".to_string(),
+            retryable: true,
+            message: "Model provider stream failed after OpenPlanter exhausted transient retries; the partial trace was preserved and the turn can be resumed."
+                .to_string(),
+            details: serde_json::json!({
+                "reason": reason,
+                "result_preview": preview_text(result, 240),
+            }),
+            resumable: Some(true),
+            user_visible: Some(true),
+            provider: None,
+            provider_code: Some("responses_api_stream_failed".to_string()),
+            http_status: None,
+        };
+    }
     let mut failure = FailureInfo::degraded(format!("Solve completed partially: {reason}"));
     failure.details = serde_json::json!({
         "reason": reason,
@@ -1795,6 +1833,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_complete_partial_model_transient_is_resumable_provider_failure() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+
+        emitter.emit_complete(
+            "partial text",
+            Some(LoopMetrics {
+                steps: 3,
+                tool_calls: 2,
+                termination_reason: "model_transient_exhausted".into(),
+                ..LoopMetrics::default()
+            }),
+            Some(CompletionMeta {
+                kind: "partial".into(),
+                reason: "model_transient_exhausted".into(),
+                steps_used: 3,
+                max_steps: 3,
+                extensions_granted: 0,
+                extension_block_steps: 0,
+                extension_max_blocks: 0,
+            }),
+        );
+
+        let snapshot = emitter.take_terminal_snapshot().expect("partial snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Partial));
+        assert!(snapshot.degraded);
+        let failure = snapshot.failure.as_ref().expect("failure info");
+        assert_eq!(failure.code, "provider_transient");
+        assert_eq!(failure.phase, "model_completion");
+        assert!(failure.retryable);
+        assert_eq!(failure.resumable, Some(true));
+        assert!(failure.message.contains("exhausted transient retries"));
+        assert_eq!(
+            failure.provider_code.as_deref(),
+            Some("responses_api_stream_failed")
+        );
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"status\":\"partial\""));
+        assert!(events.contains("\"failure_code\":\"provider_transient\""));
+        assert!(events.contains("model_transient_exhausted"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_emit_error_classifies_rate_limit_failures() {
         let tmp = tempdir().unwrap();
         let replay = ReplayLogger::new(tmp.path());
@@ -1850,5 +1934,34 @@ mod tests {
         assert!(events.contains("\"event_type\":\"turn.failed\""));
         assert!(events.contains("\"failure_code\":\"provider_transient\""));
         assert!(events.contains("\"http_status\":500"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_emit_error_classifies_responses_stream_failure_as_resumable_transient() {
+        let tmp = tempdir().unwrap();
+        let replay = ReplayLogger::new(tmp.path());
+        let emitter =
+            LoggingEmitter::new(NullEmitter, replay, tmp.path().to_path_buf(), None, None);
+
+        emitter.emit_error("Stream error: Responses API stream failed");
+
+        let snapshot = emitter.take_terminal_snapshot().expect("error snapshot");
+        assert!(matches!(snapshot.status, TerminalStatus::Error));
+        let failure = snapshot.failure.as_ref().expect("failure info");
+        assert_eq!(failure.code, "provider_transient");
+        assert_eq!(failure.category, "transient");
+        assert_eq!(failure.phase, "model_completion");
+        assert!(failure.retryable);
+        assert_eq!(failure.resumable, Some(true));
+        assert_eq!(
+            failure.provider_code.as_deref(),
+            Some("responses_api_stream_failed")
+        );
+        assert!(failure.message.contains("retry or resume"));
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"event_type\":\"turn.failed\""));
+        assert!(events.contains("\"failure_code\":\"provider_transient\""));
+        assert!(events.contains("responses_api_stream_failed"));
     }
 }

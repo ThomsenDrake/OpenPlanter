@@ -6,6 +6,7 @@ use anyhow::{Context, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -279,9 +280,8 @@ impl ChromeMcpManager {
             command.args(extra_args.split_whitespace());
         }
         command
-            .arg("-c")
-            .arg(script)
-            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -304,13 +304,29 @@ impl ChromeMcpManager {
             }
         }
 
-        let output = timeout(
-            Duration::from_secs(timeout_sec.max(1) as u64),
-            command.output(),
-        )
+        let output = timeout(Duration::from_secs(timeout_sec.max(1) as u64), async {
+            let mut child = command.spawn().with_context(|| {
+                format!("failed to run Browser Harness command `{}`", command_name)
+            })?;
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                anyhow!(
+                    "failed to open stdin for Browser Harness command `{}`",
+                    command_name
+                )
+            })?;
+            stdin.write_all(script.as_bytes()).await.with_context(|| {
+                format!(
+                    "failed to send script to Browser Harness command `{}`",
+                    command_name
+                )
+            })?;
+            drop(stdin);
+            child.wait_with_output().await.with_context(|| {
+                format!("failed to run Browser Harness command `{}`", command_name)
+            })
+        })
         .await
-        .map_err(|_| anyhow!("Timed out waiting for Browser Harness after {timeout_sec}s."))?
-        .with_context(|| format!("failed to run Browser Harness command `{}`", command_name))?;
+        .map_err(|_| anyhow!("Timed out waiting for Browser Harness after {timeout_sec}s."))??;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         extract_harness_payload(&stdout, &stderr, output.status.code())
@@ -583,7 +599,7 @@ fn extract_harness_payload(
         }
     }
     Err(anyhow!(
-            "Browser Harness did not return a Cestus result marker."
+        "Browser Harness did not return a Cestus result marker."
     ))
 }
 
@@ -640,11 +656,11 @@ mod tests {
             &path,
             format!(
                 r#"#!/bin/sh
-if [ "$1" != "-c" ]; then
-  echo "expected -c" >&2
+if [ "$#" -ne 0 ]; then
+  echo "unexpected arguments: $*" >&2
   exit 2
 fi
-script="$2"
+script="$(cat)"
 if printf '%s' "$script" | grep -q '_OPENPLANTER_TOOL = "browser_capture_screenshot"'; then
   printf '%s{{"ok":true,"content":{{"path":"/tmp/openplanter-shot.png","media_type":"image/png","image_base64":"ZmFrZQ=="}},"error":null}}\n' '{}'
 else

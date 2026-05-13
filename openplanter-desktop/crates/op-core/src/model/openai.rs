@@ -588,6 +588,7 @@ impl OpenAIModel {
             || text.contains("timed out")
             || text.contains("timeout")
             || text.contains("stream ended")
+            || text.contains("responses api stream failed")
             || text.contains("broken pipe")
             || text.contains("transport")
             || text.contains("http 500")

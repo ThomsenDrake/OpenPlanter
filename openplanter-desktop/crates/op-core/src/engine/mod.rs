@@ -11,7 +11,7 @@ pub mod judge;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use chrono::Utc;
@@ -444,9 +444,42 @@ fn compute_retry_delay_sec(
         .map(|value| value.max(0.0).min(retry_after_cap))
         .unwrap_or_else(|| {
             let base = config.rate_limit_backoff_base_sec.max(0.0);
-            base * 2_f64.powi((retry_count.saturating_sub(1)) as i32)
+            let scheduled = model_retry_backoff_delay_sec(base, retry_count);
+            jitter_retry_delay_sec(scheduled, retry_count)
         });
     delay.min(backoff_max)
+}
+
+fn model_retry_backoff_delay_sec(base: f64, retry_count: usize) -> f64 {
+    if base <= 0.0 {
+        return 0.0;
+    }
+    let multiplier = match retry_count.max(1) {
+        1 => 1.0,
+        2 => 3.0,
+        3 => 8.0,
+        count => 8.0 * 2_f64.powi((count.saturating_sub(3)) as i32),
+    };
+    base * multiplier
+}
+
+fn jitter_retry_delay_sec(delay_sec: f64, retry_count: usize) -> f64 {
+    if delay_sec <= 0.0 {
+        return 0.0;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut mixed = nanos ^ ((retry_count as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    mixed ^= mixed >> 33;
+    mixed = mixed.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    mixed ^= mixed >> 33;
+    mixed = mixed.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    mixed ^= mixed >> 33;
+    let unit = (mixed % 10_001) as f64 / 10_000.0;
+    let factor = 0.8 + (unit * 0.4);
+    delay_sec * factor
 }
 
 enum RetryableModelError<'a> {
@@ -487,10 +520,20 @@ async fn chat_stream_with_rate_limit_retries(
             .chat_stream(messages, tool_defs, on_delta, cancel)
             .await
         {
-            Ok(turn) => return Ok(turn),
+            Ok(turn) => {
+                if retries > 0 {
+                    emitter.emit_trace(&format!(
+                        "{trace_prefix} model request recovered after {retries} transient retry attempt(s)."
+                    ));
+                }
+                return Ok(turn);
+            }
             Err(err) => {
                 if let Some(retryable) = retryable_model_error(&err) {
                     if retries >= max_retries {
+                        emitter.emit_trace(&format!(
+                            "{trace_prefix} transient model error exhausted retry budget after {retries}/{max_retries} retry attempt(s): {err}"
+                        ));
                         return Err(err);
                     }
                     retries += 1;
@@ -2247,6 +2290,12 @@ fn build_partial_completion_text(
                 .to_string(),
         );
     }
+    if loop_metrics.termination_reason == "model_transient_exhausted" {
+        next_actions.push(
+            "Retry or resume from the saved checkpoint; the model provider stream failed after OpenPlanter exhausted transient retry attempts."
+                .to_string(),
+        );
+    }
     next_actions.push(
         "human_required: If a portal, CAPTCHA, login, or manual lookup blocks automation, write exact handoff instructions."
             .to_string(),
@@ -3949,6 +3998,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_model_retry_backoff_uses_conservative_schedule() {
+        assert_eq!(model_retry_backoff_delay_sec(1.0, 1), 1.0);
+        assert_eq!(model_retry_backoff_delay_sec(1.0, 2), 3.0);
+        assert_eq!(model_retry_backoff_delay_sec(1.0, 3), 8.0);
+        assert_eq!(model_retry_backoff_delay_sec(1.0, 4), 16.0);
+        assert_eq!(model_retry_backoff_delay_sec(0.0, 1), 0.0);
+    }
+
+    #[test]
+    fn test_compute_retry_delay_applies_jitter_bounds_without_retry_after() {
+        let config = AgentConfig {
+            rate_limit_backoff_base_sec: 1.0,
+            rate_limit_backoff_max_sec: 100.0,
+            rate_limit_retry_after_cap_sec: 100.0,
+            ..Default::default()
+        };
+
+        let first = compute_retry_delay_sec(&config, 1, None);
+        assert!(
+            (0.8..=1.2).contains(&first),
+            "first retry delay should be jittered around 1s, got {first}"
+        );
+        let second = compute_retry_delay_sec(&config, 2, None);
+        assert!(
+            (2.4..=3.6).contains(&second),
+            "second retry delay should be jittered around 3s, got {second}"
+        );
+        let third = compute_retry_delay_sec(&config, 3, None);
+        assert!(
+            (6.4..=9.6).contains(&third),
+            "third retry delay should be jittered around 8s, got {third}"
+        );
+    }
+
+    #[test]
+    fn test_compute_retry_delay_honors_retry_after_without_jitter() {
+        let config = AgentConfig {
+            rate_limit_backoff_base_sec: 1.0,
+            rate_limit_backoff_max_sec: 100.0,
+            rate_limit_retry_after_cap_sec: 10.0,
+            ..Default::default()
+        };
+
+        assert_eq!(compute_retry_delay_sec(&config, 1, Some(4.0)), 4.0);
+        assert_eq!(compute_retry_delay_sec(&config, 1, Some(40.0)), 10.0);
+    }
+
+    #[test]
+    fn test_partial_completion_text_explains_exhausted_model_stream_retries() {
+        let text = build_partial_completion_text(
+            "finish the investigation",
+            &LoopMetrics {
+                steps: 2,
+                extensions_granted: 0,
+                termination_reason: "model_transient_exhausted".into(),
+                ..LoopMetrics::default()
+            },
+            &[],
+        );
+
+        assert!(text.contains("model_transient_exhausted"));
+        assert!(text.contains("provider stream failed"));
+        assert!(text.contains("exhausted transient retry attempts"));
+        assert!(text.contains("saved checkpoint"));
+    }
+
     #[tokio::test]
     async fn test_chat_stream_retries_provider_transient_errors() {
         let model = TransientThenSuccessModel::new(1);
@@ -3987,6 +4103,13 @@ mod tests {
                         && message.contains("retry 1/1")
             )
         }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RecordedEvent::Trace(message)
+                    if message.contains("recovered after 1 transient retry")
+            )
+        }));
     }
 
     #[tokio::test]
@@ -4018,6 +4141,14 @@ mod tests {
 
         assert_eq!(model.attempts(), 2);
         assert!(error.downcast_ref::<ProviderTransientError>().is_some());
+        let events = emitter.events();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RecordedEvent::Trace(message)
+                    if message.contains("exhausted retry budget after 1/1 retry")
+            )
+        }));
     }
 
     #[tokio::test]
