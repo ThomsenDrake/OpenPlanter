@@ -1,0 +1,181 @@
+name: Mistral Vibe Review Gate
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+  pull_request_review:
+    types:
+      - submitted
+      - edited
+      - dismissed
+  issue_comment:
+    types:
+      - created
+      - edited
+      - deleted
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: mistral-vibe-review-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+env:
+  MISTRAL_VIBE_REVIEW_LOGINS: ${{ vars.MISTRAL_VIBE_REVIEW_LOGINS }}
+  MISTRAL_VIBE_REVIEW_MARKER: ${{ vars.MISTRAL_VIBE_REVIEW_MARKER || '<!-- mistral-vibe-pr-review -->' }}
+
+jobs:
+  mistral-vibe-review-gate:
+    name: Mistral Vibe Review Gate
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+
+    steps:
+      - name: Verify Mistral Vibe has reviewed this pull request
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const expectedLogins = (process.env.MISTRAL_VIBE_REVIEW_LOGINS || 'github-actions[bot],mistralai[bot],mistral-ai[bot]')
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean);
+            const marker = process.env.MISTRAL_VIBE_REVIEW_MARKER || '<!-- mistral-vibe-pr-review -->';
+            const acceptedStates = new Set([
+              'APPROVED',
+              'CHANGES_REQUESTED',
+              'COMMENTED',
+            ]);
+
+            async function loadPullRequest() {
+              if (context.payload.pull_request) {
+                return context.payload.pull_request;
+              }
+
+              const issue = context.payload.issue;
+              if (!issue?.pull_request) {
+                return null;
+              }
+
+              const response = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: issue.number,
+              });
+              return response.data;
+            }
+
+            function eventDate(value) {
+              const parsed = new Date(value || 0);
+              return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
+            }
+
+            function maxDate(values) {
+              return values
+                .map(eventDate)
+                .reduce((latest, value) => value > latest ? value : latest, new Date(0));
+            }
+
+            function actorLogin(item) {
+              return item.user?.login || item.actor?.login || '';
+            }
+
+            function activityDate(item) {
+              return eventDate(item.submitted_at || item.created_at || item.updated_at);
+            }
+
+            function hasRequiredReviewBody(body, headSha) {
+              return Boolean(body && body.includes(marker) && body.includes(`Head SHA: ${headSha}`));
+            }
+
+            const pr = await loadPullRequest();
+            if (!pr) {
+              core.notice('No pull request context was provided for this event.');
+              return;
+            }
+
+            if (pr.draft) {
+              core.notice('Draft pull request detected; Mistral Vibe review is only required after the PR is ready for review.');
+              return;
+            }
+
+            const timeline = await github.paginate(
+              'GET /repos/{owner}/{repo}/issues/{issue_number}/timeline',
+              {
+                owner,
+                repo,
+                issue_number: pr.number,
+                per_page: 100,
+                headers: {
+                  accept: 'application/vnd.github+json',
+                },
+              }
+            );
+            const latestReadyForReviewAt = maxDate(
+              timeline
+                .filter((item) => item.event === 'ready_for_review')
+                .map((item) => item.created_at)
+            );
+            const reviewBoundary = maxDate([pr.created_at, latestReadyForReviewAt]);
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            const reviewMatches = reviews
+              .filter((review) => expectedLogins.includes(actorLogin(review)))
+              .filter((review) => acceptedStates.has(String(review.state || '').toUpperCase()))
+              .filter((review) => hasRequiredReviewBody(review.body || '', pr.head.sha))
+              .filter((review) => activityDate(review) >= reviewBoundary)
+              .map((review) => ({
+                kind: 'review',
+                login: actorLogin(review),
+                state: review.state,
+                url: review.html_url || review.url || 'no-url',
+                at: activityDate(review),
+              }));
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const commentMatches = comments
+              .filter((comment) => expectedLogins.includes(actorLogin(comment)))
+              .filter((comment) => hasRequiredReviewBody(comment.body || '', pr.head.sha))
+              .filter((comment) => activityDate(comment) >= reviewBoundary)
+              .map((comment) => ({
+                kind: 'comment',
+                login: actorLogin(comment),
+                state: 'COMMENTED',
+                url: comment.html_url || comment.url || 'no-url',
+                at: activityDate(comment),
+              }));
+
+            const matches = [...reviewMatches, ...commentMatches]
+              .sort((left, right) => right.at - left.at);
+
+            if (matches.length === 0) {
+              core.setFailed(
+                `Missing Mistral Vibe review. Expected one of [${expectedLogins.join(', ')}] to post ${marker} with Head SHA: ${pr.head.sha} after ${reviewBoundary.toISOString()} before merge.`
+              );
+              return;
+            }
+
+            const latest = matches[0];
+            core.notice(
+              `Found Mistral Vibe ${latest.kind} from ${latest.login} with state ${latest.state} at ${latest.at.toISOString()}. ${latest.url}`
+            );
