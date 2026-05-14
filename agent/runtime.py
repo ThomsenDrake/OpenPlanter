@@ -1486,6 +1486,8 @@ class SessionRuntime:
             objective=objective,
             question_reasoning_packet=question_reasoning_packet,
             embeddings_provider=self.engine.config.embeddings_provider,
+            embeddings_model=self.engine.config.embeddings_model,
+            embeddings_base_url=self.engine.config.embeddings_base_url,
             voyage_api_key=self.engine.config.voyage_api_key,
             mistral_api_key=self.engine.config.mistral_api_key,
             on_event=_on_event,

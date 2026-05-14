@@ -230,13 +230,28 @@ export interface ConfigView {
   provider: string;
   model: string;
   reasoning_effort: string | null;
+  llm_profile_id: string | null;
+  llm_profile_name: string | null;
   zai_plan: string;
   web_search_provider: string;
   embeddings_provider: string;
+  embeddings_model: string;
+  embedding_profile_id: string | null;
+  embedding_profile_name: string | null;
   embeddings_status: string;
   embeddings_status_detail: string;
   embeddings_mode: string;
   embeddings_packet_version: string;
+  stt_profile_id: string | null;
+  stt_profile_name: string | null;
+  stt_provider: string;
+  stt_model: string;
+  stt_base_url: string;
+  stt_max_bytes: number;
+  stt_chunk_max_seconds: number;
+  stt_chunk_overlap_seconds: number;
+  stt_max_chunks: number;
+  stt_request_timeout_sec: number;
   continuity_mode: string;
   mistral_document_ai_use_shared_key: boolean;
   chrome_mcp_enabled: boolean;
@@ -266,9 +281,14 @@ export interface PartialConfig {
   provider?: string;
   model?: string;
   reasoning_effort?: string;
+  llm_profile_id?: string;
   zai_plan?: string;
   web_search_provider?: string;
   embeddings_provider?: string;
+  embedding_profile_id?: string;
+  stt_profile_id?: string;
+  stt_model?: string;
+  stt_base_url?: string;
   continuity_mode?: string;
   mistral_document_ai_use_shared_key?: boolean;
   chrome_mcp_enabled?: boolean;
@@ -303,6 +323,8 @@ export interface SessionInfo {
 }
 
 export interface PersistentSettings {
+  active_profiles?: Record<string, string>;
+  profiles?: Record<string, Record<string, ProviderProfile>>;
   default_model?: string | null;
   default_reasoning_effort?: string | null;
   default_model_openai?: string | null;
@@ -314,6 +336,13 @@ export interface PersistentSettings {
   zai_plan?: string | null;
   web_search_provider?: string | null;
   embeddings_provider?: string | null;
+  mistral_transcription_base_url?: string | null;
+  mistral_transcription_model?: string | null;
+  mistral_transcription_max_bytes?: number | null;
+  mistral_transcription_chunk_max_seconds?: number | null;
+  mistral_transcription_chunk_overlap_seconds?: number | null;
+  mistral_transcription_max_chunks?: number | null;
+  mistral_transcription_request_timeout_sec?: number | null;
   continuity_mode?: string | null;
   mistral_document_ai_use_shared_key?: boolean | null;
   chrome_mcp_enabled?: boolean | null;
@@ -332,6 +361,16 @@ export interface PersistentSettings {
   min_subtask_depth?: number | null;
   max_depth?: number | null;
   default_investigation_id?: string | null;
+}
+
+export interface ProviderProfile {
+  name?: string | null;
+  provider: string;
+  adapter: string;
+  model: string;
+  base_url?: string | null;
+  auth_ref?: string | null;
+  options?: Record<string, unknown>;
 }
 
 export interface ObsidianExportStatus {

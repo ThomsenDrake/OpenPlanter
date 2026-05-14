@@ -9,6 +9,8 @@ from pathlib import Path
 from .builder import _fetch_models_for_provider, build_engine, infer_provider_for_model
 from .config import (
     AgentConfig,
+    default_embeddings_base_url,
+    default_embeddings_model,
     normalize_embeddings_provider,
     normalize_zai_plan,
     resolve_anthropic_api_key,
@@ -30,6 +32,7 @@ from .retrieval import build_embeddings_status
 from .runtime import SessionError, SessionRuntime, SessionStore
 from .settings import (
     PersistentSettings,
+    ProviderProfile,
     SettingsStore,
     normalize_reasoning_effort,
 )
@@ -546,6 +549,14 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
     if args.embeddings_provider:
         cfg.embeddings_provider = args.embeddings_provider
     cfg.embeddings_provider = normalize_embeddings_provider(cfg.embeddings_provider)
+    if not os.getenv("OPENPLANTER_EMBEDDINGS_MODEL") and (
+        args.embeddings_provider or not cfg.embedding_profile_id
+    ):
+        cfg.embeddings_model = default_embeddings_model(cfg.embeddings_provider)
+    if not os.getenv("OPENPLANTER_EMBEDDINGS_BASE_URL") and (
+        args.embeddings_provider or not cfg.embedding_profile_id
+    ):
+        cfg.embeddings_base_url = default_embeddings_base_url(cfg.embeddings_provider)
     if args.reasoning_effort:
         cfg.reasoning_effort = None if args.reasoning_effort == "none" else args.reasoning_effort
     if args.chrome_mcp_enabled is not None:
@@ -598,6 +609,161 @@ def run_plain_repl(ctx: ChatContext) -> None:
         _out(f"agent> {response}")
 
 
+def _profile_option_int(profile: ProviderProfile, key: str, fallback: int) -> int:
+    value = profile.options.get(key)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _profile_option_float(profile: ProviderProfile, key: str, fallback: float) -> float:
+    value = profile.options.get(key)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _has_env_value(*keys: str) -> bool:
+    return any((os.getenv(key) or "").strip() for key in keys)
+
+
+def _llm_base_url_env_keys(provider: str) -> tuple[str, ...]:
+    return {
+        "openai": ("OPENPLANTER_OPENAI_BASE_URL", "OPENPLANTER_BASE_URL"),
+        "anthropic": ("OPENPLANTER_ANTHROPIC_BASE_URL",),
+        "openrouter": ("OPENPLANTER_OPENROUTER_BASE_URL",),
+        "cerebras": ("OPENPLANTER_CEREBRAS_BASE_URL",),
+        "zai": ("OPENPLANTER_ZAI_BASE_URL",),
+        "ollama": ("OPENPLANTER_OLLAMA_BASE_URL",),
+    }.get(provider, ())
+
+
+def _apply_llm_profile_to_config(cfg: AgentConfig, profile_id: str, profile: ProviderProfile) -> None:
+    cfg.llm_profile_id = profile_id
+    cfg.llm_profile_name = profile.name
+    if not _has_env_value("OPENPLANTER_PROVIDER"):
+        cfg.provider = profile.provider or cfg.provider
+    if not _has_env_value("OPENPLANTER_MODEL"):
+        cfg.model = profile.model or cfg.model
+    if profile.base_url and not _has_env_value(*_llm_base_url_env_keys(profile.provider)):
+        if profile.provider == "openai":
+            cfg.openai_base_url = profile.base_url
+            cfg.base_url = profile.base_url
+        elif profile.provider == "anthropic":
+            cfg.anthropic_base_url = profile.base_url
+        elif profile.provider == "openrouter":
+            cfg.openrouter_base_url = profile.base_url
+        elif profile.provider == "cerebras":
+            cfg.cerebras_base_url = profile.base_url
+        elif profile.provider == "zai":
+            cfg.zai_base_url = profile.base_url
+        elif profile.provider == "ollama":
+            cfg.ollama_base_url = profile.base_url
+    if profile.options.get("reasoning_effort") is not None and not _has_env_value(
+        "OPENPLANTER_REASONING_EFFORT"
+    ):
+        effort = str(profile.options.get("reasoning_effort") or "").strip().lower()
+        cfg.reasoning_effort = None if effort in {"", "none", "off"} else effort
+    if profile.options.get("zai_plan") is not None:
+        if not _has_env_value("OPENPLANTER_ZAI_PLAN"):
+            cfg.zai_plan = normalize_zai_plan(str(profile.options.get("zai_plan")))
+        if not _has_env_value("OPENPLANTER_ZAI_BASE_URL"):
+            cfg.zai_base_url = resolve_zai_base_url(
+                cfg.zai_plan,
+                paygo_base_url=cfg.zai_paygo_base_url,
+                coding_base_url=cfg.zai_coding_base_url,
+            )
+
+
+def _apply_embedding_profile_to_config(
+    cfg: AgentConfig, profile_id: str, profile: ProviderProfile
+) -> None:
+    cfg.embedding_profile_id = profile_id
+    cfg.embedding_profile_name = profile.name
+    cfg.embeddings_provider = normalize_embeddings_provider(profile.provider)
+    cfg.embeddings_model = profile.model or cfg.embeddings_model
+    if profile.base_url:
+        cfg.embeddings_base_url = profile.base_url
+
+
+def _apply_stt_profile_to_config(cfg: AgentConfig, profile_id: str, profile: ProviderProfile) -> None:
+    cfg.stt_profile_id = profile_id
+    cfg.stt_profile_name = profile.name
+    if profile.provider != "mistral":
+        return
+    cfg.mistral_transcription_model = profile.model or cfg.mistral_transcription_model
+    if profile.base_url:
+        cfg.mistral_transcription_base_url = profile.base_url
+    cfg.mistral_transcription_max_bytes = _profile_option_int(
+        profile, "max_bytes", cfg.mistral_transcription_max_bytes
+    )
+    cfg.mistral_transcription_chunk_max_seconds = _profile_option_int(
+        profile, "chunk_max_seconds", cfg.mistral_transcription_chunk_max_seconds
+    )
+    cfg.mistral_transcription_chunk_overlap_seconds = _profile_option_float(
+        profile,
+        "chunk_overlap_seconds",
+        cfg.mistral_transcription_chunk_overlap_seconds,
+    )
+    cfg.mistral_transcription_max_chunks = _profile_option_int(
+        profile, "max_chunks", cfg.mistral_transcription_max_chunks
+    )
+    cfg.mistral_transcription_request_timeout_sec = _profile_option_int(
+        profile,
+        "request_timeout_sec",
+        cfg.mistral_transcription_request_timeout_sec,
+    )
+
+
+def _apply_active_profiles_to_config(
+    cfg: AgentConfig,
+    settings: PersistentSettings,
+    args: argparse.Namespace,
+) -> None:
+    if (
+        args.provider is None
+        and args.model is None
+        and not os.getenv("OPENPLANTER_PROVIDER")
+        and not os.getenv("OPENPLANTER_MODEL")
+    ):
+        active_id = settings.active_profiles.get("llm")
+        profile = settings.active_profile("llm")
+        if active_id and profile:
+            _apply_llm_profile_to_config(cfg, active_id, profile)
+
+    if args.embeddings_provider is None and not any(
+        os.getenv(key)
+        for key in (
+            "OPENPLANTER_EMBEDDINGS_PROVIDER",
+            "OPENPLANTER_EMBEDDINGS_MODEL",
+            "OPENPLANTER_EMBEDDINGS_BASE_URL",
+        )
+    ):
+        active_id = settings.active_profiles.get("embedding")
+        profile = settings.active_profile("embedding")
+        if active_id and profile:
+            _apply_embedding_profile_to_config(cfg, active_id, profile)
+
+    if not any(
+        os.getenv(key)
+        for key in (
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_BASE_URL",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_CHUNKS",
+            "OPENPLANTER_MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC",
+        )
+    ):
+        active_id = settings.active_profiles.get("stt")
+        profile = settings.active_profile("stt")
+        if active_id and profile:
+            _apply_stt_profile_to_config(cfg, active_id, profile)
+
+
 def _apply_persistent_settings(
     cfg: AgentConfig,
     args: argparse.Namespace,
@@ -638,10 +804,13 @@ def _apply_persistent_settings(
         settings = settings.normalized()
         print("Saved persistent defaults to .openplanter/settings.json")
 
+    _apply_active_profiles_to_config(cfg, settings, args)
+
     if (
         args.model is None
         and not os.getenv("OPENPLANTER_MODEL")
         and settings.default_model
+        and not cfg.llm_profile_id
     ):
         cfg.model = settings.default_model
     if (
@@ -654,6 +823,7 @@ def _apply_persistent_settings(
         args.embeddings_provider is None
         and not os.getenv("OPENPLANTER_EMBEDDINGS_PROVIDER")
         and settings.embeddings_provider
+        and not cfg.embedding_profile_id
     ):
         cfg.embeddings_provider = settings.embeddings_provider
     if (
@@ -696,6 +866,10 @@ def _apply_persistent_settings(
 
 def _print_settings(settings: PersistentSettings) -> None:
     print("Persistent settings:")
+    print(f"  active_profiles: {settings.active_profiles or '(unset)'}")
+    for modality, pool in settings.profiles.items():
+        if pool:
+            print(f"  {modality}_profiles: {', '.join(sorted(pool))}")
     print(f"  default_model: {settings.default_model or '(unset)'}")
     print(f"  default_reasoning_effort: {settings.default_reasoning_effort or '(unset)'}")
     print(f"  default_model_openai: {settings.default_model_openai or '(unset)'}")
@@ -874,6 +1048,7 @@ def main() -> None:
     chrome_status = engine.tools.chrome_mcp_status()
     embeddings_status = build_embeddings_status(
         provider=cfg.embeddings_provider,
+        embeddings_model=cfg.embeddings_model,
         voyage_api_key=cfg.voyage_api_key,
         mistral_api_key=cfg.mistral_api_key,
     )
@@ -917,8 +1092,12 @@ def main() -> None:
     startup_info: dict[str, str] = {
         "Provider": cfg.provider,
         "Model": model_name,
+        "LLMProfile": cfg.llm_profile_name or cfg.llm_profile_id or "(none)",
         "WebSearch": cfg.web_search_provider,
-        "Embeddings": f"{cfg.embeddings_provider} ({embeddings_status.status})",
+        "Embeddings": f"{cfg.embeddings_provider}:{cfg.embeddings_model} ({embeddings_status.status})",
+        "EmbeddingProfile": cfg.embedding_profile_name or cfg.embedding_profile_id or "(none)",
+        "AudioSTT": f"mistral:{cfg.mistral_transcription_model}",
+        "STTProfile": cfg.stt_profile_name or cfg.stt_profile_id or "(none)",
     }
     if cfg.provider == "zai":
         startup_info["ZAIPlan"] = cfg.zai_plan

@@ -56,6 +56,10 @@ export async function getConfig(): Promise<ConfigView> {
   return invoke("get_config");
 }
 
+export async function getSettings(): Promise<PersistentSettings> {
+  return invoke("get_settings");
+}
+
 export async function updateConfig(partial: PartialConfig): Promise<ConfigView> {
   return invoke("update_config", { partial });
 }

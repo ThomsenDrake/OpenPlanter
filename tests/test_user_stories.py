@@ -12,17 +12,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from conftest import _tc
 from agent.config import AgentConfig
-from agent.engine import ExternalContext, RLMEngine
+from agent.engine import RLMEngine
 from agent.model import (
     EchoFallbackModel,
     ModelTurn,
     ScriptedModel,
 )
-from agent.runtime import SessionRuntime, SessionStore
+from agent.runtime import SessionRuntime
 from agent.tools import WorkspaceTools
 
 
@@ -888,6 +887,21 @@ class TestProjectScaffold(unittest.TestCase):
 class TestTUIModelAndReasoningSwitching(unittest.TestCase):
     """Test handle_model_command and handle_reasoning_command with ChatContext."""
 
+    def _make_tui_context(self, root: Path, cfg: AgentConfig, session_id: str):
+        from agent.builder import build_engine
+        from agent.settings import SettingsStore
+        from agent.tui import ChatContext
+
+        engine = build_engine(cfg)
+        runtime = SessionRuntime.bootstrap(
+            engine=engine,
+            config=cfg,
+            session_id=session_id,
+            resume=False,
+        )
+        settings_store = SettingsStore(workspace=root, session_root_dir=".openplanter")
+        return ChatContext(runtime=runtime, cfg=cfg, settings_store=settings_store)
+
     def test_model_switch_rebuilds_engine(self) -> None:
         """Switching model via handle_model_command replaces the runtime's engine."""
         from agent.builder import build_engine
@@ -915,7 +929,7 @@ class TestTUIModelAndReasoningSwitching(unittest.TestCase):
             # Engine should have been rebuilt
             self.assertIsNot(ctx.runtime.engine, old_engine)
             self.assertEqual(cfg.model, "gpt-5.2")
-            self.assertTrue(any("gpt-5.2" in l for l in lines))
+            self.assertTrue(any("gpt-5.2" in line for line in lines))
 
     def test_model_alias_resolution(self) -> None:
         """Aliases like 'opus' resolve to full model names."""
@@ -940,7 +954,72 @@ class TestTUIModelAndReasoningSwitching(unittest.TestCase):
 
             lines = handle_model_command("opus", ctx)
             self.assertEqual(cfg.model, "anthropic-foundry/claude-opus-4-6")
-            self.assertTrue(any("alias" in l.lower() for l in lines))
+            self.assertTrue(any("alias" in line.lower() for line in lines))
+
+    def test_unsaved_model_switch_clears_profile_marker(self) -> None:
+        from agent.tui import handle_model_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = _make_config(root)
+            cfg.provider = "openai"
+            cfg.openai_api_key = "test-key"
+            cfg.model = "gpt-4.1"
+            cfg.llm_profile_id = "openai-default"
+            cfg.llm_profile_name = "OpenAI default"
+            ctx = self._make_tui_context(root, cfg, "model-profile-clear")
+
+            handle_model_command("gpt-5.2", ctx)
+
+            self.assertEqual(cfg.model, "gpt-5.2")
+            self.assertIsNone(cfg.llm_profile_id)
+            self.assertIsNone(cfg.llm_profile_name)
+            self.assertIsNone(ctx.runtime.engine.config.llm_profile_id)
+            self.assertIsNone(ctx.runtime.engine.config.llm_profile_name)
+
+    def test_unsaved_embeddings_switch_clears_profile_marker(self) -> None:
+        from agent.tui import handle_embeddings_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = _make_config(root)
+            cfg.provider = "anthropic"
+            cfg.anthropic_api_key = "test-key"
+            cfg.model = "claude-sonnet-4-5-20250929"
+            cfg.embedding_profile_id = "voyage-default"
+            cfg.embedding_profile_name = "Voyage default"
+            ctx = self._make_tui_context(root, cfg, "embedding-profile-clear")
+
+            lines = handle_embeddings_command("mistral", ctx)
+
+            self.assertEqual(cfg.embeddings_provider, "mistral")
+            self.assertIsNone(cfg.embedding_profile_id)
+            self.assertIsNone(cfg.embedding_profile_name)
+            self.assertIsNone(ctx.runtime.engine.config.embedding_profile_id)
+            self.assertIsNone(ctx.runtime.engine.config.embedding_profile_name)
+            self.assertIn("Active embedding profile: (none)", lines)
+
+    def test_unsaved_stt_switch_clears_profile_marker(self) -> None:
+        from agent.tui import handle_stt_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = _make_config(root)
+            cfg.provider = "anthropic"
+            cfg.anthropic_api_key = "test-key"
+            cfg.model = "claude-sonnet-4-5-20250929"
+            cfg.stt_profile_id = "mistral-voxtral"
+            cfg.stt_profile_name = "Mistral Voxtral"
+            cfg.mistral_transcription_model = "voxtral-large-latest"
+            ctx = self._make_tui_context(root, cfg, "stt-profile-clear")
+
+            handle_stt_command("voxtral-mini-latest", ctx)
+
+            self.assertEqual(cfg.mistral_transcription_model, "voxtral-mini-latest")
+            self.assertIsNone(cfg.stt_profile_id)
+            self.assertIsNone(cfg.stt_profile_name)
+            self.assertIsNone(ctx.runtime.engine.config.stt_profile_id)
+            self.assertIsNone(ctx.runtime.engine.config.stt_profile_name)
 
     def test_reasoning_change_rebuilds_engine(self) -> None:
         from agent.builder import build_engine
@@ -968,7 +1047,7 @@ class TestTUIModelAndReasoningSwitching(unittest.TestCase):
 
             self.assertIsNot(ctx.runtime.engine, old_engine)
             self.assertEqual(cfg.reasoning_effort, "low")
-            self.assertTrue(any("low" in l for l in lines))
+            self.assertTrue(any("low" in line for line in lines))
 
     def test_reasoning_off_disables(self) -> None:
         from agent.builder import build_engine

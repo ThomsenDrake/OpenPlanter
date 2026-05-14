@@ -95,7 +95,11 @@ jobs:
             }
 
             function hasRequiredReviewBody(body, headSha) {
-              return Boolean(body && body.includes(marker) && body.includes(`Head SHA: ${headSha}`));
+              if (!body || !body.includes(marker)) {
+                return false;
+              }
+              return body.includes(`Head SHA: ${headSha}`)
+                || body.includes(`**Head SHA:** ${headSha}`);
             }
 
             const pr = await loadPullRequest();

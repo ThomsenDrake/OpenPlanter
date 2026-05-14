@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
-from agent.__main__ import _resolve_provider
+from agent.__main__ import _apply_active_profiles_to_config, _resolve_provider
 from agent.builder import _validate_model_provider, infer_provider_for_model
+from agent.config import AgentConfig
 from agent.credentials import CredentialBundle
 from agent.model import ModelError
 from agent.settings import (
     PersistentSettings,
+    ProviderProfile,
     SettingsStore,
     normalize_chrome_mcp_channel,
     normalize_embeddings_provider,
@@ -80,6 +84,229 @@ class SettingsTests(unittest.TestCase):
             store.save(settings)
             loaded = store.load()
             self.assertEqual(loaded.embeddings_provider, "mistral")
+
+    def test_provider_profiles_roundtrip_separate_pools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = SettingsStore(workspace=root, session_root_dir=".openplanter")
+            settings = PersistentSettings(
+                active_profiles={
+                    "llm": "azure-foundry",
+                    "embedding": "mistral-embed",
+                    "stt": "mistral-voxtral",
+                },
+                profiles={
+                    "llm": {
+                        "azure-foundry": ProviderProfile(
+                            name="Azure Foundry GPT",
+                            provider="openai",
+                            adapter="openai-compatible",
+                            model="azure-foundry/gpt-5.5",
+                            base_url="https://example.test/openai/v1",
+                            auth_ref="openai",
+                        )
+                    },
+                    "embedding": {
+                        "mistral-embed": ProviderProfile(
+                            name="Mistral embeddings",
+                            provider="mistral",
+                            adapter="embedding",
+                            model="mistral-embed",
+                            base_url="https://api.mistral.ai",
+                            auth_ref="mistral",
+                        )
+                    },
+                    "stt": {
+                        "mistral-voxtral": ProviderProfile(
+                            name="Mistral Voxtral STT",
+                            provider="mistral",
+                            adapter="speech-to-text",
+                            model="voxtral-mini-latest",
+                            base_url="https://api.mistral.ai",
+                            auth_ref="mistral",
+                            options={"chunk_max_seconds": 600},
+                        )
+                    },
+                },
+            )
+            store.save(settings)
+            loaded = store.load()
+            self.assertEqual(loaded.active_profiles["llm"], "azure-foundry")
+            self.assertEqual(loaded.active_profiles["embedding"], "mistral-embed")
+            self.assertEqual(loaded.active_profiles["stt"], "mistral-voxtral")
+            self.assertEqual(
+                loaded.profiles["llm"]["azure-foundry"].model,
+                "azure-foundry/gpt-5.5",
+            )
+            self.assertEqual(
+                loaded.profiles["embedding"]["mistral-embed"].model,
+                "mistral-embed",
+            )
+            self.assertEqual(
+                loaded.profiles["stt"]["mistral-voxtral"].options["chunk_max_seconds"],
+                600,
+            )
+
+    def test_legacy_settings_migrate_to_provider_profiles(self) -> None:
+        settings = PersistentSettings(
+            default_model_openai="azure-foundry/gpt-5.5",
+            embeddings_provider="mistral",
+            mistral_transcription_model="voxtral-mini-latest",
+            mistral_transcription_chunk_max_seconds=600,
+        ).normalized()
+
+        self.assertEqual(settings.active_profiles["llm"], "openai-default")
+        self.assertEqual(settings.active_profiles["embedding"], "mistral-default")
+        self.assertEqual(settings.active_profiles["stt"], "mistral-voxtral")
+        self.assertEqual(
+            settings.profiles["llm"]["openai-default"].model,
+            "azure-foundry/gpt-5.5",
+        )
+        self.assertEqual(
+            settings.profiles["embedding"]["mistral-default"].model,
+            "mistral-embed",
+        )
+        self.assertEqual(
+            settings.profiles["stt"]["mistral-voxtral"].options["chunk_max_seconds"],
+            600,
+        )
+
+    def test_option_only_stt_settings_migrate_to_profile(self) -> None:
+        settings = PersistentSettings(
+            mistral_transcription_max_chunks=12,
+            mistral_transcription_request_timeout_sec=240,
+        ).normalized()
+
+        self.assertEqual(settings.active_profiles["stt"], "mistral-voxtral")
+        profile = settings.profiles["stt"]["mistral-voxtral"]
+        self.assertEqual(profile.model, "voxtral-mini-latest")
+        self.assertEqual(profile.options["max_chunks"], 12)
+        self.assertEqual(profile.options["request_timeout_sec"], 240)
+
+    def test_profile_id_collisions_get_unique_ids(self) -> None:
+        settings = PersistentSettings(
+            active_profiles={"llm": "OpenAI_GPT_4"},
+            profiles={
+                "llm": {
+                    "OpenAI GPT 4": ProviderProfile(
+                        provider="openai",
+                        model="gpt-4o",
+                    ),
+                    "OpenAI_GPT_4": ProviderProfile(
+                        provider="openai",
+                        model="gpt-4.1-mini",
+                    ),
+                }
+            },
+        ).normalized()
+
+        self.assertIn("openai-gpt-4", settings.profiles["llm"])
+        self.assertIn("openai-gpt-4-2", settings.profiles["llm"])
+        self.assertEqual(settings.active_profiles["llm"], "openai-gpt-4-2")
+        self.assertEqual(
+            settings.profiles["llm"]["openai-gpt-4-2"].model,
+            "gpt-4.1-mini",
+        )
+
+    def test_invalid_llm_profile_provider_is_inferred_from_model(self) -> None:
+        profile = ProviderProfile(
+            provider="not-a-provider",
+            model="azure-foundry/gpt-5.5",
+        ).normalized("llm")
+
+        self.assertEqual(profile.provider, "openai")
+
+    def test_embedding_env_overrides_skip_active_profile(self) -> None:
+        settings = PersistentSettings(
+            active_profiles={"embedding": "mistral-embed"},
+            profiles={
+                "embedding": {
+                    "mistral-embed": ProviderProfile(
+                        provider="mistral",
+                        model="mistral-embed",
+                        base_url="https://api.mistral.ai",
+                    )
+                }
+            },
+        ).normalized()
+        args = Namespace(provider=None, model=None, embeddings_provider=None)
+
+        for env_key in ("OPENPLANTER_EMBEDDINGS_MODEL", "OPENPLANTER_EMBEDDINGS_BASE_URL"):
+            with self.subTest(env_key=env_key):
+                cfg = AgentConfig(
+                    workspace=Path("/tmp/workspace"),
+                    embeddings_provider="voyage",
+                    embeddings_model="env-embed",
+                    embeddings_base_url="https://embeddings.example.test",
+                )
+                with patch.dict("os.environ", {env_key: "1"}, clear=True):
+                    _apply_active_profiles_to_config(cfg, settings, args)
+
+                self.assertIsNone(cfg.embedding_profile_id)
+                self.assertEqual(cfg.embeddings_provider, "voyage")
+                self.assertEqual(cfg.embeddings_model, "env-embed")
+                self.assertEqual(cfg.embeddings_base_url, "https://embeddings.example.test")
+
+    def test_llm_env_overrides_preserve_profile_side_fields(self) -> None:
+        settings = PersistentSettings(
+            active_profiles={"llm": "zai-coding"},
+            profiles={
+                "llm": {
+                    "zai-coding": ProviderProfile(
+                        provider="zai",
+                        model="glm-4.6",
+                        base_url="https://profile-zai.example/v4",
+                        options={
+                            "reasoning_effort": "high",
+                            "zai_plan": "coding",
+                        },
+                    )
+                }
+            },
+        ).normalized()
+        args = Namespace(provider=None, model=None, embeddings_provider=None)
+        cfg = AgentConfig(
+            workspace=Path("/tmp/workspace"),
+            provider="auto",
+            model="default-model",
+            reasoning_effort="low",
+            zai_plan="paygo",
+            zai_base_url="https://env-zai.example/v4",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENPLANTER_REASONING_EFFORT": "low",
+                "OPENPLANTER_ZAI_PLAN": "paygo",
+                "OPENPLANTER_ZAI_BASE_URL": "https://env-zai.example/v4",
+            },
+            clear=True,
+        ):
+            _apply_active_profiles_to_config(cfg, settings, args)
+
+        self.assertEqual(cfg.llm_profile_id, "zai-coding")
+        self.assertEqual(cfg.provider, "zai")
+        self.assertEqual(cfg.model, "glm-4.6")
+        self.assertEqual(cfg.reasoning_effort, "low")
+        self.assertEqual(cfg.zai_plan, "paygo")
+        self.assertEqual(cfg.zai_base_url, "https://env-zai.example/v4")
+
+    def test_legacy_profile_migration_refreshes_changed_defaults(self) -> None:
+        settings = PersistentSettings(default_model_openai="azure-foundry/gpt-5.5").normalized()
+        self.assertEqual(
+            settings.profiles["llm"]["openai-default"].model,
+            "azure-foundry/gpt-5.5",
+        )
+
+        settings.default_model_openai = "azure-foundry/gpt-5.6"
+        refreshed = settings.normalized()
+
+        self.assertEqual(
+            refreshed.profiles["llm"]["openai-default"].model,
+            "azure-foundry/gpt-5.6",
+        )
+        self.assertEqual(refreshed.default_model_for_provider("openai"), "azure-foundry/gpt-5.6")
 
     def test_normalize_reasoning_effort(self) -> None:
         self.assertEqual(normalize_reasoning_effort("LOW"), "low")

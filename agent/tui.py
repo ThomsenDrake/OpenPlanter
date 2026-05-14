@@ -14,7 +14,7 @@ from .engine import RLMEngine, _MODEL_CONTEXT_WINDOWS, _DEFAULT_CONTEXT_WINDOW
 from .model import EchoFallbackModel, ModelError
 from .retrieval import build_embeddings_status
 from .runtime import SessionRuntime
-from .settings import SettingsStore
+from .settings import ProviderProfile, SettingsStore, _slugify_profile_id
 
 
 SLASH_COMMANDS: list[str] = [
@@ -26,6 +26,7 @@ SLASH_COMMANDS: list[str] = [
     "/model",
     "/reasoning",
     "/embeddings",
+    "/stt",
     "/chrome",
 ]
 
@@ -80,8 +81,12 @@ HELP_LINES: list[str] = [
     "  /model <name>       Switch model (e.g. /model opus, /model gpt5)",
     "  /model <name> --save  Switch and persist as default",
     "  /model list [all]   List available models",
+    "  /model profiles | /model profile <id>  List or switch saved LLM profiles",
     "  /reasoning [low|medium|high|xhigh|off]  Change reasoning effort",
     "  /embeddings [voyage|mistral] [--save]  Change retrieval embeddings provider",
+    "  /embeddings profiles | /embeddings profile <id>  List or switch saved embedding profiles",
+    "  /stt [model] [--save]  Change audio/STT transcription model",
+    "  /stt profiles | /stt profile <id>  List or switch saved STT profiles",
     "  /chrome status|on|off|auto|url <endpoint>|channel <stable|beta|dev|canary> [--save]",
     "  /status  /clear  /quit  /exit  /help",
 ]
@@ -184,6 +189,173 @@ def _available_providers(cfg: AgentConfig) -> list[str]:
     return providers
 
 
+def _base_url_for_provider(cfg: AgentConfig, provider: str) -> str | None:
+    return {
+        "openai": cfg.openai_base_url,
+        "anthropic": cfg.anthropic_base_url,
+        "openrouter": cfg.openrouter_base_url,
+        "cerebras": cfg.cerebras_base_url,
+        "zai": cfg.zai_base_url,
+        "ollama": cfg.ollama_base_url,
+    }.get(provider)
+
+
+def _set_base_url_for_provider(cfg: AgentConfig, provider: str, base_url: str | None) -> None:
+    if not base_url:
+        return
+    if provider == "openai":
+        cfg.openai_base_url = base_url
+        cfg.base_url = base_url
+    elif provider == "anthropic":
+        cfg.anthropic_base_url = base_url
+    elif provider == "openrouter":
+        cfg.openrouter_base_url = base_url
+    elif provider == "cerebras":
+        cfg.cerebras_base_url = base_url
+    elif provider == "zai":
+        cfg.zai_base_url = base_url
+    elif provider == "ollama":
+        cfg.ollama_base_url = base_url
+
+
+def _format_profile_pool(
+    settings: Any,
+    modality: str,
+    label: str,
+) -> list[str]:
+    pool = settings.profiles.get(modality, {})
+    if not pool:
+        return [f"No saved {label} profiles."]
+    active = settings.active_profiles.get(modality)
+    lines = [f"{label.title()} profiles:"]
+    for profile_id in sorted(pool):
+        profile = pool[profile_id]
+        marker = "*" if profile_id == active else " "
+        name = f"{profile.name}: " if profile.name else ""
+        lines.append(f"{marker} {profile_id} - {name}{profile.provider}/{profile.model}")
+    return lines
+
+
+def _apply_llm_profile(ctx: ChatContext, profile_id: str, profile: ProviderProfile) -> None:
+    ctx.cfg.llm_profile_id = profile_id
+    ctx.cfg.llm_profile_name = profile.name
+    ctx.cfg.provider = profile.provider
+    ctx.cfg.model = profile.model
+    _set_base_url_for_provider(ctx.cfg, profile.provider, profile.base_url)
+    effort = str(profile.options.get("reasoning_effort", "") or "").strip().lower()
+    if effort:
+        ctx.cfg.reasoning_effort = None if effort in {"off", "none"} else effort
+
+
+def _clear_llm_profile(ctx: ChatContext) -> None:
+    ctx.cfg.llm_profile_id = None
+    ctx.cfg.llm_profile_name = None
+    ctx.runtime.engine.config.llm_profile_id = None
+    ctx.runtime.engine.config.llm_profile_name = None
+
+
+def _apply_embedding_profile(ctx: ChatContext, profile_id: str, profile: ProviderProfile) -> None:
+    ctx.cfg.embedding_profile_id = profile_id
+    ctx.cfg.embedding_profile_name = profile.name
+    ctx.cfg.embeddings_provider = profile.provider
+    ctx.cfg.embeddings_model = profile.model or (
+        "voyage-4" if profile.provider == "voyage" else "mistral-embed"
+    )
+    ctx.cfg.embeddings_base_url = profile.base_url or (
+        "https://api.voyageai.com"
+        if profile.provider == "voyage"
+        else "https://api.mistral.ai"
+    )
+    ctx.runtime.engine.config.embeddings_provider = ctx.cfg.embeddings_provider
+    ctx.runtime.engine.config.embeddings_model = ctx.cfg.embeddings_model
+    ctx.runtime.engine.config.embeddings_base_url = ctx.cfg.embeddings_base_url
+
+
+def _clear_embedding_profile(ctx: ChatContext) -> None:
+    ctx.cfg.embedding_profile_id = None
+    ctx.cfg.embedding_profile_name = None
+    ctx.runtime.engine.config.embedding_profile_id = None
+    ctx.runtime.engine.config.embedding_profile_name = None
+
+
+def _profile_option_int(profile: ProviderProfile, key: str, fallback: int) -> int:
+    value = profile.options.get(key)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _profile_option_float(profile: ProviderProfile, key: str, fallback: float) -> float:
+    value = profile.options.get(key)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _apply_stt_profile(ctx: ChatContext, profile_id: str, profile: ProviderProfile) -> None:
+    ctx.cfg.stt_profile_id = profile_id
+    ctx.cfg.stt_profile_name = profile.name
+    if profile.provider != "mistral":
+        return
+    ctx.cfg.mistral_transcription_model = profile.model or ctx.cfg.mistral_transcription_model
+    ctx.cfg.mistral_transcription_base_url = (
+        profile.base_url or ctx.cfg.mistral_transcription_base_url
+    )
+    ctx.cfg.mistral_transcription_max_bytes = _profile_option_int(
+        profile,
+        "max_bytes",
+        ctx.cfg.mistral_transcription_max_bytes,
+    )
+    ctx.cfg.mistral_transcription_chunk_max_seconds = _profile_option_int(
+        profile,
+        "chunk_max_seconds",
+        ctx.cfg.mistral_transcription_chunk_max_seconds,
+    )
+    ctx.cfg.mistral_transcription_chunk_overlap_seconds = _profile_option_float(
+        profile,
+        "chunk_overlap_seconds",
+        ctx.cfg.mistral_transcription_chunk_overlap_seconds,
+    )
+    ctx.cfg.mistral_transcription_max_chunks = _profile_option_int(
+        profile,
+        "max_chunks",
+        ctx.cfg.mistral_transcription_max_chunks,
+    )
+    ctx.cfg.mistral_transcription_request_timeout_sec = _profile_option_int(
+        profile,
+        "request_timeout_sec",
+        ctx.cfg.mistral_transcription_request_timeout_sec,
+    )
+    ctx.runtime.engine.config.mistral_transcription_model = ctx.cfg.mistral_transcription_model
+    ctx.runtime.engine.config.mistral_transcription_base_url = (
+        ctx.cfg.mistral_transcription_base_url
+    )
+    ctx.runtime.engine.config.mistral_transcription_max_bytes = (
+        ctx.cfg.mistral_transcription_max_bytes
+    )
+    ctx.runtime.engine.config.mistral_transcription_chunk_max_seconds = (
+        ctx.cfg.mistral_transcription_chunk_max_seconds
+    )
+    ctx.runtime.engine.config.mistral_transcription_chunk_overlap_seconds = (
+        ctx.cfg.mistral_transcription_chunk_overlap_seconds
+    )
+    ctx.runtime.engine.config.mistral_transcription_max_chunks = (
+        ctx.cfg.mistral_transcription_max_chunks
+    )
+    ctx.runtime.engine.config.mistral_transcription_request_timeout_sec = (
+        ctx.cfg.mistral_transcription_request_timeout_sec
+    )
+
+
+def _clear_stt_profile(ctx: ChatContext) -> None:
+    ctx.cfg.stt_profile_id = None
+    ctx.cfg.stt_profile_name = None
+    ctx.runtime.engine.config.stt_profile_id = None
+    ctx.runtime.engine.config.stt_profile_name = None
+
+
 def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
     """Handle /model sub-commands. Returns display lines."""
     from .builder import (
@@ -198,11 +370,35 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
         model_name = _get_model_display_name(ctx.runtime.engine)
         effort = ctx.cfg.reasoning_effort or "(off)"
         avail = ", ".join(_available_providers(ctx.cfg)) or "none"
+        profile = ctx.cfg.llm_profile_name or ctx.cfg.llm_profile_id or "(none)"
         return [
             f"Provider: {ctx.cfg.provider} | Model: {model_name} | Reasoning: {effort}",
+            f"Active LLM profile: {profile}",
             f"Configured providers: {avail}",
             f"Aliases: {', '.join(sorted(MODEL_ALIASES.keys()))}",
         ]
+
+    if parts[0] in {"profiles", "profile"}:
+        settings = ctx.settings_store.load()
+        if parts[0] == "profiles" or len(parts) < 2:
+            return _format_profile_pool(settings, "llm", "LLM")
+        profile_id = parts[1].strip()
+        profile = settings.profiles.get("llm", {}).get(profile_id)
+        if profile is None:
+            return [f"Unknown LLM profile '{profile_id}'."] + _format_profile_pool(
+                settings,
+                "llm",
+                "LLM",
+            )
+        _apply_llm_profile(ctx, profile_id, profile)
+        try:
+            new_engine = build_engine(ctx.cfg)
+        except ModelError as exc:
+            return [f"Failed to switch LLM profile: {exc}"]
+        ctx.runtime.engine = new_engine
+        settings.active_profiles["llm"] = profile_id
+        ctx.settings_store.save(settings)
+        return [f"Switched to LLM profile: {profile_id}"]
 
     # /model list [all|<provider>]
     if parts[0] == "list":
@@ -252,6 +448,8 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
     except ModelError as exc:
         return [f"Failed to switch model: {exc}"]
     ctx.runtime.engine = new_engine
+    if not save:
+        _clear_llm_profile(ctx)
 
     alias_note = f" (alias: {raw_model})" if raw_model.lower() in MODEL_ALIASES else ""
     lines = [f"Switched to model: {new_model}{alias_note}"]
@@ -261,6 +459,18 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
     if save:
         settings = ctx.settings_store.load()
         provider = ctx.cfg.provider
+        profile_id = _slugify_profile_id(provider, new_model)
+        settings.profiles.setdefault("llm", {})[profile_id] = ProviderProfile(
+            name=f"{provider} {new_model}",
+            provider=provider,
+            model=new_model,
+            base_url=_base_url_for_provider(ctx.cfg, provider),
+            auth_ref=provider,
+            options={"reasoning_effort": ctx.cfg.reasoning_effort},
+        )
+        settings.active_profiles["llm"] = profile_id
+        ctx.cfg.llm_profile_id = profile_id
+        ctx.cfg.llm_profile_name = f"{provider} {new_model}"
         if provider == "openai":
             settings.default_model_openai = new_model
         elif provider == "anthropic":
@@ -276,7 +486,7 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
         else:
             settings.default_model = new_model
         ctx.settings_store.save(settings)
-        lines.append("Saved as workspace default.")
+        lines.append(f"Saved as workspace LLM profile: {profile_id}")
 
     return lines
 
@@ -364,6 +574,7 @@ def _format_chrome_status(ctx: ChatContext) -> list[str]:
 def _format_embeddings_status(ctx: ChatContext) -> list[str]:
     status = build_embeddings_status(
         provider=ctx.cfg.embeddings_provider,
+        embeddings_model=ctx.cfg.embeddings_model,
         voyage_api_key=ctx.cfg.voyage_api_key,
         mistral_api_key=ctx.cfg.mistral_api_key,
     )
@@ -372,6 +583,7 @@ def _format_embeddings_status(ctx: ChatContext) -> list[str]:
             "Embeddings: "
             f"provider={status.provider} | model={status.model} | status={status.status}"
         ),
+        f"Active embedding profile: {ctx.cfg.embedding_profile_name or ctx.cfg.embedding_profile_id or '(none)'}",
         f"Retrieval status: {status.detail}",
     ]
 
@@ -388,18 +600,131 @@ def handle_embeddings_command(args: str, ctx: ChatContext) -> list[str]:
     if not parts:
         return ["Usage: /embeddings [voyage|mistral] [--save]"]
 
+    if parts[0] in {"profiles", "profile"}:
+        settings = ctx.settings_store.load()
+        if parts[0] == "profiles" or len(parts) < 2:
+            return _format_profile_pool(settings, "embedding", "embedding")
+        profile_id = parts[1].strip()
+        profile = settings.profiles.get("embedding", {}).get(profile_id)
+        if profile is None:
+            return [
+                f"Unknown embedding profile '{profile_id}'.",
+            ] + _format_profile_pool(settings, "embedding", "embedding")
+        _apply_embedding_profile(ctx, profile_id, profile)
+        settings.active_profiles["embedding"] = profile_id
+        ctx.settings_store.save(settings)
+        return _format_embeddings_status(ctx) + [
+            f"Switched to embedding profile: {profile_id}"
+        ]
+
     provider = parts[0].strip().lower()
     if provider not in {"voyage", "mistral"}:
         return [f"Invalid embeddings provider '{provider}'. Use: voyage, mistral"]
 
     ctx.cfg.embeddings_provider = provider
+    ctx.cfg.embeddings_model = "voyage-4" if provider == "voyage" else "mistral-embed"
+    ctx.cfg.embeddings_base_url = (
+        "https://api.voyageai.com" if provider == "voyage" else "https://api.mistral.ai"
+    )
     ctx.runtime.engine.config.embeddings_provider = provider
-    lines = _format_embeddings_status(ctx)
+    ctx.runtime.engine.config.embeddings_model = ctx.cfg.embeddings_model
+    ctx.runtime.engine.config.embeddings_base_url = ctx.cfg.embeddings_base_url
+    if not save:
+        _clear_embedding_profile(ctx)
     if save:
         settings = ctx.settings_store.load()
+        profile_id = _slugify_profile_id(provider, ctx.cfg.embeddings_model)
+        settings.profiles.setdefault("embedding", {})[profile_id] = ProviderProfile(
+            name=f"{provider.title()} embeddings",
+            provider=provider,
+            adapter="embedding",
+            model=ctx.cfg.embeddings_model,
+            base_url=ctx.cfg.embeddings_base_url,
+            auth_ref=provider,
+        )
+        settings.active_profiles["embedding"] = profile_id
         settings.embeddings_provider = provider
         ctx.settings_store.save(settings)
-        lines.append("Saved as workspace default.")
+        ctx.cfg.embedding_profile_id = profile_id
+        ctx.cfg.embedding_profile_name = f"{provider.title()} embeddings"
+        ctx.runtime.engine.config.embedding_profile_id = profile_id
+        ctx.runtime.engine.config.embedding_profile_name = f"{provider.title()} embeddings"
+    lines = _format_embeddings_status(ctx)
+    if save:
+        lines.append(f"Saved as workspace embedding profile: {profile_id}")
+    return lines
+
+
+def handle_stt_command(args: str, ctx: ChatContext) -> list[str]:
+    parts = [part for part in args.strip().split() if part]
+    if not parts:
+        return [
+            (
+                "Audio/STT: "
+                f"provider=mistral | model={ctx.cfg.mistral_transcription_model} | "
+                f"profile={ctx.cfg.stt_profile_name or ctx.cfg.stt_profile_id or '(none)'}"
+            ),
+            "Usage: /stt [model] [--save]",
+        ]
+
+    save = "--save" in parts
+    parts = [part for part in parts if part != "--save"]
+    if not parts:
+        return ["Usage: /stt [model] [--save]"]
+
+    if parts[0] in {"profiles", "profile"}:
+        settings = ctx.settings_store.load()
+        if parts[0] == "profiles" or len(parts) < 2:
+            return _format_profile_pool(settings, "stt", "STT")
+        profile_id = parts[1].strip()
+        profile = settings.profiles.get("stt", {}).get(profile_id)
+        if profile is None:
+            return [f"Unknown STT profile '{profile_id}'."] + _format_profile_pool(
+                settings,
+                "stt",
+                "STT",
+            )
+        _apply_stt_profile(ctx, profile_id, profile)
+        settings.active_profiles["stt"] = profile_id
+        ctx.settings_store.save(settings)
+        return [f"Switched to STT profile: {profile_id}"]
+
+    model = parts[0].strip()
+    if not model:
+        return ["Usage: /stt [model] [--save]"]
+
+    ctx.cfg.mistral_transcription_model = model
+    ctx.runtime.engine.config.mistral_transcription_model = model
+    if not save:
+        _clear_stt_profile(ctx)
+    lines = [f"Audio/STT model set to: {model}"]
+    if save:
+        settings = ctx.settings_store.load()
+        profile_id = _slugify_profile_id("mistral", model)
+        profile_name = f"Mistral {model} STT"
+        settings.profiles.setdefault("stt", {})[profile_id] = ProviderProfile(
+            name=profile_name,
+            provider="mistral",
+            adapter="speech-to-text",
+            model=model,
+            base_url=ctx.cfg.mistral_transcription_base_url,
+            auth_ref="mistral",
+            options={
+                "max_bytes": ctx.cfg.mistral_transcription_max_bytes,
+                "chunk_max_seconds": ctx.cfg.mistral_transcription_chunk_max_seconds,
+                "chunk_overlap_seconds": ctx.cfg.mistral_transcription_chunk_overlap_seconds,
+                "max_chunks": ctx.cfg.mistral_transcription_max_chunks,
+                "request_timeout_sec": ctx.cfg.mistral_transcription_request_timeout_sec,
+            },
+        )
+        settings.active_profiles["stt"] = profile_id
+        settings.mistral_transcription_model = model
+        ctx.settings_store.save(settings)
+        ctx.cfg.stt_profile_id = profile_id
+        ctx.cfg.stt_profile_name = profile_name
+        ctx.runtime.engine.config.stt_profile_id = profile_id
+        ctx.runtime.engine.config.stt_profile_name = profile_name
+        lines.append(f"Saved as workspace STT profile: {profile_id}")
     return lines
 
 
@@ -486,7 +811,8 @@ def dispatch_slash_command(
         emit(
             "Provider: "
             f"{ctx.cfg.provider} | Model: {model_name} | Reasoning: {effort} | "
-            f"Embeddings: {ctx.cfg.embeddings_provider} | Mode: {mode}"
+            f"Embeddings: {ctx.cfg.embeddings_provider}:{ctx.cfg.embeddings_model} | "
+            f"STT: mistral:{ctx.cfg.mistral_transcription_model} | Mode: {mode}"
         )
         tokens = ctx.runtime.engine.session_tokens
         if tokens:
@@ -520,6 +846,12 @@ def dispatch_slash_command(
     if command.startswith("/embeddings"):
         cmd_args = command[len("/embeddings"):].strip()
         lines = handle_embeddings_command(cmd_args, ctx)
+        for line in lines:
+            emit(line)
+        return "handled"
+    if command.startswith("/stt"):
+        cmd_args = command[len("/stt"):].strip()
+        lines = handle_stt_command(cmd_args, ctx)
         for line in lines:
             emit(line)
         return "handled"

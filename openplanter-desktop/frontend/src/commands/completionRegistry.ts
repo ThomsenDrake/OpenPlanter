@@ -49,6 +49,10 @@ const EMBEDDINGS_PROVIDERS: CompletionItem[] = [
   { value: "mistral", description: "Use Mistral embeddings", children: SAVE_FLAG },
 ];
 
+const STT_MODELS: CompletionItem[] = [
+  { value: "voxtral-mini-latest", description: "Use Mistral Voxtral Mini STT", children: SAVE_FLAG },
+];
+
 const CONTINUITY_MODES: CompletionItem[] = [
   { value: "auto", description: "Infer follow-ups automatically", children: SAVE_FLAG },
   { value: "fresh", description: "Force a fresh turn context", children: SAVE_FLAG },
@@ -134,6 +138,12 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
     description: "Show or switch model",
     children: [
       { value: "list", description: "List available models", children: PROVIDER_FILTERS },
+      { value: "profiles", description: "List saved LLM profiles" },
+      {
+        value: "profile",
+        description: "Switch to a saved LLM profile",
+        children: [{ value: "<id>", description: "Saved LLM profile id" }],
+      },
       ...MODEL_ALIAS_ITEMS,
     ],
   },
@@ -145,7 +155,28 @@ export const COMMAND_COMPLETIONS: CompletionItem[] = [
   {
     value: "/embeddings",
     description: "Show or switch the embeddings provider",
-    children: EMBEDDINGS_PROVIDERS,
+    children: [
+      { value: "profiles", description: "List saved embedding profiles" },
+      {
+        value: "profile",
+        description: "Switch to a saved embedding profile",
+        children: [{ value: "<id>", description: "Saved embedding profile id" }],
+      },
+      ...EMBEDDINGS_PROVIDERS,
+    ],
+  },
+  {
+    value: "/stt",
+    description: "Show or switch the audio transcription model",
+    children: [
+      { value: "profiles", description: "List saved STT profiles" },
+      {
+        value: "profile",
+        description: "Switch to a saved STT profile",
+        children: [{ value: "<id>", description: "Saved STT profile id" }],
+      },
+      ...STT_MODELS,
+    ],
   },
   {
     value: "/web-search",

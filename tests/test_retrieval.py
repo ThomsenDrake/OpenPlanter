@@ -8,7 +8,6 @@ from pathlib import Path
 
 from agent.retrieval import (
     MISTRAL_EMBEDDING_MODEL,
-    ChunkRecord,
     EmbeddingsClient,
     EmbeddingsProviderLimits,
     RETRIEVAL_PACKET_VERSION,
@@ -75,6 +74,27 @@ class QueryPoolingClient(EmbeddingsClient):
 
 
 class RetrievalTests(unittest.TestCase):
+    def test_embeddings_client_accepts_versioned_base_url(self) -> None:
+        root_client = EmbeddingsClient(
+            "voyage",
+            "test-key",
+            base_url="https://api.voyageai.com",
+        )
+        versioned_client = EmbeddingsClient(
+            "voyage",
+            "test-key",
+            base_url="https://api.voyageai.com/v1",
+        )
+        endpoint_client = EmbeddingsClient(
+            "voyage",
+            "test-key",
+            base_url="https://api.voyageai.com/v1/embeddings",
+        )
+
+        self.assertEqual(root_client._endpoint(), "https://api.voyageai.com/v1/embeddings")
+        self.assertEqual(versioned_client._endpoint(), "https://api.voyageai.com/v1/embeddings")
+        self.assertEqual(endpoint_client._endpoint(), "https://api.voyageai.com/v1/embeddings")
+
     def test_documents_from_file_ignores_macos_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -35,6 +35,10 @@ pub const MISTRAL_TRANSCRIPTION_REQUEST_TIMEOUT_SEC: i64 = 180;
 pub const CHROME_MCP_DEFAULT_CHANNEL: &str = "stable";
 pub const CHROME_MCP_CONNECT_TIMEOUT_SEC: i64 = 15;
 pub const CHROME_MCP_RPC_TIMEOUT_SEC: i64 = 45;
+pub const VOYAGE_EMBEDDING_BASE_URL: &str = "https://api.voyageai.com";
+pub const MISTRAL_EMBEDDING_BASE_URL: &str = "https://api.mistral.ai";
+pub const VOYAGE_EMBEDDING_MODEL: &str = "voyage-4";
+pub const MISTRAL_EMBEDDING_MODEL: &str = "mistral-embed";
 
 /// Default model for each supported provider.
 pub static PROVIDER_DEFAULT_MODELS: LazyLock<HashMap<&'static str, &'static str>> =
@@ -110,6 +114,22 @@ pub fn normalize_embeddings_provider(value: Option<&str>) -> String {
     match value.unwrap_or_default().trim().to_lowercase().as_str() {
         "mistral" => "mistral".to_string(),
         _ => "voyage".to_string(),
+    }
+}
+
+pub fn default_embeddings_model(provider: Option<&str>) -> String {
+    if normalize_embeddings_provider(provider) == "voyage" {
+        VOYAGE_EMBEDDING_MODEL.to_string()
+    } else {
+        MISTRAL_EMBEDDING_MODEL.to_string()
+    }
+}
+
+pub fn default_embeddings_base_url(provider: Option<&str>) -> String {
+    if normalize_embeddings_provider(provider) == "voyage" {
+        VOYAGE_EMBEDDING_BASE_URL.to_string()
+    } else {
+        MISTRAL_EMBEDDING_BASE_URL.to_string()
     }
 }
 
@@ -270,6 +290,8 @@ pub struct AgentConfig {
     pub provider: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    pub llm_profile_id: Option<String>,
+    pub llm_profile_name: Option<String>,
 
     // Base URLs
     pub base_url: String,
@@ -303,6 +325,10 @@ pub struct AgentConfig {
     pub tavily_api_key: Option<String>,
     pub web_search_provider: String,
     pub embeddings_provider: String,
+    pub embeddings_model: String,
+    pub embeddings_base_url: String,
+    pub embedding_profile_id: Option<String>,
+    pub embedding_profile_name: Option<String>,
     pub continuity_mode: String,
     pub voyage_api_key: Option<String>,
     pub mistral_api_key: Option<String>,
@@ -314,6 +340,8 @@ pub struct AgentConfig {
     pub mistral_document_ai_request_timeout_sec: i64,
     pub mistral_transcription_api_key: Option<String>,
     pub mistral_transcription_model: String,
+    pub stt_profile_id: Option<String>,
+    pub stt_profile_name: Option<String>,
     pub mistral_transcription_max_bytes: i64,
     pub mistral_transcription_chunk_max_seconds: i64,
     pub mistral_transcription_chunk_overlap_seconds: f64,
@@ -368,6 +396,8 @@ impl Default for AgentConfig {
             provider: "auto".into(),
             model: "anthropic-foundry/claude-opus-4-6".into(),
             reasoning_effort: Some("xhigh".into()),
+            llm_profile_id: None,
+            llm_profile_name: None,
             base_url: FOUNDRY_OPENAI_BASE_URL.into(),
             openai_base_url: FOUNDRY_OPENAI_BASE_URL.into(),
             anthropic_base_url: FOUNDRY_ANTHROPIC_BASE_URL.into(),
@@ -397,6 +427,10 @@ impl Default for AgentConfig {
             tavily_api_key: None,
             web_search_provider: "exa".into(),
             embeddings_provider: "voyage".into(),
+            embeddings_model: VOYAGE_EMBEDDING_MODEL.into(),
+            embeddings_base_url: VOYAGE_EMBEDDING_BASE_URL.into(),
+            embedding_profile_id: None,
+            embedding_profile_name: None,
             continuity_mode: "auto".into(),
             voyage_api_key: None,
             mistral_api_key: None,
@@ -408,6 +442,8 @@ impl Default for AgentConfig {
             mistral_document_ai_request_timeout_sec: MISTRAL_DOCUMENT_AI_REQUEST_TIMEOUT_SEC,
             mistral_transcription_api_key: None,
             mistral_transcription_model: MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into(),
+            stt_profile_id: None,
+            stt_profile_name: None,
             mistral_transcription_max_bytes: 100 * 1024 * 1024,
             mistral_transcription_chunk_max_seconds: MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS,
             mistral_transcription_chunk_overlap_seconds:
@@ -531,6 +567,10 @@ impl AgentConfig {
             normalize_web_search_provider(env_opt("OPENPLANTER_WEB_SEARCH_PROVIDER").as_deref());
         let embeddings_provider =
             normalize_embeddings_provider(env_opt("OPENPLANTER_EMBEDDINGS_PROVIDER").as_deref());
+        let embeddings_model = env_opt("OPENPLANTER_EMBEDDINGS_MODEL")
+            .unwrap_or_else(|| default_embeddings_model(Some(&embeddings_provider)));
+        let embeddings_base_url = env_opt("OPENPLANTER_EMBEDDINGS_BASE_URL")
+            .unwrap_or_else(|| default_embeddings_base_url(Some(&embeddings_provider)));
         let continuity_mode =
             normalize_continuity_mode(env_opt("OPENPLANTER_CONTINUITY_MODE").as_deref());
         let recursion_policy =
@@ -550,6 +590,8 @@ impl AgentConfig {
             provider,
             model,
             reasoning_effort,
+            llm_profile_id: None,
+            llm_profile_name: None,
             base_url: openai_base_url.clone(),
             api_key: openai_api_key.clone(),
             openai_base_url,
@@ -594,6 +636,10 @@ impl AgentConfig {
             tavily_api_key,
             web_search_provider,
             embeddings_provider,
+            embeddings_model,
+            embeddings_base_url,
+            embedding_profile_id: None,
+            embedding_profile_name: None,
             continuity_mode,
             voyage_api_key,
             mistral_api_key,
@@ -620,6 +666,8 @@ impl AgentConfig {
             mistral_transcription_model: env_opt("OPENPLANTER_MISTRAL_TRANSCRIPTION_MODEL")
                 .or_else(|| env_opt("MISTRAL_TRANSCRIPTION_MODEL"))
                 .unwrap_or_else(|| MISTRAL_TRANSCRIPTION_DEFAULT_MODEL.into()),
+            stt_profile_id: None,
+            stt_profile_name: None,
             mistral_transcription_max_bytes: env_int(
                 "OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES",
                 100 * 1024 * 1024,

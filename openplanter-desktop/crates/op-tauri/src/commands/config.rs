@@ -1,11 +1,13 @@
 use crate::state::AppState;
 use op_core::config::{
-    has_openai_auth, normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel,
-    normalize_continuity_mode, normalize_embeddings_provider, normalize_model_alias,
-    normalize_recursion_policy, normalize_web_search_provider, normalize_zai_plan,
-    resolve_zai_base_url,
+    default_embeddings_base_url, default_embeddings_model, has_openai_auth,
+    normalize_chrome_mcp_browser_url, normalize_chrome_mcp_channel, normalize_continuity_mode,
+    normalize_embeddings_provider, normalize_model_alias, normalize_recursion_policy,
+    normalize_web_search_provider, normalize_zai_plan, resolve_zai_base_url,
 };
-use op_core::config_hydration::merge_credentials_into_config;
+use op_core::config_hydration::{
+    apply_embedding_profile, apply_llm_profile, apply_stt_profile, merge_credentials_into_config,
+};
 use op_core::credentials::{
     CredentialBundle, CredentialStore, credentials_from_env, discover_env_candidates,
     parse_env_file,
@@ -25,6 +27,7 @@ async fn make_config_view(
     let chrome_status = state.chrome_mcp_status(cfg).await;
     let embeddings_status = build_embeddings_status(
         &cfg.embeddings_provider,
+        Some(&cfg.embeddings_model),
         cfg.voyage_api_key.as_deref(),
         cfg.mistral_api_key.as_deref(),
     );
@@ -32,13 +35,28 @@ async fn make_config_view(
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         reasoning_effort: cfg.reasoning_effort.clone(),
+        llm_profile_id: cfg.llm_profile_id.clone(),
+        llm_profile_name: cfg.llm_profile_name.clone(),
         zai_plan: cfg.zai_plan.clone(),
         web_search_provider: cfg.web_search_provider.clone(),
         embeddings_provider: cfg.embeddings_provider.clone(),
+        embeddings_model: cfg.embeddings_model.clone(),
+        embedding_profile_id: cfg.embedding_profile_id.clone(),
+        embedding_profile_name: cfg.embedding_profile_name.clone(),
         embeddings_status: embeddings_status.status,
         embeddings_status_detail: embeddings_status.detail,
         embeddings_mode: RETRIEVAL_MODE.to_string(),
         embeddings_packet_version: RETRIEVAL_PACKET_VERSION.to_string(),
+        stt_profile_id: cfg.stt_profile_id.clone(),
+        stt_profile_name: cfg.stt_profile_name.clone(),
+        stt_provider: "mistral".to_string(),
+        stt_model: cfg.mistral_transcription_model.clone(),
+        stt_base_url: cfg.mistral_transcription_base_url.clone(),
+        stt_max_bytes: cfg.mistral_transcription_max_bytes,
+        stt_chunk_max_seconds: cfg.mistral_transcription_chunk_max_seconds,
+        stt_chunk_overlap_seconds: cfg.mistral_transcription_chunk_overlap_seconds,
+        stt_max_chunks: cfg.mistral_transcription_max_chunks,
+        stt_request_timeout_sec: cfg.mistral_transcription_request_timeout_sec,
         continuity_mode: cfg.continuity_mode.clone(),
         mistral_document_ai_use_shared_key: cfg.mistral_document_ai_use_shared_key,
         chrome_mcp_enabled: cfg.chrome_mcp_enabled,
@@ -73,6 +91,18 @@ fn merge_settings(
     incoming: PersistentSettings,
 ) -> PersistentSettings {
     PersistentSettings {
+        active_profiles: {
+            let mut active = existing.active_profiles;
+            active.extend(incoming.active_profiles);
+            active
+        },
+        profiles: {
+            let mut profiles = existing.profiles;
+            for (modality, incoming_pool) in incoming.profiles {
+                profiles.entry(modality).or_default().extend(incoming_pool);
+            }
+            profiles
+        },
         default_investigation_id: incoming
             .default_investigation_id
             .or(existing.default_investigation_id),
@@ -103,6 +133,27 @@ fn merge_settings(
         embeddings_provider: incoming
             .embeddings_provider
             .or(existing.embeddings_provider),
+        mistral_transcription_base_url: incoming
+            .mistral_transcription_base_url
+            .or(existing.mistral_transcription_base_url),
+        mistral_transcription_model: incoming
+            .mistral_transcription_model
+            .or(existing.mistral_transcription_model),
+        mistral_transcription_max_bytes: incoming
+            .mistral_transcription_max_bytes
+            .or(existing.mistral_transcription_max_bytes),
+        mistral_transcription_chunk_max_seconds: incoming
+            .mistral_transcription_chunk_max_seconds
+            .or(existing.mistral_transcription_chunk_max_seconds),
+        mistral_transcription_chunk_overlap_seconds: incoming
+            .mistral_transcription_chunk_overlap_seconds
+            .or(existing.mistral_transcription_chunk_overlap_seconds),
+        mistral_transcription_max_chunks: incoming
+            .mistral_transcription_max_chunks
+            .or(existing.mistral_transcription_max_chunks),
+        mistral_transcription_request_timeout_sec: incoming
+            .mistral_transcription_request_timeout_sec
+            .or(existing.mistral_transcription_request_timeout_sec),
         continuity_mode: incoming.continuity_mode.or(existing.continuity_mode),
         recursive: incoming.recursive.or(existing.recursive),
         recursion_policy: incoming.recursion_policy.or(existing.recursion_policy),
@@ -151,6 +202,14 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigView, String
     Ok(make_config_view(&cfg, session_id, &state).await)
 }
 
+/// Get normalized persistent settings for the current workspace.
+#[tauri::command]
+pub async fn get_settings(state: State<'_, AppState>) -> Result<PersistentSettings, String> {
+    let cfg = state.config.lock().await;
+    let store = SettingsStore::new(&cfg.workspace, &cfg.session_root_dir);
+    Ok(store.load())
+}
+
 /// Update configuration fields.
 #[tauri::command]
 pub async fn update_config(
@@ -158,11 +217,60 @@ pub async fn update_config(
     state: State<'_, AppState>,
 ) -> Result<ConfigView, String> {
     let mut cfg = state.config.lock().await;
+    let needs_profile_settings = partial.llm_profile_id.is_some()
+        || partial.embedding_profile_id.is_some()
+        || partial.stt_profile_id.is_some();
+    let profile_settings = if needs_profile_settings {
+        let store = SettingsStore::new(&cfg.workspace, &cfg.session_root_dir);
+        Some(store.load())
+    } else {
+        None
+    };
+    if let Some(profile_id) = partial.llm_profile_id {
+        let profile_id = profile_id.trim();
+        let settings = profile_settings
+            .as_ref()
+            .ok_or_else(|| "Profile settings were not loaded".to_string())?;
+        let profile = settings
+            .profiles
+            .get("llm")
+            .and_then(|pool| pool.get(profile_id))
+            .ok_or_else(|| format!("Unknown LLM profile: {profile_id}"))?;
+        apply_llm_profile(&mut cfg, profile_id, profile);
+    }
+    if let Some(profile_id) = partial.embedding_profile_id {
+        let profile_id = profile_id.trim();
+        let settings = profile_settings
+            .as_ref()
+            .ok_or_else(|| "Profile settings were not loaded".to_string())?;
+        let profile = settings
+            .profiles
+            .get("embedding")
+            .and_then(|pool| pool.get(profile_id))
+            .ok_or_else(|| format!("Unknown embedding profile: {profile_id}"))?;
+        apply_embedding_profile(&mut cfg, profile_id, profile);
+    }
+    if let Some(profile_id) = partial.stt_profile_id {
+        let profile_id = profile_id.trim();
+        let settings = profile_settings
+            .as_ref()
+            .ok_or_else(|| "Profile settings were not loaded".to_string())?;
+        let profile = settings
+            .profiles
+            .get("stt")
+            .and_then(|pool| pool.get(profile_id))
+            .ok_or_else(|| format!("Unknown STT profile: {profile_id}"))?;
+        apply_stt_profile(&mut cfg, profile_id, profile);
+    }
     if let Some(provider) = partial.provider {
         cfg.provider = provider;
+        cfg.llm_profile_id = None;
+        cfg.llm_profile_name = None;
     }
     if let Some(model) = partial.model {
         cfg.model = normalize_model_alias(&model);
+        cfg.llm_profile_id = None;
+        cfg.llm_profile_name = None;
     }
     if let Some(effort) = partial.reasoning_effort {
         cfg.reasoning_effort = if effort.is_empty() {
@@ -184,6 +292,22 @@ pub async fn update_config(
     }
     if let Some(provider) = partial.embeddings_provider {
         cfg.embeddings_provider = normalize_embeddings_provider(Some(&provider));
+        cfg.embeddings_model = default_embeddings_model(Some(&cfg.embeddings_provider));
+        cfg.embeddings_base_url = default_embeddings_base_url(Some(&cfg.embeddings_provider));
+        cfg.embedding_profile_id = None;
+        cfg.embedding_profile_name = None;
+    }
+    if let Some(model) = partial.stt_model {
+        cfg.mistral_transcription_model = model.trim().to_string();
+        cfg.stt_profile_id = None;
+        cfg.stt_profile_name = None;
+    }
+    if let Some(base_url) = partial.stt_base_url {
+        if !base_url.trim().is_empty() {
+            cfg.mistral_transcription_base_url = base_url.trim().trim_end_matches('/').to_string();
+            cfg.stt_profile_id = None;
+            cfg.stt_profile_name = None;
+        }
     }
     if let Some(mode) = partial.continuity_mode {
         cfg.continuity_mode = normalize_continuity_mode(Some(&mode));

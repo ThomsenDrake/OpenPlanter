@@ -258,13 +258,21 @@ def _provider_limits(provider: str) -> EmbeddingsProviderLimits:
 
 
 class EmbeddingsClient:
-    def __init__(self, provider: str, api_key: str) -> None:
+    def __init__(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self.provider = normalize_embeddings_provider(provider)
         self.api_key = api_key.strip()
-        self.model = (
-            VOYAGE_EMBEDDING_MODEL
-            if self.provider == "voyage"
-            else MISTRAL_EMBEDDING_MODEL
+        self.model = (model or "").strip() or (
+            VOYAGE_EMBEDDING_MODEL if self.provider == "voyage" else MISTRAL_EMBEDDING_MODEL
+        )
+        self.base_url = (base_url or "").strip().rstrip("/") or (
+            "https://api.voyageai.com" if self.provider == "voyage" else "https://api.mistral.ai"
         )
         self.limits = _provider_limits(self.provider)
 
@@ -284,9 +292,11 @@ class EmbeddingsClient:
         return _mean_pool_vectors(vectors)
 
     def _endpoint(self) -> str:
-        if self.provider == "voyage":
-            return "https://api.voyageai.com/v1/embeddings"
-        return "https://api.mistral.ai/v1/embeddings"
+        if self.base_url.endswith("/embeddings"):
+            return self.base_url
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/embeddings"
+        return f"{self.base_url}/v1/embeddings"
 
     def _embed(self, texts: list[str], *, input_type: str) -> list[list[float]]:
         if not texts:
@@ -371,11 +381,12 @@ def embeddings_model_for_provider(provider: str) -> str:
 def build_embeddings_status(
     *,
     provider: str,
+    embeddings_model: str | None = None,
     voyage_api_key: str | None,
     mistral_api_key: str | None,
 ) -> RetrievalStatus:
     normalized = normalize_embeddings_provider(provider)
-    model = embeddings_model_for_provider(normalized)
+    model = (embeddings_model or "").strip() or embeddings_model_for_provider(normalized)
     api_key = (
         (voyage_api_key or "").strip()
         if normalized == "voyage"
@@ -411,12 +422,15 @@ def build_retrieval_packet(
     objective: str,
     question_reasoning_packet: dict[str, Any] | None,
     embeddings_provider: str,
+    embeddings_model: str | None = None,
+    embeddings_base_url: str | None = None,
     voyage_api_key: str | None,
     mistral_api_key: str | None,
     on_event: Callable[[str], None] | None = None,
 ) -> RetrievalBuildResult:
     status = build_embeddings_status(
         provider=embeddings_provider,
+        embeddings_model=embeddings_model,
         voyage_api_key=voyage_api_key,
         mistral_api_key=mistral_api_key,
     )
@@ -430,7 +444,7 @@ def build_retrieval_packet(
         )
 
     api_key = (voyage_api_key or "").strip() if status.provider == "voyage" else (mistral_api_key or "").strip()
-    client = EmbeddingsClient(status.provider, api_key)
+    client = EmbeddingsClient(status.provider, api_key, model=status.model, base_url=embeddings_base_url)
     _emit_progress(
         on_event,
         RetrievalProgress(

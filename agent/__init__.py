@@ -12,7 +12,7 @@ from .model import (
     ToolResult,
 )
 from .runtime import SessionRuntime, SessionStore
-from .settings import PersistentSettings, SettingsStore
+from .settings import PersistentSettings, ProviderProfile, SettingsStore
 from .tools import WorkspaceTools
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "ModelTurn",
     "OpenAICompatibleModel",
     "PersistentSettings",
+    "ProviderProfile",
     "RLMEngine",
     "SessionRuntime",
     "SessionStore",

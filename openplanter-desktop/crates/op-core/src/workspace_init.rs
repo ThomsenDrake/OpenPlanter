@@ -731,6 +731,23 @@ fn merge_settings_missing(
     incoming: &PersistentSettings,
     filled_fields: &mut Vec<String>,
 ) {
+    for (modality, profile_id) in &incoming.active_profiles {
+        if !target.active_profiles.contains_key(modality) {
+            target
+                .active_profiles
+                .insert(modality.clone(), profile_id.clone());
+            filled_fields.push(format!("active_profiles.{modality}"));
+        }
+    }
+    for (modality, incoming_pool) in &incoming.profiles {
+        let target_pool = target.profiles.entry(modality.clone()).or_default();
+        for (profile_id, profile) in incoming_pool {
+            if !target_pool.contains_key(profile_id) {
+                target_pool.insert(profile_id.clone(), profile.clone());
+                filled_fields.push(format!("profiles.{modality}.{profile_id}"));
+            }
+        }
+    }
     macro_rules! fill {
         ($field:ident) => {
             if target.$field.is_none() && incoming.$field.is_some() {
@@ -750,6 +767,13 @@ fn merge_settings_missing(
     fill!(zai_plan);
     fill!(web_search_provider);
     fill!(embeddings_provider);
+    fill!(mistral_transcription_base_url);
+    fill!(mistral_transcription_model);
+    fill!(mistral_transcription_max_bytes);
+    fill!(mistral_transcription_chunk_max_seconds);
+    fill!(mistral_transcription_chunk_overlap_seconds);
+    fill!(mistral_transcription_max_chunks);
+    fill!(mistral_transcription_request_timeout_sec);
     fill!(mistral_document_ai_use_shared_key);
 }
 

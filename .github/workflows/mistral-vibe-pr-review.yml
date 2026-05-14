@@ -116,7 +116,7 @@ jobs:
 
           find_existing_review() {
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
-              --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.body | contains(\"$REVIEW_MARKER\")) | select(.body | contains(\"Head SHA: $PR_HEAD_SHA\")) | .html_url" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.body | contains(\"$REVIEW_MARKER\")) | select((.body | contains(\"Head SHA: $PR_HEAD_SHA\")) or (.body | contains(\"**Head SHA:** $PR_HEAD_SHA\"))) | .html_url" \
               | head -n 1
           }
 

@@ -167,6 +167,97 @@ describe("handleModelCommand", () => {
     expect(appState.get().zaiPlan).toBe("coding");
   });
 
+  it("save preserves existing LLM profile endpoint and options", async () => {
+    __setHandler("get_settings", () => ({
+      active_profiles: { llm: "zai-glm-5" },
+      profiles: {
+        llm: {
+          "zai-glm-5": {
+            name: "Z.AI custom",
+            provider: "zai",
+            adapter: "openai-compatible",
+            model: "glm-5",
+            base_url: "https://zai.example.test/v1",
+            auth_ref: "zai-custom",
+            options: { reasoning_effort: "high", zai_plan: "coding" },
+          },
+        },
+      },
+    }));
+    __setHandler("update_config", ({ partial }: { partial: Record<string, string> }) => {
+      expect(partial.model).toBe("glm-5");
+      expect(partial.provider).toBe("zai");
+      return {
+        provider: "zai",
+        model: "glm-5",
+        zai_plan: "coding",
+        workspace: ".",
+        session_id: null,
+        recursive: true,
+        max_depth: 4,
+        max_steps_per_call: 100,
+        reasoning_effort: "high",
+        web_search_provider: "exa",
+        demo: false,
+      };
+    });
+    __setHandler("save_settings", ({ settings }: { settings: Record<string, any> }) => {
+      const profile = settings.profiles.llm["zai-glm-5"];
+      expect(profile.name).toBe("Z.AI custom");
+      expect(profile.base_url).toBe("https://zai.example.test/v1");
+      expect(profile.auth_ref).toBe("zai-custom");
+      expect(profile.options).toEqual({ reasoning_effort: "high", zai_plan: "coding" });
+    });
+
+    const result = await handleModelCommand("zai --save");
+    expect(result.lines).toContain("(Saved LLM profile: zai-glm-5)");
+  });
+
+  it("profile switches to a saved LLM profile", async () => {
+    __setHandler("get_settings", () => ({
+      active_profiles: { llm: "anthropic-default" },
+      profiles: {
+        llm: {
+          "azure-foundry": {
+            name: "Azure Foundry GPT",
+            provider: "openai",
+            adapter: "openai-compatible",
+            model: "azure-foundry/gpt-5.5",
+            auth_ref: "openai",
+          },
+        },
+      },
+    }));
+    __setHandler("update_config", ({ partial }: { partial: Record<string, string> }) => {
+      expect(partial.llm_profile_id).toBe("azure-foundry");
+      return {
+        provider: "openai",
+        model: "azure-foundry/gpt-5.5",
+        llm_profile_id: "azure-foundry",
+        llm_profile_name: "Azure Foundry GPT",
+        zai_plan: "paygo",
+        workspace: ".",
+        session_id: null,
+        recursive: true,
+        max_depth: 4,
+        max_steps_per_call: 100,
+        reasoning_effort: "high",
+        web_search_provider: "exa",
+        demo: false,
+      };
+    });
+    __setHandler("save_settings", ({ settings }: { settings: Record<string, any> }) => {
+      expect(settings.active_profiles.llm).toBe("azure-foundry");
+    });
+
+    const result = await handleModelCommand("profile azure-foundry");
+    expect(result.lines).toContain("Switched to LLM profile: azure-foundry");
+    expect(appState.get().provider).toBe("openai");
+    expect(appState.get().model).toBe("azure-foundry/gpt-5.5");
+    expect(appState.get().llmProfileId).toBe("azure-foundry");
+    expect(appState.get().reasoningEffort).toBe("high");
+  });
+
   it("gpt5 alias switches to gpt-5.5", async () => {
     __setHandler("update_config", ({ partial }: { partial: Record<string, string> }) => {
       expect(partial.model).toBe("azure-foundry/gpt-5.5");

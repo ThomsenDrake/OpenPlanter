@@ -73,13 +73,22 @@ export interface ChatMessage {
 export interface AppState {
   provider: string;
   model: string;
+  llmProfileId: string | null;
+  llmProfileName: string | null;
   zaiPlan: string;
   webSearchProvider: string;
   embeddingsProvider: string;
+  embeddingsModel: string;
+  embeddingProfileId: string | null;
+  embeddingProfileName: string | null;
   embeddingsStatus: string;
   embeddingsStatusDetail: string;
   embeddingsMode: string;
   embeddingsPacketVersion: string;
+  sttProfileId: string | null;
+  sttProfileName: string | null;
+  sttProvider: string;
+  sttModel: string;
   retrievalProgressActive: boolean;
   retrievalProgressLabel: string | null;
   retrievalProgressPercent: number | null;
@@ -136,13 +145,22 @@ export interface AppState {
 export const appState = new Store<AppState>({
   provider: "",
   model: "",
+  llmProfileId: null,
+  llmProfileName: null,
   zaiPlan: "paygo",
   webSearchProvider: "exa",
   embeddingsProvider: "voyage",
+  embeddingsModel: "voyage-4",
+  embeddingProfileId: null,
+  embeddingProfileName: null,
   embeddingsStatus: "disabled",
   embeddingsStatusDetail: "Retrieval disabled: VOYAGE_API_KEY is not configured for voyage. Hybrid mode: documents+ontology (retrieval-v3).",
   embeddingsMode: "documents+ontology",
   embeddingsPacketVersion: "retrieval-v3",
+  sttProfileId: null,
+  sttProfileName: null,
+  sttProvider: "mistral",
+  sttModel: "voxtral-mini-latest",
   retrievalProgressActive: false,
   retrievalProgressLabel: null,
   retrievalProgressPercent: null,

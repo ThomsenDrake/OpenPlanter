@@ -1521,6 +1521,8 @@ class RLMEngine:
             objective=objective,
             question_reasoning_packet=refreshed_packet,
             embeddings_provider=self.config.embeddings_provider,
+            embeddings_model=self.config.embeddings_model,
+            embeddings_base_url=self.config.embeddings_base_url,
             voyage_api_key=self.config.voyage_api_key,
             mistral_api_key=self.config.mistral_api_key,
             on_event=on_event,

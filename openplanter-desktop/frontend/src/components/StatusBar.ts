@@ -54,15 +54,20 @@ export function createStatusBar(): HTMLElement {
   function render() {
     const s = appState.get();
     providerEl.textContent = s.provider || "\u2014";
-    modelEl.textContent = s.model || "\u2014";
+    modelEl.textContent =
+      `${s.model || "\u2014"}${s.llmProfileName || s.llmProfileId ? ` [${s.llmProfileName || s.llmProfileId}]` : ""}`;
     reasoningEl.textContent = s.reasoningEffort
       ? `reasoning:${s.reasoningEffort}`
       : "";
     zaiPlanEl.textContent =
       s.provider === "zai" ? `zai:${s.zaiPlan || "paygo"}` : "";
     continuityEl.textContent = `continuity:${s.continuityMode || "auto"}`;
+    const embeddingProfile = s.embeddingProfileName || s.embeddingProfileId;
+    const sttProfile = s.sttProfileName || s.sttProfileId;
     embeddingsEl.textContent =
       `emb:${s.embeddingsProvider || "voyage"}:${s.embeddingsStatus || "disabled"}` +
+      `${embeddingProfile ? ` [${embeddingProfile}]` : ""}` +
+      `${sttProfile ? ` stt:${s.sttProvider || "mistral"}:${s.sttModel || "voxtral-mini-latest"} [${sttProfile}]` : ""}` +
       ` hybrid:${s.embeddingsPacketVersion || "retrieval-v3"}`;
     retrievalEl.textContent = s.retrievalProgressActive
       ? `index:${s.retrievalProgressPercent ?? 0}% ${s.retrievalProgressLabel || "vectorizing"}`

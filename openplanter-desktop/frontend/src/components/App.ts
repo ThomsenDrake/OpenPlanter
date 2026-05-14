@@ -120,9 +120,12 @@ export function createApp(root: HTMLElement): void {
     settingsDisplay.innerHTML = [
       `<div><span class="label">provider:</span> <span class="value">${s.provider || "auto"}</span></div>`,
       `<div><span class="label">model:</span> <span class="value">${s.model || "\u2014"}</span></div>`,
+      `<div><span class="label">llm profile:</span> <span class="value">${s.llmProfileName || s.llmProfileId || "\u2014"}</span></div>`,
       `<div><span class="label">z.ai plan:</span> <span class="value">${s.zaiPlan || "paygo"}</span></div>`,
       `<div><span class="label">web search:</span> <span class="value">${s.webSearchProvider || "exa"}</span></div>`,
-      `<div><span class="label">retrieval:</span> <span class="value">${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"}, ${s.embeddingsMode || "documents+ontology"} ${s.embeddingsPacketVersion || "retrieval-v3"})</span></div>`,
+      `<div><span class="label">retrieval:</span> <span class="value">${s.embeddingsProvider || "voyage"}:${s.embeddingsModel || "voyage-4"} (${s.embeddingsStatus || "disabled"}, ${s.embeddingsMode || "documents+ontology"} ${s.embeddingsPacketVersion || "retrieval-v3"})</span></div>`,
+      `<div><span class="label">embedding profile:</span> <span class="value">${s.embeddingProfileName || s.embeddingProfileId || "\u2014"}</span></div>`,
+      `<div><span class="label">audio stt:</span> <span class="value">${s.sttProvider || "mistral"}:${s.sttModel || "voxtral-mini-latest"} (${s.sttProfileName || s.sttProfileId || "no profile"})</span></div>`,
       `<div><span class="label">vectorization:</span> <span class="value">${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}</span></div>`,
       `<div><span class="label">continuity:</span> <span class="value">${s.continuityMode || "auto"}</span></div>`,
       `<div><span class="label">document ai key:</span> <span class="value">${s.mistralDocumentAiUseSharedKey ? "shared" : "override"}</span></div>`,

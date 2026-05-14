@@ -25,6 +25,7 @@ fn main() {
             commands::agent::cancel,
             commands::agent::debug_log,
             commands::config::get_config,
+            commands::config::get_settings,
             commands::config::update_config,
             commands::config::list_models,
             commands::config::save_settings,

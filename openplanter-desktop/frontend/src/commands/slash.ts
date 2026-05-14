@@ -12,6 +12,7 @@ import { handleContinuityCommand } from "./continuity";
 import { handleRecursionCommand } from "./recursion";
 import { handleMistralCommand, MISTRAL_USAGE } from "./mistral";
 import { handleObsidianCommand, OBSIDIAN_USAGE } from "./obsidian";
+import { handleSttCommand } from "./stt";
 
 /** Dispatch a slash command. Returns null if not a slash command. */
 export async function dispatchSlashCommand(input: string): Promise<CommandResult | null> {
@@ -37,12 +38,17 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
           "  /model <name>       Switch model (auto-detects provider)",
           "  /model <name> --save  Switch and persist",
           "  /model list [provider]  List available models",
+          "  /model profiles | /model profile <id>  List or switch saved LLM profiles",
           "  /zai-plan          Show current Z.AI endpoint family",
           "  /zai-plan <plan>   Set Z.AI endpoint family (paygo, coding)",
           "  /zai-plan <plan> --save  Set and persist",
           "  /embeddings        Show current embeddings provider and retrieval status",
           "  /embeddings <provider>  Set embeddings provider (voyage, mistral)",
           "  /embeddings <provider> --save  Set and persist",
+          "  /embeddings profiles | /embeddings profile <id>  List or switch saved embedding profiles",
+          "  /stt               Show current audio/STT profile",
+          "  /stt <model> --save  Set and persist audio/STT model",
+          "  /stt profiles | /stt profile <id>  List or switch saved STT profiles",
           "  /web-search        Show current web search provider",
           "  /web-search <provider>  Set web search provider (exa, firecrawl, brave, tavily)",
           "  /web-search <provider> --save  Set and persist",
@@ -111,8 +117,12 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
         lines: [
           `Provider:    ${s.provider || "auto"}`,
           `Model:       ${s.model || "—"}`,
+          `LLM profile: ${s.llmProfileName || s.llmProfileId || "—"}`,
           `Z.AI plan:   ${s.zaiPlan || "paygo"}`,
-          `Embeddings:  ${s.embeddingsProvider || "voyage"} (${s.embeddingsStatus || "disabled"})`,
+          `Embeddings:  ${s.embeddingsProvider || "voyage"} / ${s.embeddingsModel || "—"} (${s.embeddingsStatus || "disabled"})`,
+          `Emb profile: ${s.embeddingProfileName || s.embeddingProfileId || "—"}`,
+          `Audio/STT:   ${s.sttProvider || "mistral"} / ${s.sttModel || "voxtral-mini-latest"}`,
+          `STT profile: ${s.sttProfileName || s.sttProfileId || "—"}`,
           `Retrieval:   ${s.embeddingsStatusDetail}`,
           `Hybrid:      ${s.embeddingsMode || "documents+ontology"} (${s.embeddingsPacketVersion || "retrieval-v3"})`,
           `Vectorize:   ${s.retrievalProgressActive ? (s.retrievalProgressLabel || "in progress") : "idle"}`,
@@ -144,6 +154,9 @@ export async function dispatchSlashCommand(input: string): Promise<CommandResult
 
     case "/embeddings":
       return handleEmbeddingsCommand(args);
+
+    case "/stt":
+      return handleSttCommand(args);
 
     case "/web-search":
       return handleWebSearchCommand(args);

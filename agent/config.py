@@ -28,6 +28,14 @@ CHROME_MCP_CONNECT_TIMEOUT_SEC = 15
 CHROME_MCP_RPC_TIMEOUT_SEC = 45
 VALID_CHROME_MCP_CHANNELS: set[str] = {"stable", "beta", "dev", "canary"}
 VALID_EMBEDDINGS_PROVIDERS: set[str] = {"voyage", "mistral"}
+EMBEDDING_DEFAULT_MODELS: dict[str, str] = {
+    "voyage": "voyage-4",
+    "mistral": "mistral-embed",
+}
+EMBEDDING_DEFAULT_BASE_URLS: dict[str, str] = {
+    "voyage": "https://api.voyageai.com",
+    "mistral": "https://api.mistral.ai",
+}
 VALID_OBSIDIAN_EXPORT_MODES: set[str] = {"fresh_vault", "existing_vault_folder"}
 DEFAULT_OBSIDIAN_EXPORT_SUBDIR = "Cestus"
 
@@ -61,6 +69,14 @@ def normalize_embeddings_provider(value: str | None) -> str:
     if cleaned in VALID_EMBEDDINGS_PROVIDERS:
         return cleaned
     return "voyage"
+
+
+def default_embeddings_model(provider: str | None) -> str:
+    return EMBEDDING_DEFAULT_MODELS[normalize_embeddings_provider(provider)]
+
+
+def default_embeddings_base_url(provider: str | None) -> str:
+    return EMBEDDING_DEFAULT_BASE_URLS[normalize_embeddings_provider(provider)]
 
 
 def normalize_obsidian_export_mode(value: str | None) -> str:
@@ -166,6 +182,8 @@ class AgentConfig:
     provider: str = "auto"
     model: str = "anthropic-foundry/claude-opus-4-6"
     reasoning_effort: str | None = "xhigh"
+    llm_profile_id: str | None = None
+    llm_profile_name: str | None = None
     base_url: str = FOUNDRY_OPENAI_BASE_URL  # Legacy alias for OpenAI-compatible base URL.
     api_key: str | None = None  # Legacy alias for OpenAI key.
     openai_base_url: str = FOUNDRY_OPENAI_BASE_URL
@@ -195,6 +213,10 @@ class AgentConfig:
     tavily_api_key: str | None = None
     web_search_provider: str = "exa"
     embeddings_provider: str = "voyage"
+    embeddings_model: str = "voyage-4"
+    embeddings_base_url: str = "https://api.voyageai.com"
+    embedding_profile_id: str | None = None
+    embedding_profile_name: str | None = None
     voyage_api_key: str | None = None
     mistral_api_key: str | None = None
     mistral_document_ai_api_key: str | None = None
@@ -207,6 +229,8 @@ class AgentConfig:
     )
     mistral_transcription_api_key: str | None = None
     mistral_transcription_model: str = MISTRAL_TRANSCRIPTION_DEFAULT_MODEL
+    stt_profile_id: str | None = None
+    stt_profile_name: str | None = None
     mistral_transcription_max_bytes: int = 100 * 1024 * 1024
     mistral_transcription_chunk_max_seconds: int = MISTRAL_TRANSCRIPTION_CHUNK_MAX_SECONDS
     mistral_transcription_chunk_overlap_seconds: float = (
@@ -274,6 +298,14 @@ class AgentConfig:
         )
         self.chrome_mcp_channel = normalize_chrome_mcp_channel(self.chrome_mcp_channel)
         self.embeddings_provider = normalize_embeddings_provider(self.embeddings_provider)
+        self.embeddings_model = (
+            (self.embeddings_model or "").strip()
+            or default_embeddings_model(self.embeddings_provider)
+        )
+        self.embeddings_base_url = (
+            (self.embeddings_base_url or "").strip().rstrip("/")
+            or default_embeddings_base_url(self.embeddings_provider)
+        )
         self.obsidian_export_mode = normalize_obsidian_export_mode(self.obsidian_export_mode)
         self.chrome_mcp_connect_timeout_sec = max(1, int(self.chrome_mcp_connect_timeout_sec))
         self.chrome_mcp_rpc_timeout_sec = max(1, int(self.chrome_mcp_rpc_timeout_sec))
@@ -346,6 +378,14 @@ class AgentConfig:
         embeddings_provider = normalize_embeddings_provider(
             os.getenv("OPENPLANTER_EMBEDDINGS_PROVIDER", "voyage")
         )
+        embeddings_model = (
+            os.getenv("OPENPLANTER_EMBEDDINGS_MODEL", "").strip()
+            or default_embeddings_model(embeddings_provider)
+        )
+        embeddings_base_url = (
+            os.getenv("OPENPLANTER_EMBEDDINGS_BASE_URL", "").strip()
+            or default_embeddings_base_url(embeddings_provider)
+        )
         budget_extension_enabled = (os.getenv("OPENPLANTER_BUDGET_EXTENSION_ENABLED", "true").strip().lower() in {"1", "true", "yes"})
         budget_extension_block_steps = max(
             1,
@@ -362,6 +402,8 @@ class AgentConfig:
             provider=os.getenv("OPENPLANTER_PROVIDER", "auto").strip().lower() or "auto",
             model=os.getenv("OPENPLANTER_MODEL", PROVIDER_DEFAULT_MODELS["anthropic"]),
             reasoning_effort=(os.getenv("OPENPLANTER_REASONING_EFFORT", "xhigh").strip().lower() or None),
+            llm_profile_id=None,
+            llm_profile_name=None,
             base_url=openai_base_url,
             api_key=openai_api_key,
             openai_base_url=openai_base_url,
@@ -401,6 +443,10 @@ class AgentConfig:
             tavily_api_key=tavily_api_key,
             web_search_provider=web_search_provider,
             embeddings_provider=embeddings_provider,
+            embeddings_model=embeddings_model,
+            embeddings_base_url=embeddings_base_url,
+            embedding_profile_id=None,
+            embedding_profile_name=None,
             voyage_api_key=voyage_api_key,
             mistral_api_key=(mistral_api_key or "").strip() or None,
             mistral_document_ai_api_key=(
@@ -438,6 +484,8 @@ class AgentConfig:
                 or os.getenv("MISTRAL_TRANSCRIPTION_MODEL")
                 or MISTRAL_TRANSCRIPTION_DEFAULT_MODEL
             ),
+            stt_profile_id=None,
+            stt_profile_name=None,
             mistral_transcription_max_bytes=int(
                 os.getenv("OPENPLANTER_MISTRAL_TRANSCRIPTION_MAX_BYTES", "104857600")
             ),
